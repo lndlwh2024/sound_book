@@ -448,6 +448,12 @@ class TaskManager:
                 ch_title = chunk.chapter_id
                 print(f"\r正在生成语音 | 《{self.display_name}》 | 当前章节: {ch_title} | 总体进度: {pct}%", end="", flush=True)
 
+                # 支持用户指定单次生成上限（如仅试听前 2 块）
+                max_chunks = self.params.get("max_chunks")
+                if max_chunks is not None and (success_count + failed_count) >= max_chunks:
+                    logger.info(f"已达到本次最大合成数量限制 (--max-chunks={max_chunks})，提前停止批次生成")
+                    break
+
         print() # 换行
 
         if failed_count > 0:

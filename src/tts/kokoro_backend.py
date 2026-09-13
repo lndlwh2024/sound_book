@@ -1,3 +1,4 @@
+import os
 import json
 import logging
 import subprocess
@@ -13,11 +14,11 @@ logger = logging.getLogger(__name__)
 
 class KokoroBackend(TTSBackend):
     """
-    Kokoro TTS ???Task-scoped Persistent Worker ????
-    ????? TTS ?????? Worker ???????????
-    ???? ModelManager ?????????????????????????????????
-    ?? stdin / stdout + JSON Lines ?? Chunk ?????
-    ???????????????????
+    Kokoro TTS 后端，采用 Task-scoped Persistent Worker 架构设计。
+    整本书的 TTS 合成阶段只启动一个 Worker 进程，模型仅初始化一次。
+    集成 ModelManager 统一管理官方模型（hexgrad/Kokoro-82M-v1.1-zh）的流式下载与持久缓存。
+    使用 stdin / stdout + JSON Lines 进行 Chunk 任务交互。
+    支持自动重试与崩溃自愈保护。
     """
     
     def __init__(self, config: dict):
@@ -33,30 +34,36 @@ class KokoroBackend(TTSBackend):
         return "kokoro"
 
     def start_session(self, options: Optional[Dict[str, Any]] = None) -> None:
-        """????? Worker ???????????????????"""
+        """启动长驻 Worker 进程并完成握手，模型常驻内存"""
         if self._process is not None and self._process.poll() is None:
             return
 
-        # ????????????????????????????
+        # 获取或缓存模型文件，避免每个 worker 重复触发下载检查
         if self._cached_model_path is None or not self._cached_model_path.exists():
             try:
                 self._cached_model_path = ModelManager.ensure_model("kokoro", self._config)
             except Exception as e:
-                logger.error(f"Kokoro ??????: {e}")
-                # ???????????? worker ?????
+                logger.error(f"Kokoro 模型准备失败: {e}")
+                # 即使下载失败也尝试启动 worker 使用在线回退
                 self._cached_model_path = None
 
-        logger.info("?? Kokoro Task-scoped Persistent Worker ??")
+        logger.info("启动 Kokoro Task-scoped Persistent Worker 进程")
         try:
             cmd = [str(self._python_exe), str(self._worker_path)]
             if self._cached_model_path:
                 cmd.extend(["--model-path", str(self._cached_model_path)])
+
+            # 显式注入 UTF-8 环境变量，杜绝 Windows 平台默认 GBK 代码页对跨进程文本通信的污染
+            worker_env = os.environ.copy()
+            worker_env["PYTHONIOENCODING"] = "utf-8"
+            worker_env["PYTHONUTF8"] = "1"
 
             self._process = subprocess.Popen(
                 cmd,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
+                env=worker_env,
                 text=True,
                 encoding="utf-8",
                 bufsize=1

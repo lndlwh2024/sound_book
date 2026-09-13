@@ -22,6 +22,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto", help="设备选择 (auto/cpu/cuda)")
     parser.add_argument("--output-dir", help="输出目录")
     parser.add_argument("--accept-validation-risk", action="store_true", help="在检测到文本校验风险（NEEDS_REVIEW）时明确接受风险并继续")
+    parser.add_argument("--max-chunks", type=int, default=None, help="本次最多处理的 Chunk 数量，便于阶段性试听和验证")
 
     
     # F5-TTS 专属参数

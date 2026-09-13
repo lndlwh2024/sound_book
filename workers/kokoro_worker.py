@@ -6,6 +6,15 @@ import argparse
 import traceback
 from pathlib import Path
 
+# Windows 跨进程管道默认采用系统代码页（如 GBK/CP936），导致主进程发送的 UTF-8 中文被错误解码为生僻乱码
+# 此处强制将子进程的标准输入、输出、错误流统一配置为 UTF-8，确保中文文本和协议交互原样保真
+if hasattr(sys.stdin, "reconfigure"):
+    sys.stdin.reconfigure(encoding="utf-8")
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8")
+
 def main():
     """
     Kokoro Task-scoped Persistent Worker
@@ -99,6 +108,9 @@ def main():
                 sample_rate = 24000
 
                 for i, (gs, ps, audio) in enumerate(generator):
+                    if i == 0:
+                        sys.stderr.write(f"Synthesizing [{gs[:15]}...] -> phonemes [{ps[:30]}...]\n")
+                        sys.stderr.flush()
                     if audio is not None:
                         all_audio.append(audio)
 
