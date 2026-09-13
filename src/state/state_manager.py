@@ -91,8 +91,6 @@ class StateManager:
         status = chunk.get("status") if isinstance(chunk, dict) else getattr(chunk, "status", None)
         if hasattr(status, "value"):
             status = status.value
-        if status != "SUCCESS":
-            return True
 
         chunk_fp = chunk.get("fingerprint") if isinstance(chunk, dict) else getattr(chunk, "fingerprint", "")
         if current_fingerprint and chunk_fp and chunk_fp != current_fingerprint:
@@ -108,16 +106,37 @@ class StateManager:
         if not audio_path.exists():
             return True
 
-        # 验证 WAV 文件格式是否有效
+        # 验证 WAV 文件格式及帧数是否有效
+        is_audio_valid = False
         try:
             with wave.open(str(audio_path), 'rb') as f:
-                if f.getnframes() <= 0:
-                    return True
+                if f.getnframes() > 0:
+                    is_audio_valid = True
         except Exception:
             # 兼容测试中的 mock 音频文件或占位文件
-            if audio_path.stat().st_size == 0:
-                return True
+            if audio_path.stat().st_size > 0:
+                is_audio_valid = True
 
+        if not is_audio_valid:
+            return True
+
+        # 1. 正常命中缓存
+        if status == "SUCCESS":
+            return False
+
+        # 2. 断点自愈恢复保护：
+        # 若上次任务因为异常崩溃导致状态被标记为 FAILED/RUNNING，但磁盘上已有完整且合法的音频文件，
+        # 且指纹匹配，自动自愈恢复为 SUCCESS，避免重复进行耗时的音频合成。
+        c_id = getattr(chunk, "id", None) or getattr(chunk, "chunk_id", None)
+        logger.info(f"Chunk {c_id}: 检测到磁盘已有合法音频文件，自动自愈为 SUCCESS 并跳过")
+        if isinstance(chunk, dict):
+            chunk["status"] = "SUCCESS"
+            chunk["error_code"] = None
+            chunk["error_message"] = None
+        else:
+            chunk.status = "SUCCESS"
+            chunk.error_code = None
+            chunk.error_message = None
         return False
 
 

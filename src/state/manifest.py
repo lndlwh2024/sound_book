@@ -1,5 +1,6 @@
 import json
 import os
+import time
 import logging
 from pathlib import Path
 from typing import List, Optional, Any
@@ -38,7 +39,7 @@ class ManifestManager:
 
 
     def _atomic_write(self, file_path: Path, data: Any) -> None:
-        """安全地写入 JSON 文件，使用临时文件和原子替换（Replace）策略"""
+        """安全地写入 JSON 文件，使用临时文件和原子替换（Replace）策略，内置 Windows 文件锁重试"""
         temp_path = file_path.with_suffix('.tmp')
         try:
             with open(temp_path, 'w', encoding='utf-8') as f:
@@ -52,11 +53,25 @@ class ManifestManager:
                 json.dump(json_data, f, ensure_ascii=False, indent=2)
                 f.flush()
                 os.fsync(f.fileno())
-            temp_path.replace(file_path)
+            
+            # Windows 环境下当杀毒软件或并发读取占用文件时，replace 会抛出 PermissionError
+            # 通过微延时重试机制（最多重试 5 次）确保跨进程文件替换的鲁棒性
+            max_retries = 5
+            for attempt in range(max_retries):
+                try:
+                    temp_path.replace(file_path)
+                    break
+                except PermissionError:
+                    if attempt == max_retries - 1:
+                        raise
+                    time.sleep(0.05 * (attempt + 1))
         except Exception as e:
             logger.error(f"原子写入文件 {file_path} 失败: {e}")
             if temp_path.exists():
-                temp_path.unlink()
+                try:
+                    temp_path.unlink()
+                except Exception:
+                    pass
             raise
 
     # TTS Manifest

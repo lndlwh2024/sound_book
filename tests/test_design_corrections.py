@@ -228,3 +228,51 @@ def test_5_validation_needs_review(tmp_path):
     tm_accept._validate()
     assert tm_accept.validation_report is not None
     assert tm_accept.validation_report.passed is False
+
+
+def test_6_manifest_retry_and_self_healing(tmp_path, monkeypatch):
+    """
+    Test 6: 验证 Windows 文件替换锁重试机制与断点音频自愈保护机制
+    1. _atomic_write 面对模拟的 PermissionError 能够重试并成功写入；
+    2. should_process_chunk 在面对异常遗留但磁盘上已有合法有效音频的 Chunk 时自动自愈为 SUCCESS 并跳过。
+    """
+    # 1. 验证 atomic write 重试机制
+    manifest_mgr = ManifestManager(book_dir=tmp_path)
+    target_json = tmp_path / "test_manifest.json"
+    
+    # 模拟前 2 次触发 PermissionError，第 3 次成功
+    original_replace = Path.replace
+    attempts = [0]
+    def mock_replace(self, dest):
+        attempts[0] += 1
+        if attempts[0] < 3:
+            raise PermissionError("模拟 Windows 文件占用锁")
+        return original_replace(self, dest)
+
+    monkeypatch.setattr(Path, "replace", mock_replace)
+    manifest_mgr._atomic_write(target_json, {"status": "OK"})
+    assert target_json.exists()
+    assert attempts[0] == 3
+
+    # 2. 验证断点自愈机制
+    state_mgr = StateManager(manifest_mgr)
+    test_wav = tmp_path / "test_audio.wav"
+    test_wav.write_bytes(b"dummy wav content")
+
+    # 构造一个因上次异常退出被标记为 FAILED 的 chunk，但本地音频真实存在
+    failed_chunk = TTSChunk(
+        chunk_id="c1",
+        chapter_id="ch1",
+        order=1,
+        text="测试断点自愈",
+        text_hash="h1",
+        fingerprint="fp1",
+        output_file=str(test_wav),
+        status="FAILED"
+    )
+
+    # 在非 force 且指纹匹配情况下，断点自愈应自动恢复为 SUCCESS 并返回 False (跳过重新生成)
+    should_process = state_mgr.should_process_chunk(failed_chunk, force=False, current_fingerprint="fp1")
+    assert should_process is False
+    assert failed_chunk.status == "SUCCESS"
+
