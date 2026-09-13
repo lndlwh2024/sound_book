@@ -62,28 +62,35 @@ class KokoroBackend(TTSBackend):
                 bufsize=1
             )
             
-            # ????????????
-            ready_line = self._process.stdout.readline()
-            if ready_line:
+            # 读取启动阶段就绪握手信号，跳过第三方库警告
+            while True:
+                ready_line = self._process.stdout.readline()
+                if not ready_line:
+                    break
+                ready_line = ready_line.strip()
+                if not ready_line:
+                    continue
                 try:
-                    init_res = json.loads(ready_line.strip())
-                    if init_res.get("status") == "ERROR":
-                        logger.error(f"Kokoro worker ?????: {init_res.get('error_message')}")
+                    init_res = json.loads(ready_line)
+                    if init_res.get("status") in ["READY", "ERROR"]:
+                        if init_res.get("status") == "ERROR":
+                            logger.error(f"Kokoro worker 初始化失败: {init_res.get('error_message')}")
+                        break
                 except Exception:
-                    pass
+                    continue
         except Exception as e:
-            logger.error(f"???? Kokoro worker ??: {e}")
+            logger.error(f"无法启动 Kokoro worker 进程: {e}")
             self._process = None
 
     def stop_session(self) -> None:
-        """??????? Worker ??"""
+        """安全停止并释放 Worker 进程"""
         if self._process is None:
             return
 
-        logger.info("???? Kokoro Worker ??")
+        logger.info("正在停止 Kokoro Worker 进程")
         try:
             if self._process.poll() is None:
-                # ??????
+                # 发送停止指令
                 try:
                     self._process.stdin.write(json.dumps({"cmd": "stop"}, ensure_ascii=False) + "\n")
                     self._process.stdin.flush()
@@ -94,12 +101,12 @@ class KokoroBackend(TTSBackend):
                 except subprocess.TimeoutExpired:
                     self._process.kill()
         except Exception as e:
-            logger.warning(f"?? Kokoro worker ?????: {e}")
+            logger.warning(f"关闭 Kokoro worker 进程时异常: {e}")
         finally:
             self._process = None
 
     def synthesize(self, text: str, output_path: Path, voice: Optional[str] = None, speed: float = 1.0, options: Optional[Dict[str, Any]] = None) -> TTSResult:
-        """?????? Chunk ??? Worker ???????????????"""
+        """连续发送单个 Chunk 给长驻 Worker 并读取回包，遇崩溃自动重启重试"""
         options = options or {}
         device = options.get("device", "auto")
         
@@ -111,9 +118,9 @@ class KokoroBackend(TTSBackend):
             "device": device
         }
 
-        # ????????????????
+        # 确保会话可用，崩溃时自动重新拉起
         if self._process is None or self._process.poll() is not None:
-            logger.info("Kokoro Worker ???????????????...")
+            logger.info("Kokoro Worker 未运行或已退出，正在拉起新会话...")
             self.start_session(options)
 
         if self._process is None or self._process.poll() is not None:
@@ -130,21 +137,35 @@ class KokoroBackend(TTSBackend):
             self._process.stdin.write(req_line)
             self._process.stdin.flush()
 
-            resp_line = self._process.stdout.readline()
-            if not resp_line:
-                # 进程意外崩溃或退出
-                exit_code = self._process.poll()
-                logger.error(f"Kokoro worker 意外退出 (exit_code: {exit_code})")
-                self.stop_session()
-                return TTSResult(
-                    success=False,
-                    output_path=output_path,
-                    duration=0.0,
-                    error_code="WORKER_CRASHED",
-                    error_message=f"Kokoro worker 意外崩溃退出，代码: {exit_code}"
-                )
+            result_data = None
+            while True:
+                resp_line = self._process.stdout.readline()
+                if not resp_line:
+                    # 进程意外崩溃或退出
+                    exit_code = self._process.poll()
+                    logger.error(f"Kokoro worker 意外退出 (exit_code: {exit_code})")
+                    self.stop_session()
+                    return TTSResult(
+                        success=False,
+                        output_path=output_path,
+                        duration=0.0,
+                        error_code="WORKER_CRASHED",
+                        error_message=f"Kokoro worker 意外崩溃退出，代码: {exit_code}"
+                    )
 
-            result_data = json.loads(resp_line.strip())
+                resp_line = resp_line.strip()
+                if not resp_line:
+                    continue
+
+                try:
+                    parsed = json.loads(resp_line)
+                    if "success" in parsed:
+                        result_data = parsed
+                        break
+                except Exception:
+                    # 忽略非协议 JSON 行（如第三方库 Warning/输出）
+                    continue
+
             return TTSResult(
                 success=result_data.get("success", False),
                 output_path=Path(result_data.get("output_path", str(output_path))),

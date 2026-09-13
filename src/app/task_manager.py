@@ -396,13 +396,14 @@ class TaskManager:
             backend.start_session(worker_options)
             
             for idx, chunk in enumerate(chunks, start=1):
-                # 计算当前预期指纹
+                # 计算当前预期业务指纹（排除 device 纯硬件参数，确保 GPU/CPU 切换时已有音频不被误判失效）
+                acoustic_options = {k: v for k, v in worker_options.items() if k != "device"}
                 current_fp = compute_fingerprint(
                     text_hash=chunk.text_hash,
                     backend=backend_name,
                     voice=voice,
                     speed=speed,
-                    options=worker_options
+                    options=acoustic_options
                 )
 
                 # 断点判断

@@ -62,24 +62,32 @@ class F5Backend(TTSBackend):
                 bufsize=1
             )
             
-            ready_line = self._process.stdout.readline()
-            if ready_line:
+            # 读取启动阶段就绪握手信号，跳过第三方库警告
+            while True:
+                ready_line = self._process.stdout.readline()
+                if not ready_line:
+                    break
+                ready_line = ready_line.strip()
+                if not ready_line:
+                    continue
                 try:
-                    init_res = json.loads(ready_line.strip())
-                    if init_res.get("status") == "ERROR":
-                        logger.error(f"F5 worker ?????: {init_res.get('error_message')}")
+                    init_res = json.loads(ready_line)
+                    if init_res.get("status") in ["READY", "ERROR"]:
+                        if init_res.get("status") == "ERROR":
+                            logger.error(f"F5 worker 初始化失败: {init_res.get('error_message')}")
+                        break
                 except Exception:
-                    pass
+                    continue
         except Exception as e:
-            logger.error(f"???? F5 worker ??: {e}")
+            logger.error(f"无法启动 F5 worker 进程: {e}")
             self._process = None
 
     def stop_session(self) -> None:
-        """????????? Worker"""
+        """结束当前会话并释放 Worker"""
         if self._process is None:
             return
 
-        logger.info("???? F5 Worker ??")
+        logger.info("正在停止 F5 Worker 进程")
         try:
             if self._process.poll() is None:
                 try:
@@ -92,23 +100,24 @@ class F5Backend(TTSBackend):
                 except subprocess.TimeoutExpired:
                     self._process.kill()
         except Exception as e:
-            logger.warning(f"?? F5 worker ?????: {e}")
+            logger.warning(f"关闭 F5 worker 进程时异常: {e}")
         finally:
             self._process = None
 
     def _send_payload(self, payload: dict) -> TTSResult:
-        """?? JSON ???????"""
+        """发送 JSON 请求并读取回复"""
         output_path = Path(payload["output_path"])
         if self._process is None or self._process.poll() is not None:
-            logger.info("F5 Worker ??????????????...")
+            logger.info("F5 Worker 未运行或已退出，正在重启会话...")
             self.start_session()
 
         if self._process is None or self._process.poll() is not None:
             return TTSResult(
                 success=False,
                 output_path=output_path,
+                duration=0.0,
                 error_code="TTS_BACKEND_UNAVAILABLE",
-                error_message="F5-TTS worker ????????"
+                error_message="F5-TTS worker 进程未能正常启动"
             )
 
         try:
@@ -116,19 +125,32 @@ class F5Backend(TTSBackend):
             self._process.stdin.write(req_line)
             self._process.stdin.flush()
 
-            resp_line = self._process.stdout.readline()
-            if not resp_line:
-                exit_code = self._process.poll()
-                logger.error(f"F5 worker ???? (exit_code: {exit_code})")
-                self.stop_session()
-                return TTSResult(
-                    success=False,
-                    output_path=output_path,
-                    error_code="WORKER_CRASHED",
-                    error_message=f"F5 worker ?????????: {exit_code}"
-                )
+            result_data = None
+            while True:
+                resp_line = self._process.stdout.readline()
+                if not resp_line:
+                    exit_code = self._process.poll()
+                    logger.error(f"F5 worker 意外退出 (exit_code: {exit_code})")
+                    self.stop_session()
+                    return TTSResult(
+                        success=False,
+                        output_path=output_path,
+                        duration=0.0,
+                        error_code="WORKER_CRASHED",
+                        error_message=f"F5 worker 意外崩溃退出，代码: {exit_code}"
+                    )
 
-            result_data = json.loads(resp_line.strip())
+                resp_line = resp_line.strip()
+                if not resp_line:
+                    continue
+
+                try:
+                    parsed = json.loads(resp_line)
+                    if "success" in parsed:
+                        result_data = parsed
+                        break
+                except Exception:
+                    continue
             return TTSResult(
                 success=result_data.get("success", False),
                 output_path=Path(result_data.get("output_path", str(output_path))),
