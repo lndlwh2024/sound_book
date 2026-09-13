@@ -1,0 +1,52 @@
+# === 敏感信息 ===
+.env
+
+# === Python 虚拟环境 ===
+envs/
+.venv/
+venv/
+
+# === Python 缓存 ===
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# === 音频文件（测试 fixture 除外）===
+*.wav
+*.mp3
+*.m4b
+*.m4a
+# 保留测试 fixture
+!tests/fixtures/**/*.wav
+!tests/fixtures/**/*.mp3
+
+# === 书籍工作目录中的大型文件 ===
+books/*/audio_chunks/
+books/*/chapters/
+books/*/output/
+books/*/temp/
+books/*/logs/
+
+# === 全局日志 ===
+logs/
+
+# === 大型模型文件 ===
+*.pt
+*.pth
+*.bin
+*.onnx
+*.safetensors
+models/
+
+# === IDE ===
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# === OS ===
+Thumbs.db
+.DS_Store
