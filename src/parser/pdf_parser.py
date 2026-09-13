@@ -82,28 +82,30 @@ class PDFParser(BookParser):
         chapters: List[Chapter] = []
         
         if toc:
-            logger.info("检测到 PDF 内置目录，基于目录提取章节。")
-            # 简化处理：基于一级目录分章（toc 元素: [层级, 标题, 页码]）
-            current_chapter = None
-            for item in toc:
-                lvl, title, pagenum = item
-                if lvl == 1:
-                    if current_chapter:
-                        chapters.append(current_chapter)
-                    current_chapter = Chapter(
-                        id=f"chapter_{len(chapters)+1:03d}",
-                        title=title.strip(),
-                        sections=[]
-                    )
-            # 这里简化了按照页码分配文本的逻辑，在实际中应根据页码区间归类文本
-            # 为演示合并逻辑，此处依然将所有文本合并后交由章节检测器备用
-            # 如果要精确按 TOC 划分，需要把对应页码内的文本拼接到对应 chapter 的 sections 中。
+            logger.info("检测到 PDF 内置目录，尝试基于目录提取章节。")
+            level_1_items = [(title.strip(), pagenum) for lvl, title, pagenum in toc if lvl == 1 and pagenum > 0]
+            if level_1_items:
+                for idx, (title, start_page) in enumerate(level_1_items):
+                    end_page = level_1_items[idx + 1][1] if idx + 1 < len(level_1_items) else page_count + 1
+                    ch_lines = []
+                    for p in range(start_page - 1, min(end_page - 1, page_count)):
+                        if 0 <= p < len(raw_text_data):
+                            ch_lines.extend(raw_text_data[p]["text"].split("\n"))
+                    
+                    paragraphs = [l.strip() for l in ch_lines if l.strip()]
+                    if paragraphs:
+                        chapters.append(Chapter(
+                            chapter_id=f"chapter_{len(chapters)+1:03d}",
+                            title=title,
+                            order=len(chapters)+1,
+                            paragraphs=paragraphs
+                        ))
             
         doc.close()
         
         # 如果未能通过 TOC 提取出有效章节，则走正则表达式章节检测
         if not chapters:
-            logger.info("未检测到内置目录，使用标题模式识别章节结构。")
+            logger.info("未通过内置目录提取出章节，使用标题模式识别章节结构。")
             all_lines = []
             for item in raw_text_data:
                 all_lines.extend(item["text"].split("\n"))

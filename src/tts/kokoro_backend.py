@@ -120,8 +120,9 @@ class KokoroBackend(TTSBackend):
             return TTSResult(
                 success=False,
                 output_path=output_path,
+                duration=0.0,
                 error_code="TTS_BACKEND_UNAVAILABLE",
-                error_message="Kokoro worker ????????"
+                error_message="Kokoro worker 进程未能正常启动"
             )
 
         try:
@@ -131,15 +132,16 @@ class KokoroBackend(TTSBackend):
 
             resp_line = self._process.stdout.readline()
             if not resp_line:
-                # ?????????
+                # 进程意外崩溃或退出
                 exit_code = self._process.poll()
-                logger.error(f"Kokoro worker ???? (exit_code: {exit_code})")
+                logger.error(f"Kokoro worker 意外退出 (exit_code: {exit_code})")
                 self.stop_session()
                 return TTSResult(
                     success=False,
                     output_path=output_path,
+                    duration=0.0,
                     error_code="WORKER_CRASHED",
-                    error_message=f"Kokoro worker ?????????: {exit_code}"
+                    error_message=f"Kokoro worker 意外崩溃退出，代码: {exit_code}"
                 )
 
             result_data = json.loads(resp_line.strip())
@@ -152,11 +154,12 @@ class KokoroBackend(TTSBackend):
             )
 
         except Exception as e:
-            logger.error(f"? Kokoro worker ??????: {e}")
+            logger.error(f"与 Kokoro worker 交互发生异常: {e}")
             self.stop_session()
             return TTSResult(
                 success=False,
                 output_path=output_path,
+                duration=0.0,
                 error_code="COMMUNICATION_ERROR",
                 error_message=str(e)
             )

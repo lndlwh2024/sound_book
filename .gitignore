@@ -30,8 +30,10 @@ books/*/output/
 books/*/temp/
 books/*/logs/
 
-# === 全局日志 ===
+# === 全局日志与测试运行产物 ===
 logs/
+validation_report.json
+*_raw_text.json
 
 # === 大型模型文件 ===
 *.pt

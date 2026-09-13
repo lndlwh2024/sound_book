@@ -68,7 +68,15 @@ def main():
                 else:
                     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-                lang_code = voice[0] if isinstance(voice, str) and len(voice) > 0 else 'a'
+                # 判定语言代码：若文本包含中文且发音人未指定为中文，则自适应为中文管线与发音人
+                has_chinese = any('\u4e00' <= char <= '\u9fff' for char in text)
+                if has_chinese and (not voice or voice.startswith('a')):
+                    lang_code = 'z'
+                    voice = 'zf_xiaobei'
+                elif isinstance(voice, str) and len(voice) > 0:
+                    lang_code = voice[0]
+                else:
+                    lang_code = 'z' if has_chinese else 'a'
 
                 # ???????????????????
                 if pipeline is None or current_lang_code != lang_code or current_device != device:

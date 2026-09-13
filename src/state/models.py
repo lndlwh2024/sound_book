@@ -120,6 +120,13 @@ class Chapter:
     sections: List[Section] = field(default_factory=list)
     paragraphs: List[str] = field(default_factory=list)
 
+    def __init__(self, chapter_id: str = "", title: str = "", order: int = 1, sections: List[Section] = None, paragraphs: List[str] = None, id: str = None, **kwargs):
+        self.chapter_id = id if id is not None else chapter_id
+        self.title = title
+        self.order = order
+        self.sections = sections if sections is not None else []
+        self.paragraphs = paragraphs if paragraphs is not None else []
+
     @property
     def id(self) -> str:
         return self.chapter_id
@@ -246,10 +253,17 @@ class TTSChunk:
 class TTSResult:
     """TTS 生成结果详情（详设第 40 节）"""
     success: bool
-    output_path: str
-    duration: float
+    output_path: Any
+    duration: float = 0.0
     error_code: Optional[str] = None
     error_message: Optional[str] = None
+
+    def __init__(self, success: bool, output_path: Any, duration: float = 0.0, error_code: Optional[str] = None, error_message: Optional[str] = None, **kwargs):
+        self.success = success
+        self.output_path = output_path
+        self.duration = duration
+        self.error_code = error_code
+        self.error_message = error_message
 
     def to_dict(self) -> dict:
         return asdict(self)
