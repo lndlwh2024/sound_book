@@ -85,13 +85,11 @@ def main():
                     # ?????????????????????????????????
                     if args.model_path and Path(args.model_path).exists():
                         try:
-                            # ?????? repo/path ??? KPipeline
-                            pipeline = KPipeline(lang_code=lang_code, repo_id=str(args.model_path))
+                            pipeline = KPipeline(lang_code=lang_code, repo_id=str(args.model_path), device=device)
                         except Exception:
-                            # ???????
-                            pipeline = KPipeline(lang_code=lang_code)
+                            pipeline = KPipeline(lang_code=lang_code, device=device)
                     else:
-                        pipeline = KPipeline(lang_code=lang_code)
+                        pipeline = KPipeline(lang_code=lang_code, device=device)
                     current_lang_code = lang_code
                     current_device = device
 

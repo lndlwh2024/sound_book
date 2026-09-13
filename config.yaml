@@ -41,7 +41,7 @@ tts:
     model_path: ""
     voice: "zf_xiaobei"
     speed: 1.0
-    device: auto
+    device: cuda
 
   f5:
     # ????????????
