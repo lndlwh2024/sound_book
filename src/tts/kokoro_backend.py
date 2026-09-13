@@ -7,15 +7,17 @@ from typing import Dict, Any, Optional
 
 from src.tts.base import TTSBackend
 from src.state.models import TTSResult, HealthCheckStatus
+from src.utils.model_manager import ModelManager, ModelDownloadError
 
 logger = logging.getLogger(__name__)
 
 class KokoroBackend(TTSBackend):
     """
-    Kokoro TTS 后端（Task-scoped Persistent Worker 架构）。
-    在整本书的 TTS 期间保持长驻 Worker 进程，模型仅加载一次；
-    使用 stdin / stdout + JSON Lines 进行 Chunk 连续通信；
-    支持进程崩溃检测、自动重启与状态恢复。
+    Kokoro TTS ???Task-scoped Persistent Worker ????
+    ????? TTS ?????? Worker ???????????
+    ???? ModelManager ?????????????????????????????????
+    ?? stdin / stdout + JSON Lines ?? Chunk ?????
+    ???????????????????
     """
     
     def __init__(self, config: dict):
@@ -24,20 +26,34 @@ class KokoroBackend(TTSBackend):
         self._python_exe = Path("envs/kokoro/Scripts/python.exe")
         self._timeout = self._config.get("worker_timeout_seconds", 300)
         self._process: Optional[subprocess.Popen] = None
+        self._cached_model_path: Optional[Path] = None
         
     @property
     def name(self) -> str:
         return "kokoro"
 
     def start_session(self, options: Optional[Dict[str, Any]] = None) -> None:
-        """启动任务级 Worker 进程并等待准备就绪"""
+        """????? Worker ???????????????????"""
         if self._process is not None and self._process.poll() is None:
             return
 
-        logger.info("启动 Kokoro Task-scoped Persistent Worker 进程")
+        # ????????????????????????????
+        if self._cached_model_path is None or not self._cached_model_path.exists():
+            try:
+                self._cached_model_path = ModelManager.ensure_model("kokoro", self._config)
+            except Exception as e:
+                logger.error(f"Kokoro ??????: {e}")
+                # ???????????? worker ?????
+                self._cached_model_path = None
+
+        logger.info("?? Kokoro Task-scoped Persistent Worker ??")
         try:
+            cmd = [str(self._python_exe), str(self._worker_path)]
+            if self._cached_model_path:
+                cmd.extend(["--model-path", str(self._cached_model_path)])
+
             self._process = subprocess.Popen(
-                [str(self._python_exe), str(self._worker_path)],
+                cmd,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -46,28 +62,28 @@ class KokoroBackend(TTSBackend):
                 bufsize=1
             )
             
-            # 读取启动阶段就绪握手信号
+            # ????????????
             ready_line = self._process.stdout.readline()
             if ready_line:
                 try:
                     init_res = json.loads(ready_line.strip())
                     if init_res.get("status") == "ERROR":
-                        logger.error(f"Kokoro worker 初始化失败: {init_res.get('error_message')}")
+                        logger.error(f"Kokoro worker ?????: {init_res.get('error_message')}")
                 except Exception:
                     pass
         except Exception as e:
-            logger.error(f"无法启动 Kokoro worker 进程: {e}")
+            logger.error(f"???? Kokoro worker ??: {e}")
             self._process = None
 
     def stop_session(self) -> None:
-        """安全停止并释放 Worker 进程"""
+        """??????? Worker ??"""
         if self._process is None:
             return
 
-        logger.info("正在停止 Kokoro Worker 进程")
+        logger.info("???? Kokoro Worker ??")
         try:
             if self._process.poll() is None:
-                # 发送停止指令
+                # ??????
                 try:
                     self._process.stdin.write(json.dumps({"cmd": "stop"}, ensure_ascii=False) + "\n")
                     self._process.stdin.flush()
@@ -78,12 +94,12 @@ class KokoroBackend(TTSBackend):
                 except subprocess.TimeoutExpired:
                     self._process.kill()
         except Exception as e:
-            logger.warning(f"关闭 Kokoro worker 进程时异常: {e}")
+            logger.warning(f"?? Kokoro worker ?????: {e}")
         finally:
             self._process = None
 
     def synthesize(self, text: str, output_path: Path, voice: Optional[str] = None, speed: float = 1.0, options: Optional[Dict[str, Any]] = None) -> TTSResult:
-        """连续发送单个 Chunk 给长驻 Worker 并读取回包，遇崩溃自动重启重试"""
+        """?????? Chunk ??? Worker ???????????????"""
         options = options or {}
         device = options.get("device", "auto")
         
@@ -95,9 +111,9 @@ class KokoroBackend(TTSBackend):
             "device": device
         }
 
-        # 确保会话可用，崩溃时自动重新拉起
+        # ????????????????
         if self._process is None or self._process.poll() is not None:
-            logger.info("Kokoro Worker 未运行或已退出，正在拉起新会话...")
+            logger.info("Kokoro Worker ???????????????...")
             self.start_session(options)
 
         if self._process is None or self._process.poll() is not None:
@@ -105,7 +121,7 @@ class KokoroBackend(TTSBackend):
                 success=False,
                 output_path=output_path,
                 error_code="TTS_BACKEND_UNAVAILABLE",
-                error_message="Kokoro worker 进程未能正常启动"
+                error_message="Kokoro worker ????????"
             )
 
         try:
@@ -115,15 +131,15 @@ class KokoroBackend(TTSBackend):
 
             resp_line = self._process.stdout.readline()
             if not resp_line:
-                # 进程意外崩溃或退出
+                # ?????????
                 exit_code = self._process.poll()
-                logger.error(f"Kokoro worker 意外退出 (exit_code: {exit_code})")
+                logger.error(f"Kokoro worker ???? (exit_code: {exit_code})")
                 self.stop_session()
                 return TTSResult(
                     success=False,
                     output_path=output_path,
                     error_code="WORKER_CRASHED",
-                    error_message=f"Kokoro worker 意外崩溃退出，代码: {exit_code}"
+                    error_message=f"Kokoro worker ?????????: {exit_code}"
                 )
 
             result_data = json.loads(resp_line.strip())
@@ -136,7 +152,7 @@ class KokoroBackend(TTSBackend):
             )
 
         except Exception as e:
-            logger.error(f"与 Kokoro worker 交互发生异常: {e}")
+            logger.error(f"? Kokoro worker ??????: {e}")
             self.stop_session()
             return TTSResult(
                 success=False,
@@ -146,27 +162,27 @@ class KokoroBackend(TTSBackend):
             )
 
     def health_check(self) -> HealthCheckStatus:
-        """验证 Kokoro 的 Python 环境及 Worker 脚本是否就绪"""
+        """?? Kokoro ? Python ??? Worker ??????"""
         if not self._python_exe.exists():
             return HealthCheckStatus(
                 status="NOT_CONFIGURED",
-                message="Kokoro Python 环境不存在",
+                message="Kokoro Python ?????",
             )
             
         if not self._worker_path.exists():
             return HealthCheckStatus(
                 status="ERROR",
-                message="Kokoro worker 脚本不存在",
+                message="Kokoro worker ?????",
             )
             
         try:
             subprocess.run([str(self._python_exe), "--version"], check=True, capture_output=True)
             return HealthCheckStatus(
                 status="OK",
-                message="Kokoro 环境可用"
+                message="Kokoro ????"
             )
         except Exception as e:
             return HealthCheckStatus(
                 status="ERROR",
-                message=f"Kokoro 环境测试失败: {str(e)}"
+                message=f"Kokoro ??????: {str(e)}"
             )

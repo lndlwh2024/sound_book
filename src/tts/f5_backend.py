@@ -7,15 +7,17 @@ from typing import Dict, Any, Optional
 
 from src.tts.base import TTSBackend
 from src.state.models import TTSResult, HealthCheckStatus
+from src.utils.model_manager import ModelManager, ModelDownloadError
 
 logger = logging.getLogger(__name__)
 
 class F5Backend(TTSBackend):
     """
-    F5-TTS 后端（Task-scoped Persistent Worker 架构）。
-    在整本书的 TTS 期间保持长驻 Worker 进程，模型仅加载一次；
-    使用 stdin / stdout + JSON Lines 协议连续处理 Chunk；
-    支持参考音频校验、CUDA OOM 捕获并在配置开启时自动降级 CPU 重试。
+    F5-TTS ???Task-scoped Persistent Worker ????
+    ????? TTS ?????? Worker ???????????
+    ???? ModelManager ?????????????????????????????????
+    ?? stdin / stdout + JSON Lines ?????? Chunk?
+    ?????????CUDA OOM ????????????? CPU ???
     """
     
     def __init__(self, config: dict):
@@ -25,20 +27,33 @@ class F5Backend(TTSBackend):
         self._timeout = self._config.get("worker_timeout_seconds", 300)
         self._cpu_fallback = self._config.get("cpu_fallback", True)
         self._process: Optional[subprocess.Popen] = None
+        self._cached_model_path: Optional[Path] = None
         
     @property
     def name(self) -> str:
         return "f5"
 
     def start_session(self, options: Optional[Dict[str, Any]] = None) -> None:
-        """启动长驻 F5-TTS worker 进程"""
+        """???? F5-TTS worker ????????????"""
         if self._process is not None and self._process.poll() is None:
             return
 
-        logger.info("启动 F5-TTS Task-scoped Persistent Worker 进程")
+        # ????????????????????????????
+        if self._cached_model_path is None or not self._cached_model_path.exists():
+            try:
+                self._cached_model_path = ModelManager.ensure_model("f5", self._config)
+            except Exception as e:
+                logger.error(f"F5 ??????: {e}")
+                self._cached_model_path = None
+
+        logger.info("?? F5-TTS Task-scoped Persistent Worker ??")
         try:
+            cmd = [str(self._python_exe), str(self._worker_path)]
+            if self._cached_model_path:
+                cmd.extend(["--model-path", str(self._cached_model_path)])
+
             self._process = subprocess.Popen(
-                [str(self._python_exe), str(self._worker_path)],
+                cmd,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -52,19 +67,19 @@ class F5Backend(TTSBackend):
                 try:
                     init_res = json.loads(ready_line.strip())
                     if init_res.get("status") == "ERROR":
-                        logger.error(f"F5 worker 初始化失败: {init_res.get('error_message')}")
+                        logger.error(f"F5 worker ?????: {init_res.get('error_message')}")
                 except Exception:
                     pass
         except Exception as e:
-            logger.error(f"无法启动 F5 worker 进程: {e}")
+            logger.error(f"???? F5 worker ??: {e}")
             self._process = None
 
     def stop_session(self) -> None:
-        """结束当前会话并释放 Worker"""
+        """????????? Worker"""
         if self._process is None:
             return
 
-        logger.info("正在停止 F5 Worker 进程")
+        logger.info("???? F5 Worker ??")
         try:
             if self._process.poll() is None:
                 try:
@@ -77,15 +92,15 @@ class F5Backend(TTSBackend):
                 except subprocess.TimeoutExpired:
                     self._process.kill()
         except Exception as e:
-            logger.warning(f"关闭 F5 worker 进程时异常: {e}")
+            logger.warning(f"?? F5 worker ?????: {e}")
         finally:
             self._process = None
 
     def _send_payload(self, payload: dict) -> TTSResult:
-        """发送 JSON 请求并读取回复"""
+        """?? JSON ???????"""
         output_path = Path(payload["output_path"])
         if self._process is None or self._process.poll() is not None:
-            logger.info("F5 Worker 未运行或已退出，正在重启会话...")
+            logger.info("F5 Worker ??????????????...")
             self.start_session()
 
         if self._process is None or self._process.poll() is not None:
@@ -93,7 +108,7 @@ class F5Backend(TTSBackend):
                 success=False,
                 output_path=output_path,
                 error_code="TTS_BACKEND_UNAVAILABLE",
-                error_message="F5-TTS worker 进程未能正常启动"
+                error_message="F5-TTS worker ????????"
             )
 
         try:
@@ -104,13 +119,13 @@ class F5Backend(TTSBackend):
             resp_line = self._process.stdout.readline()
             if not resp_line:
                 exit_code = self._process.poll()
-                logger.error(f"F5 worker 意外退出 (exit_code: {exit_code})")
+                logger.error(f"F5 worker ???? (exit_code: {exit_code})")
                 self.stop_session()
                 return TTSResult(
                     success=False,
                     output_path=output_path,
                     error_code="WORKER_CRASHED",
-                    error_message=f"F5 worker 意外崩溃退出，代码: {exit_code}"
+                    error_message=f"F5 worker ?????????: {exit_code}"
                 )
 
             result_data = json.loads(resp_line.strip())
@@ -123,7 +138,7 @@ class F5Backend(TTSBackend):
             )
 
         except Exception as e:
-            logger.error(f"与 F5 worker 交互发生异常: {e}")
+            logger.error(f"? F5 worker ??????: {e}")
             self.stop_session()
             return TTSResult(
                 success=False,
@@ -133,7 +148,7 @@ class F5Backend(TTSBackend):
             )
 
     def synthesize(self, text: str, output_path: Path, voice: Optional[str] = None, speed: float = 1.0, options: Optional[Dict[str, Any]] = None) -> TTSResult:
-        """执行合成作业，并处理缺失参考音频与 CUDA OOM 的逻辑"""
+        """????????????????? CUDA OOM ???"""
         options = options or {}
         ref_audio = options.get("ref_audio")
         ref_text = options.get("ref_text", "")
@@ -144,7 +159,7 @@ class F5Backend(TTSBackend):
                 success=False,
                 output_path=output_path,
                 error_code="F5_REFERENCE_REQUIRED",
-                error_message="F5 必须提供 ref_audio 选项"
+                error_message="F5 ???? ref_audio ??"
             )
             
         ref_audio_path = Path(ref_audio)
@@ -153,7 +168,7 @@ class F5Backend(TTSBackend):
                 success=False,
                 output_path=output_path,
                 error_code="INVALID_REFERENCE",
-                error_message=f"参考音频文件不存在: {ref_audio}"
+                error_message=f"?????????: {ref_audio}"
             )
             
         payload = {
@@ -168,39 +183,39 @@ class F5Backend(TTSBackend):
         
         result = self._send_payload(payload)
         
-        # 捕获 CUDA 显存不足情况并尝试 fallback 到 CPU
+        # ?? CUDA ????????? fallback ? CPU
         if not result.success and result.error_code == "CUDA_OOM":
             if self._cpu_fallback:
-                logger.info("F5 触发 CUDA OOM，正尝试以 CPU 回退重试")
+                logger.info("F5 ?? CUDA OOM????? CPU ????")
                 payload["device"] = "cpu"
                 result = self._send_payload(payload)
             else:
-                logger.warning("F5 触发 CUDA OOM，但未开启 CPU 回退功能")
+                logger.warning("F5 ?? CUDA OOM????? CPU ????")
                 
         return result
 
     def health_check(self) -> HealthCheckStatus:
-        """验证 F5 Python 环境"""
+        """?? F5 Python ??"""
         if not self._python_exe.exists():
             return HealthCheckStatus(
                 status="NOT_CONFIGURED",
-                message="F5 Python 环境不存在",
+                message="F5 Python ?????",
             )
             
         if not self._worker_path.exists():
             return HealthCheckStatus(
                 status="ERROR",
-                message="F5 worker 脚本不存在",
+                message="F5 worker ?????",
             )
             
         try:
             subprocess.run([str(self._python_exe), "--version"], check=True, capture_output=True)
             return HealthCheckStatus(
                 status="OK",
-                message="F5 环境可用"
+                message="F5 ????"
             )
         except Exception as e:
             return HealthCheckStatus(
                 status="ERROR",
-                message=f"F5 环境测试失败: {str(e)}"
+                message=f"F5 ??????: {str(e)}"
             )

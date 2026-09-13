@@ -1,17 +1,24 @@
 import sys
 import json
 import time
+import os
+import argparse
 import traceback
+from pathlib import Path
 
 def main():
     """
     Kokoro Task-scoped Persistent Worker
-    通过 stdin / stdout 交互 JSON Lines 协议：
-    启动时完成环境准备与模型初次载入（输出 {"status": "READY"}）；
-    后续每次从 stdin 读取一行 JSON 指令，处理一个 Chunk 合成并向 stdout 写回一行 JSON；
-    收到 {"cmd": "stop"} 或 EOF 时正常退出。
+    ?? stdin / stdout ?? JSON Lines ???
+    ??????????????????? {"status": "READY"}??
+    ????? stdin ???? JSON ??????? Chunk ???? stdout ???? JSON?
+    ?? {"cmd": "stop"} ? EOF ??????
     """
-    sys.stderr.write("Worker started\n")
+    parser = argparse.ArgumentParser(description="Kokoro Persistent Worker")
+    parser.add_argument("--model-path", type=str, default="", help="????????")
+    args, _ = parser.parse_known_args()
+
+    sys.stderr.write(f"Worker started (model_path={args.model_path})\n")
     sys.stderr.flush()
 
     pipeline = None
@@ -24,7 +31,7 @@ def main():
         import soundfile as sf
         import numpy as np
 
-        # 发送就绪信号给主进程
+        # ??????????
         print(json.dumps({"status": "READY"}, ensure_ascii=False), flush=True)
 
         for line in sys.stdin:
@@ -53,7 +60,7 @@ def main():
             try:
                 start_time = time.time()
 
-                # 判定设备
+                # ????
                 if device_req == "cuda" and torch.cuda.is_available():
                     device = "cuda"
                 elif device_req == "cpu":
@@ -63,15 +70,24 @@ def main():
 
                 lang_code = voice[0] if isinstance(voice, str) and len(voice) > 0 else 'a'
 
-                # 仅在模型未载入或语言代码变动时加载一次
+                # ???????????????????
                 if pipeline is None or current_lang_code != lang_code or current_device != device:
                     sys.stderr.write("Model loaded\n")
                     sys.stderr.flush()
-                    pipeline = KPipeline(lang_code=lang_code)
+                    # ?????????????????????????????????
+                    if args.model_path and Path(args.model_path).exists():
+                        try:
+                            # ?????? repo/path ??? KPipeline
+                            pipeline = KPipeline(lang_code=lang_code, repo_id=str(args.model_path))
+                        except Exception:
+                            # ???????
+                            pipeline = KPipeline(lang_code=lang_code)
+                    else:
+                        pipeline = KPipeline(lang_code=lang_code)
                     current_lang_code = lang_code
                     current_device = device
 
-                # 实施语音合成迭代生成
+                # ??????????
                 generator = pipeline(text, voice=voice, speed=speed, split_pattern=r'\n+')
                 all_audio = []
                 sample_rate = 24000
@@ -81,7 +97,7 @@ def main():
                         all_audio.append(audio)
 
                 if not all_audio:
-                    raise ValueError("Kokoro 引擎未生成任何可用的音频数据")
+                    raise ValueError("Kokoro ??????????????")
 
                 final_audio = np.concatenate(all_audio)
                 sf.write(output_path, final_audio, sample_rate)
@@ -109,7 +125,7 @@ def main():
             "status": "ERROR",
             "success": False,
             "error_code": "IMPORT_ERROR",
-            "error_message": f"导入 Kokoro 或其依赖时发生错误: {str(e)}"
+            "error_message": f"?? Kokoro ?????????: {str(e)}"
         }, ensure_ascii=False), flush=True)
     except Exception as e:
         sys.stderr.write(f"Fatal error: {traceback.format_exc()}\n")

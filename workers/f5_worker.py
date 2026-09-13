@@ -1,17 +1,24 @@
 import sys
 import json
 import time
+import os
+import argparse
 import traceback
+from pathlib import Path
 
 def main():
     """
     F5-TTS Task-scoped Persistent Worker
-    通过 stdin / stdout 交互 JSON Lines 协议：
-    启动时准备环境；
-    按行读取 JSON 指令，模型在会话中仅加载一次；
-    捕获 CUDA OOM 等异常，支持指令驱动与优雅退出。
+    ?? stdin / stdout ?? JSON Lines ???
+    ????????
+    ???? JSON ???????????????
+    ?? CUDA OOM ????????????????
     """
-    sys.stderr.write("Worker started\n")
+    parser = argparse.ArgumentParser(description="F5-TTS Persistent Worker")
+    parser.add_argument("--model-path", type=str, default="", help="????????")
+    args, _ = parser.parse_known_args()
+
+    sys.stderr.write(f"Worker started (model_path={args.model_path})\n")
     sys.stderr.flush()
 
     f5_model = None
@@ -21,7 +28,7 @@ def main():
         import torch
         from f5_tts.api import F5TTS
 
-        # 发送就绪信号给主进程
+        # ??????????
         print(json.dumps({"status": "READY"}, ensure_ascii=False), flush=True)
 
         for line in sys.stdin:
@@ -54,7 +61,7 @@ def main():
                     "success": False,
                     "output_path": output_path,
                     "error_code": "F5_REFERENCE_REQUIRED",
-                    "error_message": "F5 模型合成需要依赖参考音频"
+                    "error_message": "F5 ????????????"
                 }, ensure_ascii=False), flush=True)
                 continue
 
@@ -68,11 +75,25 @@ def main():
                 else:
                     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-                # 模型仅加载一次
+                # ???????
                 if f5_model is None or current_device != device:
                     sys.stderr.write("Model loaded\n")
                     sys.stderr.flush()
-                    f5_model = F5TTS(device=device)
+
+                    ckpt_file = None
+                    if args.model_path and Path(args.model_path).exists():
+                        p = Path(args.model_path)
+                        if p.is_file():
+                            ckpt_file = str(p)
+                        else:
+                            candidates = list(p.glob("*.safetensors")) + list(p.glob("*.pt"))
+                            if candidates:
+                                ckpt_file = str(candidates[0])
+
+                    if ckpt_file:
+                        f5_model = F5TTS(ckpt_file=ckpt_file, device=device)
+                    else:
+                        f5_model = F5TTS(device=device)
                     current_device = device
 
                 f5_model.infer(
@@ -96,7 +117,7 @@ def main():
                     "success": False,
                     "output_path": output_path,
                     "error_code": "CUDA_OOM",
-                    "error_message": "GPU 显存不足(CUDA OOM)"
+                    "error_message": "GPU ????(CUDA OOM)"
                 }, ensure_ascii=False), flush=True)
             except Exception as e:
                 sys.stderr.write(f"Chunk processing error: {e}\n")
@@ -115,7 +136,7 @@ def main():
             "status": "ERROR",
             "success": False,
             "error_code": "IMPORT_ERROR",
-            "error_message": f"导入 F5-TTS 或其依赖时发生错误: {str(e)}"
+            "error_message": f"?? F5-TTS ?????????: {str(e)}"
         }, ensure_ascii=False), flush=True)
     except Exception as e:
         sys.stderr.write(f"Fatal error: {traceback.format_exc()}\n")
