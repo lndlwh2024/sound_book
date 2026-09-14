@@ -127,23 +127,49 @@ class TextCleaner:
             
             # 判断是否应合并行：如果上一行非句末标点结尾
             if last_char and last_char not in end_punctuations:
-                # 排除小标题（如《业绩解读》、《1957 年业绩》等短行）：
-                # 小标题独占一行且字数较短（<= 25 字），如果末尾无逗号等连词标点，保持为独立小节，严禁与下行正文粘连
-                is_heading_like = len(current_line.strip()) <= 25 and last_char not in {'，', ',', '、', '；', ';', '：', ':'}
-                if is_heading_like:
-                    # 规范小标题：补全句号作为朗读自然休止，独立成段
-                    current_line = current_line.strip() + "。"
-                    should_merge = False
-                elif first_char.isalpha() and first_char.islower():
-                    # 英文非句末且下一行小写开头
+                # 【为什么这样设计】
+                # 1. 括号与引号完整性保护：若当前行存在未闭合的圆括号、方括号或书名号/引号，
+                #    说明该语义单元被排版物理换行撕裂（例如 "(general \n issues)"），绝非小标题，必须强制缝合。
+                has_unclosed_paren = (
+                    current_line.count('(') > current_line.count(')') or
+                    current_line.count('（') > current_line.count('）') or
+                    current_line.count('[') > current_line.count(']') or
+                    current_line.count('【') > current_line.count('】')
+                )
+                has_unclosed_quote = (
+                    (current_line.count('"') % 2 != 0) or
+                    (current_line.count('“') > current_line.count('”'))
+                )
+                # 2. 句法未完结特征检测：以汉字连词/介词/系动词结尾（如 "是"、"为"、"类"、"等"），绝非独立标题
+                is_hanging_word = last_char in {'是', '为', '在', '和', '与', '及', '向', '到', '由', '被', '从', '类'}
+
+                # 3. 跨行英文断词与连词检测（如 "work- \n outs" 或 "general \n issues"）
+                is_en_cross_line = (
+                    (last_char.isalpha() and first_char.isalpha() and first_char.islower()) or
+                    (first_char in {')', '）', ']', '】', '"', '”'}) or
+                    last_char in {'-', '—', '(', '（', '[', '【'}
+                )
+
+                if has_unclosed_paren or has_unclosed_quote or is_hanging_word or is_en_cross_line:
                     should_merge = True
-                elif re.search(r'[\u4e00-\u9fff]', last_char) or re.search(r'[\u4e00-\u9fff]', first_char):
-                    # 普通长句跨行换行合并
-                    should_merge = True
+                else:
+                    # 排除真正的小标题（如《1957 年业绩》、《合伙企业运作》等独立章节短行）：
+                    # 必须满足：字数较短（<= 25 字）、无未闭合结构、且末尾无逗号等连词标点
+                    is_heading_like = len(current_line.strip()) <= 25 and last_char not in {'，', ',', '、', '；', ';', '：', ':'}
+                    if is_heading_like:
+                        # 规范小标题：补全句号作为朗读自然休止，独立成段
+                        current_line = current_line.strip() + "。"
+                        should_merge = False
+                    else:
+                        should_merge = True
                     
             if should_merge:
-                # 英文需要加空格分隔，中文不需要
-                if last_char.encode('utf-8').isalpha() and first_char.encode('utf-8').isalpha():
+                # 【为什么这样设计】
+                # 英文单词间的跨行合并需补空格，但跨行连字号断词（如 "work-\nouts"）需剔除连字号无缝连接；
+                # 括号和中文标点紧邻处则紧凑拼接，保持自然词界。
+                if current_line.rstrip().endswith('-') and first_char.isalpha():
+                    current_line = current_line.rstrip()[:-1] + next_line.lstrip()
+                elif last_char.encode('utf-8').isalpha() and first_char.encode('utf-8').isalpha():
                     current_line = current_line.rstrip() + " " + next_line.lstrip()
                 else:
                     current_line = current_line.rstrip() + next_line.lstrip()

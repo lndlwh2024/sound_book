@@ -56,3 +56,18 @@ def test_chunk_contains_necessary_fields(chunker):
     assert hasattr(chunk, "id")
     assert hasattr(chunk, "content")
     assert hasattr(chunk, "index")
+
+def test_kokoro_subsentence_split():
+    """测试 Kokoro Worker 内部分句函数严格将句子控制在 40 字黄金区间内"""
+    from workers.kokoro_worker import split_chinese_sentences
+    long_compound_text = (
+        "第一类是相对价值或低估类投资，这类股票的唯一好处是价格相对于公司价值来说极其低廉，"
+        "我们通过严谨的财务报表分析和保守的安全边际测算，能够以显著低于内在价值的折扣价买入，"
+        "并在市场价值理性回归时卖出获利。"
+    )
+    sentences = split_chinese_sentences(long_compound_text, max_len=40)
+    assert len(sentences) >= 3
+    for s in sentences:
+        assert len(s) <= 45
+        assert s[-1] in "。！？!?；;,，、…"
+

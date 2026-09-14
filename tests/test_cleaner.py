@@ -105,3 +105,38 @@ def test_cleaning_report():
     assert report is not None
     assert isinstance(report, dict)
     assert report.get("status") == "SUCCESS"
+
+def test_unclosed_parenthesis_and_en_merge():
+    """测试跨行未闭合括号及英文短语缝合，防止被误判为小标题"""
+    from src.cleaner.text_cleaner import TextCleaner
+    from src.state.models import BookStructure, Chapter, BookMetadata
+
+    cleaner = TextCleaner()
+    raw_content = "第一类是低估类(general\nissues)中，我们进行大量投资。"
+    chapter = Chapter(title="测试章节", paragraphs=raw_content.split("\n"))
+    book = BookStructure(metadata=BookMetadata(title="测试"), chapters=[chapter])
+
+    cleaned_book, report = cleaner.clean(book)
+    cleaned_text = cleaned_book.chapters[0].content
+
+    # 验证 general 与 issues 被正确缝合，且未被强插句号
+    assert "general issues" in cleaned_text
+    assert "general。" not in cleaned_text
+
+def test_heading_preserved_with_period():
+    """测试真正的小标题（短且无挂起词/未闭合结构）被独立分段并补齐句号"""
+    from src.cleaner.text_cleaner import TextCleaner
+    from src.state.models import BookStructure, Chapter, BookMetadata
+
+    cleaner = TextCleaner()
+    raw_content = "1957 年业绩\n我们在过去一年取得了良好的收益。"
+    chapter = Chapter(title="测试章节", paragraphs=raw_content.split("\n"))
+    book = BookStructure(metadata=BookMetadata(title="测试"), chapters=[chapter])
+
+    cleaned_book, _ = cleaner.clean(book)
+    lines = cleaned_book.chapters[0].content.split("\n")
+
+    # 验证小标题独立存在并加了句号，正文独立成行
+    assert lines[0] == "1957 年业绩。"
+    assert "我们在过去一年" in lines[1]
+
