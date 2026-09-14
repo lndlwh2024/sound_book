@@ -23,6 +23,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", help="输出目录")
     parser.add_argument("--accept-validation-risk", action="store_true", help="在检测到文本校验风险（NEEDS_REVIEW）时明确接受风险并继续")
     parser.add_argument("--max-chunks", type=int, default=None, help="本次最多处理的 Chunk 数量，便于阶段性试听和验证")
+    parser.add_argument("--start-page", type=int, default=1, help="PDF/EPUB 正文起始页码（默认 1），便于跳过封面与前置目录")
 
     
     # F5-TTS 专属参数

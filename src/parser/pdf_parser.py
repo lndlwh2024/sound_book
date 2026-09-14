@@ -33,8 +33,8 @@ class PDFParser(BookParser):
             logger.error(f"解析 PDF 元数据失败: {e}")
             raise BookAgentError(ErrorCode.PARSE_ERROR, f"无法提取 PDF 元数据: {str(e)}")
 
-    def parse(self, file_path: Path) -> BookStructure:
-        logger.info(f"开始解析 PDF 文件: {file_path}")
+    def parse(self, file_path: Path, start_page: int = 1) -> BookStructure:
+        logger.info(f"开始解析 PDF 文件: {file_path} (起始页: {start_page})")
         try:
             doc = fitz.open(str(file_path))
         except Exception as e:
@@ -53,7 +53,6 @@ class PDFParser(BookParser):
             text = page.get_text("text").strip()
             
             # 检测页面字符密度，排除完全空白页的误判影响，但记录有效文字少的页面
-            # 如果文本非空且长度极短，或者完全为空
             if len(text) < 50:
                 low_text_page_count += 1
                 
@@ -78,17 +77,30 @@ class PDFParser(BookParser):
             logger.error(f"保存 raw_text.json 失败: {e}")
             
         # 尝试读取 PDF TOC (目录)
+        # 支持按层级和起始页进行智能筛选，过滤前置目录页
         toc = doc.get_toc()
         chapters: List[Chapter] = []
         
         if toc:
             logger.info("检测到 PDF 内置目录，尝试基于目录提取章节。")
-            level_1_items = [(title.strip(), pagenum) for lvl, title, pagenum in toc if lvl == 1 and pagenum > 0]
-            if level_1_items:
-                for idx, (title, start_page) in enumerate(level_1_items):
-                    end_page = level_1_items[idx + 1][1] if idx + 1 < len(level_1_items) else page_count + 1
+            # 筛选在 start_page 之后的 TOC 项；若一级项均早于 start_page，则引入子级项（如 1957年）
+            toc_items = [(lvl, title.strip(), pagenum) for lvl, title, pagenum in toc if pagenum >= start_page]
+            if not toc_items:
+                # 若没有精确大于等于 start_page 的项目，寻找覆盖 start_page 的最近项目
+                toc_items = [(lvl, title.strip(), pagenum) for lvl, title, pagenum in toc if lvl == 1 and pagenum > 0]
+            
+            # 优选同级主要目录条目
+            min_lvl = min(item[0] for item in toc_items) if toc_items else 1
+            main_items = [(t, p) for lvl, t, p in toc_items if lvl == min_lvl or p >= start_page]
+            
+            if main_items:
+                for idx, (title, s_page) in enumerate(main_items):
+                    e_page = main_items[idx + 1][1] if idx + 1 < len(main_items) else page_count + 1
+                    actual_start = max(s_page, start_page)
+                    if actual_start >= e_page:
+                        continue
                     ch_lines = []
-                    for p in range(start_page - 1, min(end_page - 1, page_count)):
+                    for p in range(actual_start - 1, min(e_page - 1, page_count)):
                         if 0 <= p < len(raw_text_data):
                             ch_lines.extend(raw_text_data[p]["text"].split("\n"))
                     
@@ -103,12 +115,13 @@ class PDFParser(BookParser):
             
         doc.close()
         
-        # 如果未能通过 TOC 提取出有效章节，则走正则表达式章节检测
+        # 如果未能通过 TOC 提取出有效章节，则走正则表达式章节检测（从 start_page 开始）
         if not chapters:
             logger.info("未通过内置目录提取出章节，使用标题模式识别章节结构。")
             all_lines = []
             for item in raw_text_data:
-                all_lines.extend(item["text"].split("\n"))
+                if item["page_number"] >= start_page:
+                    all_lines.extend(item["text"].split("\n"))
             chapters = self.chapter_detector.detect_chapters_from_lines(all_lines)
             
         return BookStructure(

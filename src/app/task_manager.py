@@ -142,6 +142,9 @@ class TaskManager:
             if current_state in ["TTS_READY", "TTS_GENERATING", "PARTIAL_FAILED", "FAILED"] or self.params.get("force"):
                 self.state_manager.update_state("TTS_GENERATING")
                 self._generate_tts()
+                if self.params.get("max_chunks"):
+                    print(f"\n[抽检完成] 已完成指定前 {self.params.get('max_chunks')} 个块的阶段性合成与验证。\n")
+                    return {"status": "partial_success", "book_id": self.book_id, "max_chunks": self.params.get("max_chunks")}
                 self.state_manager.update_state("AUDIO_QC")
 
             # 7. AUDIO_QC
@@ -211,16 +214,18 @@ class TaskManager:
 
     def _parse(self) -> None:
         """阶段2：书籍解析"""
-        logger.info("阶段 2: PARSED - 提取正文与章节")
+        start_page = int(self.params.get("start_page", 1))
+        logger.info(f"阶段 2: PARSED - 提取正文与章节 (起始页: {start_page})")
         ext = self.book_file.suffix.lower()
         if ext == ".pdf":
             parser = PdfParser()
+            self.book_structure = parser.parse(self.book_file, start_page=start_page)
         elif ext == ".epub":
             parser = EpubParser()
+            self.book_structure = parser.parse(self.book_file)
         else:
             raise BookAgentError(ErrorCode.UNSUPPORTED_FILE, f"不支持的文件格式: {ext}")
 
-        self.book_structure = parser.parse(self.book_file)
         if hasattr(self.book_structure, "metadata") and self.book_structure.metadata:
             self.book_structure.metadata.book_id = self.book_id
             self.book_structure.metadata.original_filename = self.original_filename
@@ -381,9 +386,15 @@ class TaskManager:
             raise BookAgentError(ErrorCode.TTS_BACKEND_UNAVAILABLE, f"未知的 TTS 后端: {backend_name}")
 
         total_chunks = len(chunks)
+        total_chars_all = sum(len(c.text) for c in chunks)
+        avg_chars_per_chunk = total_chars_all / total_chunks if total_chunks > 0 else 0
+        
         success_count = 0
         failed_count = 0
         skipped_count = 0
+        batch_chars_processed = 0
+        batch_audio_duration = 0.0
+        batch_inference_start_time = time.time()
 
         worker_options = {
             "device": self.params.get("device") or self.config.get(f"tts.{backend_name}.device", "auto"),
@@ -433,6 +444,8 @@ class TaskManager:
                     chunk.error_code = None
                     chunk.error_message = None
                     success_count += 1
+                    batch_chars_processed += len(chunk.text)
+                    batch_audio_duration += result.duration
                 else:
                     chunk.status = "FAILED"
                     chunk.error_code = result.error_code or "TTS_FAILED"
@@ -456,11 +469,28 @@ class TaskManager:
 
         print() # 换行
 
+        batch_inference_time = time.time() - batch_inference_start_time
+        speedup_ratio = (batch_audio_duration / batch_inference_time) if batch_inference_time > 0 else 0.0
+
+        print("\n" + "=" * 55)
+        print("【TTS 合成与硬件推理性能审计报告】")
+        print(f"1. 本次书籍总切分块数: {total_chunks} 块")
+        print(f"2. 每个块的平均字数: {avg_chars_per_chunk:.1f} 字/块")
+        print(f"3. 本次成功生成块数: {success_count} 块 (跳过已完成: {skipped_count} 块, 失败: {failed_count} 块)")
+        print(f"4. 本次处理文本字数: {batch_chars_processed} 字")
+        print(f"5. 本次生成音频总时长: {batch_audio_duration:.2f} 秒 ({batch_audio_duration / 60:.2f} 分钟)")
+        print(f"6. 显卡硬件推理总耗时: {batch_inference_time:.2f} 秒 (合成加速比: {speedup_ratio:.1f}x 实时)")
+        print("=" * 55 + "\n")
+
+        logger.info(
+            f"TTS 统计：总切分块={total_chunks}, 平均字数={avg_chars_per_chunk:.1f}, "
+            f"本次成功={success_count}, 字符数={batch_chars_processed}, "
+            f"音频时长={batch_audio_duration:.2f}s, 显卡推理耗时={batch_inference_time:.2f}s, 加速比={speedup_ratio:.1f}x"
+        )
+
         if failed_count > 0:
             self.state_manager.update_state("PARTIAL_FAILED")
             raise BookAgentError(ErrorCode.TTS_FAILED, f"TTS 生成完成但有 {failed_count} 个块失败，进入 PARTIAL_FAILED 状态，可通过 --resume 重试")
-
-        logger.info(f"TTS 生成完毕：共 {total_chunks} 块，本次成功 {success_count}，跳过已完成 {skipped_count}")
 
     def _audio_qc(self) -> None:
         """阶段7：音频质量检查"""

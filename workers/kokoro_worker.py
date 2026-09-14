@@ -81,7 +81,7 @@ def main():
                 has_chinese = any('\u4e00' <= char <= '\u9fff' for char in text)
                 if has_chinese and (not voice or voice.startswith('a')):
                     lang_code = 'z'
-                    voice = 'zf_xiaobei'
+                    voice = 'zm_yunjian'
                 elif isinstance(voice, str) and len(voice) > 0:
                     lang_code = voice[0]
                 else:
