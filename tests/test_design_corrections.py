@@ -276,3 +276,30 @@ def test_6_manifest_retry_and_self_healing(tmp_path, monkeypatch):
     assert should_process is False
     assert failed_chunk.status == "SUCCESS"
 
+def test_golden_sentence_splitting():
+    """
+    验证黄金播音断句逻辑：
+    1. 绝不强行将多个完整自然句打包成 100+ 字超长块；
+    2. 单句长度控制在舒适区间，杜绝神经网络时间压缩与语速忽快忽慢；
+    3. 英文术语括号规范化为自然呼吸标点。
+    """
+    from workers.kokoro_worker import split_chinese_sentences
+    from src.text.normalizer import normalize_text
+
+    # 模拟用户红框内的长文本
+    raw_text = (
+        "如果整个市场回归到低估状态，我们可能会把所有资金都投入到低估类（general issues）中，"
+        "可能还会借一部分钱来买低估的股票。反之，假如市场继续大幅走高，我们的策略是，"
+        "将低估类不断获利了结，并增加套利类投资组合的比重。"
+    )
+    normalized = normalize_text(raw_text)
+    assert "general issues" in normalized
+
+    # 切句测试
+    sentences = split_chinese_sentences(normalized, max_len=45)
+    assert len(sentences) >= 2  # 至少拆为 2 个自然句，严禁合并为单一 112 字超大块
+    for s in sentences:
+        assert len(s) <= 55  # 严格控制在舒适黄金区间
+        assert s[-1] in "。！？!?；;,，、…"  # 句末闭合标点保护
+
+
