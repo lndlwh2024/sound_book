@@ -200,18 +200,27 @@ def main():
             # 预置音色与参考音频自动解析
             ref_audio = payload.get("ref_audio")
             ref_text = payload.get("ref_text", "")
-            voice = payload.get("voice", "preset_business_male")
+            voice = payload.get("voice", "")
 
-            if not ref_audio or voice == "preset_business_male":
+            # 1. 优先使用显式指定的 ref_audio
+            if ref_audio and Path(ref_audio).exists():
+                pass
+            # 2. 其次根据 voice 别名在 presets 目录寻找对应 wav
+            elif voice:
+                named_wav = Path("models/f5_tts/presets") / f"{voice}.wav"
+                if named_wav.exists():
+                    ref_audio = str(named_wav)
+            # 3. 最后回退到默认成熟商业男声
+            if not ref_audio or not Path(ref_audio).exists():
                 if Path(preset_male_wav).exists():
                     ref_audio = preset_male_wav
-                    ref_text = preset_male_text
                 else:
-                    # 备用回退查找
                     cand_presets = list(Path("models/f5_tts/presets").glob("*.wav"))
                     if cand_presets:
                         ref_audio = str(cand_presets[0])
-                        ref_text = preset_male_text
+
+            if not ref_text:
+                ref_text = preset_male_text
 
             if not ref_audio or not Path(ref_audio).exists():
                 send_ipc({
