@@ -225,32 +225,22 @@ def main():
 
         voice_cache = {}
 
-        def get_voice_pack(p: KPipeline, v_name: str, has_en: bool):
+        def get_voice_pack(p: KPipeline, v_name: str):
             """
-            获取并缓存发音人声学嵌入（Voice Embedding），支持中英双语权重插值融合。
+            获取并缓存发音人声学嵌入（Voice Embedding）。
             【为什么这样设计】
-            1. 纯中文发音人（zm_yunjian）仅基于汉语单语语料训练，缺乏英语重音等时性（Stress-timed）与辅音动力学特征；
-            2. 当文本中包含英文术语或注释时，采用 0.68*zm_yunjian + 0.32*am_michael 进行声学嵌入线性融合：
-               既 100% 保持了中文男声沉稳浑厚的主基调，又天然注入了英语母语者的发音器官动力学与重音韵律，
-               使英文单词字正腔圆、饱满清晰，彻底解决“一带而过连英国人都听不懂”的问题！
+            1. 中文朗读 100% 采用纯正原生的官方发音人（zm_yunjian）：
+               禁止对中文发音人强行掺杂外语音色（如美式发音人 am_michael）。
+               实测证实：掺杂外语音色会导致汉语三声（如“我”wǒ）低拐调丢失并向上漂移成二声“wó”，
+               且异构发音人张量线性混合会导致共振峰相位失配，产生严重的机械“电子味”。
+            2. 纯正原生 zm_yunjian 具备深厚纯正的中文播音底蕴，“我们”等三声词汇字正腔圆，绝无电子音。
+            3. 英文发音质量通过排版缝合、带重音 IPA（with_stress=True）及微气口保障，无需污染中文发音人嵌入。
             """
-            key = f"{v_name}_en_{has_en}"
-            if key in voice_cache:
-                return voice_cache[key]
-
-            if has_en and (v_name == "zm_yunjian" or not v_name):
-                try:
-                    pack_zh = p.load_single_voice("zm_yunjian")
-                    pack_en = p.load_single_voice("am_michael")
-                    blended = 0.68 * pack_zh + 0.32 * pack_en
-                    voice_cache[key] = blended
-                    return blended
-                except Exception as _ve:
-                    sys.stderr.write(f"Voice blending fallback to standard load: {_ve}\n")
-                    sys.stderr.flush()
+            if v_name in voice_cache:
+                return voice_cache[v_name]
 
             pack = p.load_voice(v_name)
-            voice_cache[key] = pack
+            voice_cache[v_name] = pack
             return pack
 
         # 发送就绪握手信号
@@ -319,9 +309,8 @@ def main():
                 sample_rate = 24000
                 all_audio = []
 
-                # 获取目标发音人嵌入（若含英文则应用双语音色加权融合）
-                has_en_terms = bool(re.search(r'[A-Za-z]', text))
-                voice_pack = get_voice_pack(pipeline, voice, has_en_terms)
+                # 获取目标纯正发音人嵌入（中文 100% 使用原生 zm_yunjian，消除电子音与变调）
+                voice_pack = get_voice_pack(pipeline, voice)
 
                 # 静音缓冲配置：
                 # 1. 句间短停顿（120ms）：模拟播音员自然呼吸气口，避免急促连读
