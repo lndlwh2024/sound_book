@@ -200,7 +200,8 @@ class TaskManager:
 
         backend = self.params.get("tts") or self.config.get("tts.default_backend", "kokoro")
         voice = self.params.get("voice") or self.config.get(f"tts.{backend}.voice", "")
-        speed = float(self.params.get("speed", 1.0))
+        speed_param = self.params.get("speed")
+        speed = float(speed_param) if speed_param is not None else float(self.config.get(f"tts.{backend}.speed", 0.85))
 
         if not self.state_manager.has_existing_state():
             self.state_manager.init_state(
@@ -343,7 +344,8 @@ class TaskManager:
         chunker = TextChunker(max_chars=max_chars)
         backend = self.params.get("tts") or self.config.get("tts.default_backend", "kokoro")
         voice = self.params.get("voice") or self.config.get(f"tts.{backend}.voice", "")
-        speed = float(self.params.get("speed", 1.0))
+        speed_param = self.params.get("speed")
+        speed = float(speed_param) if speed_param is not None else float(self.config.get(f"tts.{backend}.speed", 0.85))
 
         chunks: List[TTSChunk] = chunker.chunk_book(
             book_structure=self.cleaned_structure,
@@ -369,7 +371,8 @@ class TaskManager:
         """
         backend_name = self.params.get("tts") or self.config.get("tts.default_backend", "kokoro")
         voice = self.params.get("voice") or self.config.get(f"tts.{backend_name}.voice", "")
-        speed = float(self.params.get("speed", 1.0))
+        speed_param = self.params.get("speed")
+        speed = float(speed_param) if speed_param is not None else float(self.config.get(f"tts.{backend_name}.speed", 0.85))
         force = self.params.get("force", False)
 
         chunks: List[TTSChunk] = self.manifest_manager.load_tts_manifest()

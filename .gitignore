@@ -23,12 +23,8 @@ build/
 !tests/fixtures/**/*.wav
 !tests/fixtures/**/*.mp3
 
-# === 书籍工作目录中的大型文件 ===
-books/*/audio_chunks/
-books/*/chapters/
-books/*/output/
-books/*/temp/
-books/*/logs/
+# === 书籍工作目录 ===
+books/
 
 # === 全局日志与测试运行产物 ===
 logs/

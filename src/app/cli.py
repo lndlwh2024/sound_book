@@ -13,7 +13,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("book_file", nargs="?", help="书籍文件路径，支持 .pdf 和 .epub")
     parser.add_argument("--tts", choices=["kokoro", "f5", "azure"], help="TTS 后端选择")
     parser.add_argument("--voice", help="指定 TTS voice")
-    parser.add_argument("--speed", type=float, default=1.0, help="语速，默认 1.0")
+    parser.add_argument("--speed", type=float, default=None, help="语速（默认按配置生效，例如 0.85）")
     
     # 控制参数
     parser.add_argument("--resume", action="store_true", help="继续已有任务")
