@@ -259,6 +259,10 @@ def main():
                     else:
                         f5_model = F5TTS(device=device)
 
+                    # 关键修复：强制全精度 float32 运行，防止 Flow Matching ODE 在 fp16 下下溢溢出导致 NaN
+                    if hasattr(f5_model, "ema_model"):
+                        f5_model.ema_model.to(torch.float32)
+
                     current_device = device
 
                 # 跨模型通用文本正规化（年份位读、多音字校准）
@@ -283,16 +287,28 @@ def main():
                 nfe_step = int(payload.get("nfe_step", 32))
 
                 for sent_idx, sent in enumerate(sentences):
+                    # 净化特殊非 ASCII/非拼音合法符号，防止 token 嵌入未定义越界
+                    clean_sent = re.sub(r'[：:；;—–“”（）()《》\n\r\t]', '，', sent)
+                    clean_sent = re.sub(r'，+', '，', clean_sent).strip('，')
+                    if not clean_sent:
+                        clean_sent = sent
+
                     # 调用 F5-TTS 内存级直接推理单句
                     seg_data, seg_sr, _ = f5_model.infer(
                         ref_file=ref_audio,
                         ref_text=ref_text,
-                        gen_text=sent,
+                        gen_text=clean_sent,
                         speed=speed,
                         nfe_step=nfe_step
                     )
 
                     if seg_data is not None and len(seg_data) > 0:
+                        # 严格拦截 NaN 数据
+                        if np.isnan(seg_data).any():
+                            sys.stderr.write(f"Warning: seg_data in sentence {sent_idx} contains NaN! Discarding.\n")
+                            sys.stderr.flush()
+                            continue
+
                         # 如果需要重采样为 24000
                         if seg_sr != sample_rate:
                             import torchaudio.functional as AF
@@ -330,6 +346,13 @@ def main():
                 all_audio.append(tail_silence)
 
                 final_audio = np.concatenate(all_audio)
+
+                # 终极音频数值完整性守卫（Audio Integrity Guard）
+                if np.isnan(final_audio).any():
+                    raise ValueError("合成音频数据校验失败：检测到 NaN 未定义异常值！")
+                if np.max(np.abs(final_audio)) < 1e-4:
+                    raise ValueError("合成音频数据校验失败：音频为全静音异常！")
+
                 sf.write(output_path, final_audio, sample_rate)
 
                 send_ipc({
