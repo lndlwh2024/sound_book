@@ -13,11 +13,11 @@ logger = logging.getLogger(__name__)
 
 class F5Backend(TTSBackend):
     """
-    F5-TTS ???Task-scoped Persistent Worker ????
-    ????? TTS ?????? Worker ???????????
-    ???? ModelManager ?????????????????????????????????
-    ?? stdin / stdout + JSON Lines ?????? Chunk?
-    ?????????CUDA OOM ????????????? CPU ???
+    F5-TTS 跨进程 Task-scoped Persistent Worker 架构后端。
+    负责维持 F5 worker 常驻进程生命周期，
+    通过 ModelManager 确保 v1 Base 模型权重与预置成熟男声音色文件就绪，
+    经由 stdin / stdout + JSON Lines 流式交互协议驱动切片音频合成，
+    具备自适应标点停顿注入及 CUDA OOM 自动降级至 CPU 机制。
     """
     
     def __init__(self, config: dict):
@@ -34,19 +34,19 @@ class F5Backend(TTSBackend):
         return "f5"
 
     def start_session(self, options: Optional[Dict[str, Any]] = None) -> None:
-        """???? F5-TTS worker ????????????"""
+        """启动长生命周期 F5-TTS worker 独立进程"""
         if self._process is not None and self._process.poll() is None:
             return
 
-        # ????????????????????????????
+        # 检查并确保模型权重与预置音色就绪
         if self._cached_model_path is None or not self._cached_model_path.exists():
             try:
                 self._cached_model_path = ModelManager.ensure_model("f5", self._config)
             except Exception as e:
-                logger.error(f"F5 ??????: {e}")
+                logger.error(f"F5 模型检查失败: {e}")
                 self._cached_model_path = None
 
-        logger.info("?? F5-TTS Task-scoped Persistent Worker ??")
+        logger.info("启动 F5-TTS Task-scoped Persistent Worker 进程")
         try:
             cmd = [str(self._python_exe), str(self._worker_path)]
             if self._cached_model_path:
@@ -160,7 +160,7 @@ class F5Backend(TTSBackend):
             )
 
         except Exception as e:
-            logger.error(f"? F5 worker ??????: {e}")
+            logger.error(f"向 F5 worker 发送请求异常: {e}")
             self.stop_session()
             return TTSResult(
                 success=False,
@@ -170,74 +170,88 @@ class F5Backend(TTSBackend):
             )
 
     def synthesize(self, text: str, output_path: Path, voice: Optional[str] = None, speed: float = 1.0, options: Optional[Dict[str, Any]] = None) -> TTSResult:
-        """????????????????? CUDA OOM ???"""
+        """
+        合成文本切片音频，支持预置成熟商业男声音色与跨模型标点停顿注入，具备 CUDA OOM 自动降级能力。
+        """
         options = options or {}
-        ref_audio = options.get("ref_audio")
-        ref_text = options.get("ref_text", "")
-        device = options.get("device", "auto")
-        
+        ref_audio = options.get("ref_audio") or self._config.get("ref_audio")
+        ref_text = options.get("ref_text", "") or self._config.get("ref_text", "")
+        device = options.get("device") or self._config.get("device", "auto")
+
+        # 若未指定参考音频，自动使用开箱即用的预设成熟商业男声音色
+        default_preset_wav = "models/f5_tts/presets/preset_business_male.wav"
+        default_preset_text = "在去年写给合伙人的信中，我写道："
+        if not ref_audio and Path(default_preset_wav).exists():
+            ref_audio = default_preset_wav
+            ref_text = default_preset_text
+
         if not ref_audio:
             return TTSResult(
                 success=False,
                 output_path=output_path,
                 error_code="F5_REFERENCE_REQUIRED",
-                error_message="F5 ???? ref_audio ??"
+                error_message="F5-TTS 需要参考音频或有效的预置男声音色"
             )
-            
+
         ref_audio_path = Path(ref_audio)
         if not ref_audio_path.exists():
             return TTSResult(
                 success=False,
                 output_path=output_path,
                 error_code="INVALID_REFERENCE",
-                error_message=f"?????????: {ref_audio}"
+                error_message=f"参考音频文件不存在: {ref_audio}"
             )
-            
+
         payload = {
             "text": text,
             "output_path": str(output_path),
-            "voice": voice,
+            "voice": voice or "preset_business_male",
             "speed": speed,
             "ref_audio": str(ref_audio_path),
             "ref_text": ref_text,
-            "device": device
+            "device": device,
+            "nfe_step": options.get("nfe_step") or self._config.get("nfe_step", 32),
+            "pause_comma": options.get("pause_comma", 0.20),
+            "pause_colon": options.get("pause_colon", 0.28),
+            "pause_period": options.get("pause_period", 0.40),
+            "pause_paragraph": options.get("pause_paragraph", 0.65)
         }
-        
+
         result = self._send_payload(payload)
-        
-        # ?? CUDA ????????? fallback ? CPU
+
+        # 若 CUDA 显存不足则自动 fallback 到 CPU 重试
         if not result.success and result.error_code == "CUDA_OOM":
             if self._cpu_fallback:
-                logger.info("F5 ?? CUDA OOM????? CPU ????")
+                logger.info("F5 触发 CUDA OOM，正在自动切换至 CPU 重新渲染...")
                 payload["device"] = "cpu"
                 result = self._send_payload(payload)
             else:
-                logger.warning("F5 ?? CUDA OOM????? CPU ????")
-                
+                logger.warning("F5 触发 CUDA OOM，当前配置未开启 CPU 回退")
+
         return result
 
     def health_check(self) -> HealthCheckStatus:
-        """?? F5 Python ??"""
+        """检查 F5 Python 独立环境与 Worker 可用性"""
         if not self._python_exe.exists():
             return HealthCheckStatus(
                 status="NOT_CONFIGURED",
-                message="F5 Python ?????",
+                message="F5 Python 独立运行环境不存在",
             )
             
         if not self._worker_path.exists():
             return HealthCheckStatus(
                 status="ERROR",
-                message="F5 worker ?????",
+                message="F5 worker 脚本文件不存在",
             )
             
         try:
             subprocess.run([str(self._python_exe), "--version"], check=True, capture_output=True)
             return HealthCheckStatus(
                 status="OK",
-                message="F5 ????"
+                message="F5 独立环境就绪"
             )
         except Exception as e:
             return HealthCheckStatus(
                 status="ERROR",
-                message=f"F5 ??????: {str(e)}"
+                message=f"F5 环境检查失败: {str(e)}"
             )
