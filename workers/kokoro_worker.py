@@ -191,7 +191,7 @@ def split_chinese_sentences(text: str, max_len: int = 45) -> list:
         refined_sentences.append(current.strip())
 
     # 3. 句末标点保护：如果子句末尾无标点，补一个句号，为声码器提供自然的闭合音素
-    valid_punc = set("。！？!?；;,，、…")
+    valid_punc = set("。！？!?；;,，、…：:")
     final_sentences = []
     for s in refined_sentences:
         s = s.strip()
@@ -233,6 +233,53 @@ def split_bilingual_segments(sentence: str) -> list:
         if zh_part:
             segments.append((zh_part, 'zh'))
     return segments
+
+def trim_audio_silence(audio, sr: int = 24000, thresh_ratio: float = 0.002) -> "np.ndarray":
+    """
+    自适应短时能量静音剥离算法（Trim Silence Engine）。
+    【为什么这样设计】
+    Kokoro 神经网络在合成每个语音切片时，首尾会自动生成约 400ms 前导静音与 1225ms 尾部衰减静音。
+    若不予剔除直接连接，跨切片停顿会滚雪球至近 2 秒（1.8s+），导致有声书产生极其难受的死机级停顿。
+    本算法通过 20ms 滑动窗口与动态能量门限，精准擦除首尾多余静音，保留 20ms~30ms 极微呼吸气口余量，
+    为外部程序毫秒级精准注入标点停顿提供绝对干净纯粹的人声波形基底。
+    """
+    import numpy as np
+    if audio is None:
+        return np.zeros(0, dtype=np.float32)
+    if hasattr(audio, 'detach'):
+        arr = audio.detach().cpu().numpy()
+    elif isinstance(audio, np.ndarray):
+        arr = audio
+    else:
+        arr = np.array(audio, dtype=np.float32)
+
+    if len(arr) == 0:
+        return arr
+    frame_len = int(sr * 0.02)
+    hop = int(sr * 0.01)
+    if len(arr) < frame_len:
+        return arr
+    energy = np.array([np.sum(arr[i:i+frame_len]**2) for i in range(0, len(arr)-frame_len, hop)])
+    max_energy = np.max(energy)
+    if max_energy <= 1e-7:
+        return np.zeros(0, dtype=np.float32)
+    thresh = max_energy * thresh_ratio
+
+    # 起始人声点探测（保留 20ms 呼吸前置余量）
+    first_idx = 0
+    for idx, e in enumerate(energy):
+        if e >= thresh:
+            first_idx = max(0, idx * hop - int(sr * 0.02))
+            break
+
+    # 结束人声点探测（保留 30ms 尾随余韵余量）
+    last_idx = len(arr)
+    for idx in range(len(energy)-1, -1, -1):
+        if energy[idx] >= thresh:
+            last_idx = min(len(arr), (idx + 1) * hop + int(sr * 0.03))
+            break
+
+    return arr[first_idx:last_idx]
 
 def main():
     """
@@ -349,19 +396,21 @@ def main():
                 sample_rate = 24000
                 all_audio = []
 
-                # 获取目标纯正发音人嵌入（中文 100% 使用原生 zm_yunjian，英文术语使用原生 am_michael）
+                # 获取目标发音人嵌入（中文 100% 原生 zm_yunjian；英文采用方案B：80% zm + 20% onyx）
                 voice_pack = get_voice_pack(pipeline, voice)
-                voice_en_pack = get_voice_pack(pipeline, "am_michael")
+                voice_onyx = get_voice_pack(pipeline, "am_onyx")
+                voice_en_pack = 0.80 * voice_pack + 0.20 * voice_onyx
 
-                # 静音缓冲配置（标点停顿标准化）：
-                # 【为什么这样设计】
-                # 消除分片拼接导致的停顿两极分化（红框长达800ms+ vs 蓝框仅100ms）：
-                # 1. 主句末停顿（句号/感叹号/问号）：240ms，叠加模型句末衰减约 350~380ms，庄重沉稳；
-                # 2. 从属停顿（逗号/冒号/分号）：100ms，叠加模型微衰减约 180~220ms，舒适自然呼吸，杜绝漫长等待；
-                # 3. 中英片段极微呼吸气口（50ms）：消除中英文辅音切换的突兀感；
-                # 4. 结尾保护静音（350ms）：彻底杜绝音频尾部字音被播放器淡出吞字。
-                major_pause = np.zeros(int(sample_rate * 0.24), dtype=np.float32)
-                minor_pause = np.zeros(int(sample_rate * 0.10), dtype=np.float32)
+                # 标点符号停顿时间配置（单位：秒，完全可配置）：
+                pause_comma_sec = float(payload.get("pause_comma", 0.20))       # 逗号/顿号：默认 200ms
+                pause_colon_sec = float(payload.get("pause_colon", 0.28))       # 冒号/分号：默认 280ms
+                pause_period_sec = float(payload.get("pause_period", 0.40))     # 句号/感叹号/问号：默认 400ms
+                pause_para_sec = float(payload.get("pause_paragraph", 0.65))    # 换行/大段落：默认 650ms
+
+                pause_comma = np.zeros(int(sample_rate * pause_comma_sec), dtype=np.float32)
+                pause_colon = np.zeros(int(sample_rate * pause_colon_sec), dtype=np.float32)
+                pause_period = np.zeros(int(sample_rate * pause_period_sec), dtype=np.float32)
+                pause_paragraph = np.zeros(int(sample_rate * pause_para_sec), dtype=np.float32)
                 micro_pause = np.zeros(int(sample_rate * 0.05), dtype=np.float32)
                 tail_silence = np.zeros(int(sample_rate * 0.35), dtype=np.float32)
 
@@ -378,7 +427,7 @@ def main():
                         else:
                             adaptive_speed = speed
 
-                        # 中英分轨多发音人无缝渲染（Dual-Voice Pipeline Splicing）
+                        # 中英分轨同一发音人声线渲染（方案B：80% zm_yunjian + 20% am_onyx）
                         bilingual_segs = split_bilingual_segments(sentence)
                         sent_audios = []
                         for seg_idx, (seg_text, seg_lang) in enumerate(bilingual_segs):
@@ -390,24 +439,37 @@ def main():
                                 seg_speed = adaptive_speed
 
                             generator = pipeline(seg_text, voice=seg_voice, speed=seg_speed)
+                            seg_sub_audios = []
                             for i, (gs, ps, audio) in enumerate(generator):
                                 if sent_idx == 0 and seg_idx == 0 and i == 0:
                                     sys.stderr.write(f"Synthesizing [{gs[:15]}...] -> phonemes [{ps[:30]}...] (speed={seg_speed:.2f})\n")
                                     sys.stderr.flush()
                                 if audio is not None and len(audio) > 0:
-                                    sent_audios.append(audio)
+                                    # 剥离模型推理自带的前后静音
+                                    trimmed = trim_audio_silence(audio, sr=sample_rate)
+                                    if len(trimmed) > 0:
+                                        seg_sub_audios.append(trimmed)
+
+                            if seg_sub_audios:
+                                sent_audios.append(np.concatenate(seg_sub_audios))
+
+                            # 中英交界处注入 50ms 自然微呼吸气口
                             if len(bilingual_segs) > 1 and seg_idx < len(bilingual_segs) - 1:
                                 sent_audios.append(micro_pause)
 
                         if sent_audios:
                             all_audio.extend(sent_audios)
 
-                        # 标点符号停顿标准化判断：根据句子末尾真实标点赋予标准停顿
+                        # 标点符号停顿标准化判断：根据句子末尾真实标点毫秒级精准注入对应停顿
                         last_punc = sentence.rstrip()[-1] if sentence.strip() else ""
-                        if last_punc in "。！？!?\n":
-                            all_audio.append(major_pause)
+                        if last_punc in "\n":
+                            all_audio.append(pause_paragraph)
+                        elif last_punc in "。！？!?":
+                            all_audio.append(pause_period)
+                        elif last_punc in "：:":
+                            all_audio.append(pause_colon)
                         else:
-                            all_audio.append(minor_pause)
+                            all_audio.append(pause_comma)
                 else:
                     # 英文或其他语种走默认 pipeline
                     generator = pipeline(text, voice=voice_pack, speed=speed, split_pattern=r'\n+')
@@ -416,14 +478,21 @@ def main():
                             sys.stderr.write(f"Synthesizing [{gs[:15]}...] -> phonemes [{ps[:30]}...]\n")
                             sys.stderr.flush()
                         if audio is not None and len(audio) > 0:
-                            all_audio.append(audio)
-                    all_audio.append(major_pause)
+                            trimmed = trim_audio_silence(audio, sr=sample_rate)
+                            if len(trimmed) > 0:
+                                all_audio.append(trimmed)
+                    all_audio.append(pause_period)
 
                 if not all_audio:
                     raise ValueError("Kokoro 未能生成有效音频数据")
 
                 # 替换最后一个句间停顿为充裕的尾部保护静音
-                if len(all_audio) > 0 and (np.array_equal(all_audio[-1], major_pause) or np.array_equal(all_audio[-1], minor_pause)):
+                if len(all_audio) > 0 and (
+                    np.array_equal(all_audio[-1], pause_period)
+                    or np.array_equal(all_audio[-1], pause_colon)
+                    or np.array_equal(all_audio[-1], pause_comma)
+                    or np.array_equal(all_audio[-1], pause_paragraph)
+                ):
                     all_audio.pop()
                 all_audio.append(tail_silence)
 
