@@ -66,16 +66,15 @@ def test_normalize_polyphone_classifier():
     assert "这两支股票" in normalized
 
 def test_normalize_bilingual_spacing():
-    # 测试中英混排词界呼吸间距与括号自然插入语保护
+    # 测试中英混排词界呼吸间距与带自然空隙的括号保护
     text1 = "第二类是所谓的“套利类”（workouts）投资"
     normalized1 = normalize_text(text1)
-    assert "workouts" in normalized1
-    assert "workouts，" in normalized1 or "workouts ，" in normalized1
+    assert "(workouts)" in normalized1
+    assert "（" not in normalized1
 
     text2 = "第三类是“相对价值”或“低估类”（general issues）投资"
     normalized2 = normalize_text(text2)
-    assert "general issues" in normalized2
-    assert "general issues，" in normalized2 or "general issues ，" in normalized2
+    assert "(general issues)" in normalized2
 
     text3 = "我们在workouts投资领域获得超额收益"
     normalized3 = normalize_text(text3)

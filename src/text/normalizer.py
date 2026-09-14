@@ -164,24 +164,16 @@ class TextNormalizer:
         text = self.classifier_zhi_pattern1.sub(r'\1支\2', text)
         text = self.classifier_zhi_pattern2.sub(lambda m: m.group(1).replace('只', '支'), text)
 
-        # 9. 英文术语括号注释转换为自然插入语呼吸标点（模型外通用设计）
+        # 9. 英文术语括号与中英词界规范化（模型外通用设计）
         # 【为什么这样设计】
-        # 中文书籍排版中大量存在“套利类（workouts）投资”、“低估类（general issues）投资”等术语标注。
-        # 括号本身在多数 TTS 引擎中不发音或时长为 0，导致汉字与英文首尾辅音直接粘连碰撞（如 lei-dʒ、ts-pu）。
-        # 规范化为逗号隔开的自然插入语（如“套利类，workouts，投资”），提供 100~150ms 的自然停顿与呼吸气口，
-        # 无论使用哪款 TTS 引擎，均能确保英文单词发音独立舒展、主次鲜明。
-        text = re.sub(r'([（(])\s*([a-zA-Z\s\'-]+)\s*([）)])', r'，\2，', text)
-        # 清理可能产生的重复逗号
-        text = re.sub(r'[，,]{2,}', '，', text)
-        text = re.sub(r'([，,])\s*([。！？!?；;])', r'\2', text)
-
-        # 10. 中英混排词界与呼吸间距规范化（模型外通用设计）
-        # 【为什么这样设计】
-        # 在中文书籍排版中，英文专业术语（如 workouts、general issues）常紧贴汉字。
-        # 汉字与英文之间若无标点或空格，易导致各类分词引擎切词破损或发音急促。
-        # 规范化补入自然空格间隙，确保中英文切换时具备优良的播音呼吸感。
+        # 中文书籍中英文专业术语常被括号包裹并紧接方位词（如“低估类(general issues)中”）。
+        # 若硬插逗号容易将后置方位词（如“中”、“等”）孤立成单字破句。
+        # 统一规范化为带自然空隙的括号，汉字与英文间保持标准盘古之白空格，
+        # 既消除辅音碰撞，又保持中文句法完整与呼吸连贯。
+        text = re.sub(r'[（(]\s*([a-zA-Z\s\'-]+)\s*[）)]', r' (\1) ', text)
         text = re.sub(r'([\u4e00-\u9fa5])([a-zA-Z])', r'\1 \2', text)
         text = re.sub(r'([a-zA-Z])([\u4e00-\u9fa5])', r'\1 \2', text)
+        text = re.sub(r'[ \t]+', ' ', text)
 
         return text
 
