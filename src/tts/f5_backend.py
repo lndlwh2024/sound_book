@@ -178,12 +178,17 @@ class F5Backend(TTSBackend):
         ref_text = options.get("ref_text", "") or self._config.get("ref_text", "")
         device = options.get("device") or self._config.get("device", "auto")
 
-        # 若未指定参考音频，自动使用开箱即用的预设成熟商业男声音色
-        default_preset_wav = "models/f5_tts/presets/preset_business_male.wav"
+        # 若未指定参考音频，自动使用开箱即用的预设商业精英男声音色 (D1)
+        default_preset_name = self._config.get("preset_voice", "preset_male_d1_elite")
+        default_preset_wav = f"models/f5_tts/presets/{default_preset_name}.wav"
         default_preset_text = "在去年写给合伙人的信中，我写道："
-        if not ref_audio and Path(default_preset_wav).exists():
-            ref_audio = default_preset_wav
-            ref_text = default_preset_text
+        if not ref_audio:
+            if Path(default_preset_wav).exists():
+                ref_audio = default_preset_wav
+                ref_text = default_preset_text
+            elif Path("models/f5_tts/presets/preset_business_male.wav").exists():
+                ref_audio = "models/f5_tts/presets/preset_business_male.wav"
+                ref_text = default_preset_text
 
         if not ref_audio:
             return TTSResult(
@@ -205,7 +210,7 @@ class F5Backend(TTSBackend):
         payload = {
             "text": text,
             "output_path": str(output_path),
-            "voice": voice or "preset_business_male",
+            "voice": voice or default_preset_name,
             "speed": speed,
             "ref_audio": str(ref_audio_path),
             "ref_text": ref_text,

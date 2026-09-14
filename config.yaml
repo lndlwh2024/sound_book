@@ -79,13 +79,13 @@ tts:
     subfolder: "F5TTS_v1_Base"        # 采用 v1 Base 架构
     model_path: "models/f5_tts"       # 权重本地存放路径
     device: "cuda"                    # 推理硬件环境: cuda / cpu / auto
-    nfe_step: 32                      # ODE 扩散推理步数 (32 步兼顾质量与速度)
+    nfe_step: 16                      # ODE 扩散推理步数 (16 步兼具极速推理与无损高保真品质)
     cfg_strength: 2.0                 # 无分类器引导系数 (Classifier-Free Guidance)
     speed: 1.0                        # 语速调节倍率
-    # 预置成熟商业男声音色（开箱即用，无需用户自己录音）
-    preset_voice: "preset_business_male"
+    # 预置轻熟商业精英男声音色 (D1 定稿音色，开箱即用)
+    preset_voice: "preset_male_d1_elite"
     preset_dir: "models/f5_tts/presets"
-    ref_audio: "models/f5_tts/presets/preset_business_male.wav"
+    ref_audio: "models/f5_tts/presets/preset_male_d1_elite.wav"
     ref_text: "在去年写给合伙人的信中，我写道："
 
   # --- Azure Neural TTS 专属配置 ---
