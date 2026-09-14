@@ -127,11 +127,18 @@ class TextCleaner:
             
             # 判断是否应合并行：如果上一行非句末标点结尾
             if last_char and last_char not in end_punctuations:
-                # 英文非句末且下一行小写开头
-                if first_char.isalpha() and first_char.islower():
+                # 排除小标题（如《业绩解读》、《1957 年业绩》等短行）：
+                # 小标题独占一行且字数较短（<= 25 字），如果末尾无逗号等连词标点，保持为独立小节，严禁与下行正文粘连
+                is_heading_like = len(current_line.strip()) <= 25 and last_char not in {'，', ',', '、', '；', ';', '：', ':'}
+                if is_heading_like:
+                    # 规范小标题：补全句号作为朗读自然休止，独立成段
+                    current_line = current_line.strip() + "。"
+                    should_merge = False
+                elif first_char.isalpha() and first_char.islower():
+                    # 英文非句末且下一行小写开头
                     should_merge = True
-                # 中文非句末
                 elif re.search(r'[\u4e00-\u9fff]', last_char) or re.search(r'[\u4e00-\u9fff]', first_char):
+                    # 普通长句跨行换行合并
                     should_merge = True
                     
             if should_merge:

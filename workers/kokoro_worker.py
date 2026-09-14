@@ -1,4 +1,4 @@
-﻿import sys
+import sys
 import json
 import time
 import os
@@ -235,6 +235,7 @@ def main():
                 print(json.dumps({
                     "success": True,
                     "output_path": output_path,
+                    "audio_duration": len(final_audio) / sample_rate,
                     "duration": time.time() - start_time
                 }, ensure_ascii=False), flush=True)
 

@@ -31,6 +31,15 @@ def test_normalize_standalone_year():
     assert "一九五七" in normalized
     assert "1957" not in normalized
 
+def test_normalize_year_with_space():
+    # 测试带空格年份排版，彻底避免被分词器识别为基数词
+    text = "1957 年，我们的业绩高于一般水平，在 1956 年成立的账户"
+    normalized = normalize_text(text)
+    assert "一九五七年" in normalized
+    assert "一九五六年" in normalized
+    assert "1957" not in normalized
+    assert "1956" not in normalized
+
 def test_normalize_year_range():
     text = "在 1957-1958 年期间"
     normalized = normalize_text(text)
@@ -47,3 +56,11 @@ def test_normalize_century_and_decade():
     text = "在20世纪80年代"
     normalized = normalize_text(text)
     assert "二十世纪八十年代" in normalized
+
+def test_normalize_polyphone_classifier():
+    # 测试金融量词多音字校准：'两只股票'必须发一声
+    text = "去年，我们买了两只股票，在这两只股票上的持股数量已经达到，这两只股票都大概需要..."
+    normalized = normalize_text(text)
+    assert "两支股票" in normalized
+    assert "两只股票" not in normalized
+    assert "这两支股票" in normalized

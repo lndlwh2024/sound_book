@@ -348,6 +348,25 @@ class TaskManager:
         speed_param = self.params.get("speed")
         speed = float(speed_param) if speed_param is not None else float(self.config.get(f"tts.{backend}.speed", 0.85))
 
+        # 模型外通用文本正规化：在分块前对清洗后的结构内容统一应用正规化（年份含空格、量词多音字、比例等）
+        from src.text.normalizer import normalize_text
+        if hasattr(self.cleaned_structure, "chapters"):
+            for chapter in self.cleaned_structure.chapters:
+                if hasattr(chapter, "content") and chapter.content:
+                    chapter.content = normalize_text(chapter.content)
+                if hasattr(chapter, "paragraphs") and chapter.paragraphs:
+                    for p in chapter.paragraphs:
+                        if hasattr(p, "text") and p.text:
+                            p.text = normalize_text(p.text)
+                if hasattr(chapter, "sections") and chapter.sections:
+                    for sec in chapter.sections:
+                        if hasattr(sec, "content") and sec.content:
+                            sec.content = normalize_text(sec.content)
+                        if hasattr(sec, "paragraphs") and sec.paragraphs:
+                            for p in sec.paragraphs:
+                                if hasattr(p, "text") and p.text:
+                                    p.text = normalize_text(p.text)
+
         chunks: List[TTSChunk] = chunker.chunk_book(
             book_structure=self.cleaned_structure,
             backend=backend,
@@ -355,13 +374,41 @@ class TaskManager:
             speed=speed
         )
 
-        # 关联输出文件
+        # 关联输出文件并进行二次通用正规化保护
         for chunk in chunks:
+            chunk.text = normalize_text(chunk.text)
             chunk_wav = self.book_dir / "audio_chunks" / f"{chunk.chunk_id}.wav"
             chunk.output_file = str(chunk_wav)
 
         self.manifest_manager.save_tts_manifest(chunks)
         logger.info(f"文本切分完毕，内部生成 {len(chunks)} 个语音块")
+        self._print_chapter_file_mapping(chunks)
+
+    def _print_chapter_file_mapping(self, chunks: List[TTSChunk]) -> dict:
+        """
+        模型外通用功能：按大章节统计并打印所属的文件编号清单，
+        方便用户将不同章节的音频整合到一个最终文件中。
+        """
+        chapter_map = {}
+        for chunk in chunks:
+            ch_id = chunk.chapter_id
+            if ch_id not in chapter_map:
+                chapter_map[ch_id] = []
+            chapter_map[ch_id].append(chunk)
+
+        print("\n" + "=" * 65)
+        print("【大章节与音频文件编号对照表】")
+        for ch_id, ch_chunks in chapter_map.items():
+            count = len(ch_chunks)
+            first_file = ch_chunks[0].chunk_id + ".wav"
+            last_file = ch_chunks[-1].chunk_id + ".wav"
+            if count == 1:
+                range_str = first_file
+            else:
+                range_str = f"{first_file} ~ {last_file}"
+            print(f"* 章节 {ch_id}: 包含 {count} 个音频文件 (编号范围: {range_str})")
+        print("=" * 65 + "\n")
+        return chapter_map
 
     def _generate_tts(self) -> None:
         """
@@ -449,7 +496,16 @@ class TaskManager:
                     chunk.error_message = None
                     success_count += 1
                     batch_chars_processed += len(chunk.text)
-                    batch_audio_duration += result.duration
+                    
+                    # 读取生成的真实 wav 音频时长（确保统计精准无误）
+                    actual_wav_duration = result.duration
+                    try:
+                        import soundfile as sf
+                        wav_info = sf.info(str(output_wav))
+                        actual_wav_duration = wav_info.duration
+                    except Exception:
+                        pass
+                    batch_audio_duration += actual_wav_duration
                 else:
                     chunk.status = "FAILED"
                     chunk.error_code = result.error_code or "TTS_FAILED"
@@ -485,6 +541,8 @@ class TaskManager:
         print(f"5. 本次生成音频总时长: {batch_audio_duration:.2f} 秒 ({batch_audio_duration / 60:.2f} 分钟)")
         print(f"6. 显卡硬件推理总耗时: {batch_inference_time:.2f} 秒 (合成加速比: {speedup_ratio:.1f}x 实时)")
         print("=" * 55 + "\n")
+        # 模型外通用输出：大章节与音频文件对照清单
+        self._print_chapter_file_mapping(chunks)
 
         logger.info(
             f"TTS 统计：总切分块={total_chunks}, 平均字数={avg_chars_per_chunk:.1f}, "

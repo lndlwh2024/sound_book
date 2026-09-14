@@ -17,12 +17,20 @@ validation:
   min_chapters: 0
 
 chunking:
-  # ???? Chunk ???
+  # 默认 Chunk 字符数
   default_max_chars: 1000
-  # Chunk ???????
+  # Chunk 之间的微停顿
   chunk_pause_ms: 150
-  # ?????????
+  # 章节之间的长停顿
   chapter_pause_ms: 1000
+  # 模型外通用配置：小标题与正文之间的独立停顿时长（毫秒）
+  heading_pause_ms: 800
+
+# 模型外通用文本正规化配置（跨所有 TTS 模型生效）
+normalization:
+  enable_polyphone_fix: true  # 开启金融量词多音字（如两只股票）一声校准
+  enable_year_oral: true      # 开启四位年份（含空格）口语位读转换
+  enable_ratio_oral: true     # 开启比例与百分比口语化
 
 tts:
   # ?? TTS ??

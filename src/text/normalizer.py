@@ -69,8 +69,12 @@ def number_to_chinese(num_str: str) -> str:
 
 class TextNormalizer:
     """
-    中文听书文本正规化器（Text Normalization）。
-    针对 TTS 中常见的年份生硬（如读成一千九百八十二）、独立年份误读、百分比、常见比例等进行口语化润色。
+    中文听书跨模型通用文本正规化器（Text Normalization）。
+    【为什么这样设计】
+    属于模型外通用层，与具体 TTS 引擎无关：
+    1. 年份位读：彻底解决无论是否带空格（如 '1957 年' 与 '1957年'）、区间（'1957-1958'）或独立出现时被误读为基数词（'一千九百五十七'）的问题；
+    2. 多音字校准：普通话中'只'在作为股票等金融资产量词时必须读作第一声（zhī）。统一规范为标准同音量词'支'，确保在任何 TTS 引擎下 100% 稳定发一声；
+    3. 比例与百分比口语化：将 '70:30' -> '七十比三十'，'10%到20%' -> '百分之十到百分之二十'。
     """
 
     def __init__(self):
@@ -80,16 +84,23 @@ class TextNormalizer:
         self.decade_pattern = re.compile(r'(?<!\d)([2-9]0)\s*年代')
         # 匹配年份区间（如 1957-1958年、1957~1958、1957年至1958年）
         self.year_range_pattern = re.compile(r'(?<!\d)(1[89]\d{2}|20\d{2})\s*[-~～至到]\s*(1[89]\d{2}|20\d{2})\s*年?')
-        # 匹配带“年”的 4 位年份（如 1957年、2024年）
+        # 匹配带“年”的 4 位年份，包含中间带空格的常见排版（如 1957 年、2024年）
         self.year_with_suffix_pattern = re.compile(r'(?<!\d)(1[89]\d{2}|20\d{2})\s*年')
         # 匹配百分比（如 10%、20.5%、10% 到 20%）
         self.percent_range_pattern = re.compile(r'(\d+(?:\.\d+)?)\s*%\s*[-~～到至]\s*(\d+(?:\.\d+)?)\s*%')
         self.percent_single_pattern = re.compile(r'(\d+(?:\.\d+)?)\s*%')
         # 匹配比例（如 70：30、85:15）
         self.ratio_pattern = re.compile(r'(?<!\d)(\d{1,3})\s*[:：]\s*(\d{1,3})(?!\d)')
-        # 匹配独立出现的四位年份数字（排除后跟量词的情况）
+        # 匹配独立出现的四位年份数字（排除后跟计量量词的情况）
         self.standalone_year_pattern = re.compile(
             r'(?<![\d.])(1[89]\d{2}|20\d{2})(?![\d.%个只本位台张家条件股支块元万千百点分公里米])'
+        )
+        # 多音字金融量词匹配：'两只股票'、'一只股票'、'这几只股票'、'这两只' 等场景中'只'应读一声（zhī）
+        self.classifier_zhi_pattern1 = re.compile(
+            r'([一二两三四五六七八九十百千万几多每这那各0-9]+)\s*只\s*(股票|个股|基金|证券|标的)'
+        )
+        self.classifier_zhi_pattern2 = re.compile(
+            r'([这那两几]只)(?=\s*(?:都|也|受|的|在|是|大概|需要|可以|将|会|占|属于))'
         )
 
     def normalize(self, text: str) -> str:
@@ -118,7 +129,7 @@ class TextNormalizer:
             return f"{y1}年至{y2}年"
         text = self.year_range_pattern.sub(replace_year_range, text)
 
-        # 4. 替换带“年”后缀的四位年份（如 1957年 -> 一九五七年）
+        # 4. 替换带“年”后缀的四位年份（如 '1957 年' 或 '1957年' -> '一九五七年'，消灭空格）
         def replace_year_suffix(m):
             y = digits_to_chinese(m.group(1))
             return f"{y}年"
@@ -148,6 +159,10 @@ class TextNormalizer:
             y = digits_to_chinese(m.group(1))
             return y
         text = self.standalone_year_pattern.sub(replace_standalone_year, text)
+
+        # 8. 金融资产多音字量词校准：确保'两只股票'读作第一声（zhī）
+        text = self.classifier_zhi_pattern1.sub(r'\1支\2', text)
+        text = self.classifier_zhi_pattern2.sub(lambda m: m.group(1).replace('只', '支'), text)
 
         return text
 
