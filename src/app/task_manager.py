@@ -105,7 +105,8 @@ class TaskManager:
         """执行完整的有声书处理流水线"""
         print(f"\n==================================================")
         print(f"当前书籍: 《{self.display_name}》")
-        print(f"TTS 后端: {self.params.get('tts', self.config.get('tts.default_backend', 'kokoro')).capitalize()}")
+        backend_name = self.params.get('tts') or self.config.get('tts.default_backend', 'kokoro')
+        print(f"TTS 后端: {backend_name.capitalize()}")
         print(f"状态: 开始处理")
         print(f"==================================================\n")
 
