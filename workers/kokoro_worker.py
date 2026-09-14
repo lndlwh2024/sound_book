@@ -15,6 +15,87 @@ if hasattr(sys.stdout, "reconfigure"):
 if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8")
 
+import shutil
+from functools import lru_cache
+
+# ==============================================================================
+# 1. Windows 纯 ASCII 路径自动挂载与 espeak-ng 底层库防御性劫持
+# 【为什么这样设计】
+# Kokoro 英文音标转换依赖底层原生 C 编译库 espeak-ng.dll。
+# 当工程根目录包含非 ASCII 字符（如当前 Windows 路径 H:\业务\soundbook）时，
+# C 运行库原生接口无法识别 GBK/宽字符中文路径，导致找不到 phontab 数据包而直接崩溃。
+# 同时，misaki/espeak.py 在导入时会无脑调用 espeakng_loader.get_data_path() 覆盖设置，
+# 因此必须将 espeakng_loader.get_data_path 劫持为纯 ASCII 目录，彻底杜绝路径解析异常。
+# ==============================================================================
+try:
+    import espeakng_loader
+    local_app_data = Path(os.environ.get("LOCALAPPDATA", "C:/Users/lndlw/AppData/Local"))
+    ascii_espeak_data = local_app_data / "espeak-ng-data"
+    if not ascii_espeak_data.exists():
+        src_data = Path(espeakng_loader.get_data_path())
+        if src_data.exists():
+            shutil.copytree(src_data, ascii_espeak_data)
+
+    espeakng_loader.get_data_path = lambda: str(ascii_espeak_data)
+    os.environ["PHONEMIZER_ESPEAK_DATA_PATH"] = str(ascii_espeak_data)
+    os.environ["ESPEAK_DATA_PATH"] = str(ascii_espeak_data)
+
+    from phonemizer.backend.espeak.wrapper import EspeakWrapper
+    EspeakWrapper.set_data_path(str(ascii_espeak_data))
+    EspeakWrapper.set_library(espeakng_loader.get_library_path())
+except Exception as _e:
+    sys.stderr.write(f"Warning: Failed to setup ASCII espeak-ng path: {_e}\n")
+    sys.stderr.flush()
+
+# ==============================================================================
+# 2. 中英双语 IPA 音标转换注入（Bilingual G2P Extension）
+# 【为什么这样设计】
+# Kokoro 官方中文管线 misaki.zh.ZHG2P 在处理夹杂在中文里的英文单词（如 workouts、general issues）时，
+# 源码 legacy_call 会将裸英文字母原样拼接到音标流中。
+# Kokoro 声码器只认识 IPA 国际音标，收到未经音标化的字母后会出现怪叫爆音或吞音。
+# 此处我们注入增强版 legacy_call，自动提取混排的英文单词转为标准美式 IPA 音素，
+# 并辅以 LRU 缓存保障极速转换，使有声书中的英文术语发音字正腔圆、纯正地道。
+# ==============================================================================
+try:
+    from phonemizer import phonemize
+    import misaki.zh
+    import jieba
+
+    @lru_cache(maxsize=2000)
+    def _cached_word_to_ipa(word: str) -> str:
+        """带 LRU 高速缓存的美式英语单词转 IPA 音素"""
+        try:
+            ipa = phonemize(word, language="en-us", backend="espeak").strip()
+            return ipa if ipa else word
+        except Exception:
+            return word
+
+    def bilingual_legacy_call(text: str) -> str:
+        if not text:
+            return ""
+        is_zh = bool(re.match(r"[\u4E00-\u9FFF]", text[0]))
+        result = ""
+        for segment in re.findall(r"[\u4E00-\u9FFF]+|[^\u4E00-\u9FFF]+", text):
+            if is_zh:
+                words = jieba.lcut(segment, cut_all=False)
+                segment = " ".join(misaki.zh.ZHG2P.word2ipa(w) for w in words)
+            else:
+                # 非中文片段：将其中包含的英文单词转换为标准美式 IPA 音标
+                def replace_en(match):
+                    return _cached_word_to_ipa(match.group(0))
+                # 匹配连字号或带撇号的英文单词（如 workouts, don't, long-term）
+                segment = re.sub(r"[A-Za-z]+(?:['\-][A-Za-z]+)*", replace_en, segment)
+            result += segment
+            is_zh = not is_zh
+        return result.replace(chr(815), "")
+
+    misaki.zh.ZHG2P.legacy_call = staticmethod(bilingual_legacy_call)
+    sys.stderr.write("Bilingual G2P patch installed successfully\n")
+    sys.stderr.flush()
+except Exception as _e:
+    sys.stderr.write(f"Warning: Failed to install bilingual G2P patch: {_e}\n")
+    sys.stderr.flush()
+
 # 引入项目内置的口语化正规化模块（Text Normalizer）
 # 将独立四位年份、年份区间、百分比等转换为播音位读（如 1957 -> 一九五七）
 try:
@@ -178,12 +259,10 @@ def main():
                 if pipeline is None or current_lang_code != lang_code or current_device != device:
                     sys.stderr.write(f"Model loaded (lang={lang_code}, device={device})\n")
                     sys.stderr.flush()
-                    if args.model_path and Path(args.model_path).exists():
-                        try:
-                            pipeline = KPipeline(lang_code=lang_code, repo_id=str(args.model_path), device=device)
-                        except Exception:
-                            pipeline = KPipeline(lang_code=lang_code, device=device)
-                    else:
+                    repo_id = str(args.model_path) if (args.model_path and Path(args.model_path).exists()) else "hexgrad/Kokoro-82M"
+                    try:
+                        pipeline = KPipeline(lang_code=lang_code, repo_id=repo_id, device=device)
+                    except Exception:
                         pipeline = KPipeline(lang_code=lang_code, device=device)
                     current_lang_code = lang_code
                     current_device = device

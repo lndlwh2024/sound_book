@@ -1,4 +1,4 @@
-﻿import re
+import re
 import logging
 from typing import Optional
 
@@ -163,6 +163,14 @@ class TextNormalizer:
         # 8. 金融资产多音字量词校准：确保'两只股票'读作第一声（zhī）
         text = self.classifier_zhi_pattern1.sub(r'\1支\2', text)
         text = self.classifier_zhi_pattern2.sub(lambda m: m.group(1).replace('只', '支'), text)
+
+        # 9. 中英混排词界与呼吸间距规范化（模型外通用设计）
+        # 【为什么这样设计】
+        # 在中文书籍排版中，英文专业术语（如 workouts、general issues）常紧贴汉字。
+        # 汉字与英文之间若无标点或空格，易导致各类分词引擎切词破损或发音急促。
+        # 规范化补入自然空格间隙，确保中英文切换时具备优良的播音呼吸感。
+        text = re.sub(r'([\u4e00-\u9fa5])([a-zA-Z])', r'\1 \2', text)
+        text = re.sub(r'([a-zA-Z])([\u4e00-\u9fa5])', r'\1 \2', text)
 
         return text
 

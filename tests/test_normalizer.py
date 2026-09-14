@@ -1,4 +1,4 @@
-﻿import pytest
+import pytest
 from src.text.normalizer import (
     digits_to_chinese,
     int_to_chinese,
@@ -64,3 +64,18 @@ def test_normalize_polyphone_classifier():
     assert "两支股票" in normalized
     assert "两只股票" not in normalized
     assert "这两支股票" in normalized
+
+def test_normalize_bilingual_spacing():
+    # 测试中英混排词界呼吸间距保护
+    text1 = "第二类是所谓的“套利类”（workouts）投资"
+    normalized1 = normalize_text(text1)
+    assert "workouts" in normalized1
+
+    text2 = "第三类是“相对价值”或“低估类”（general issues）投资"
+    normalized2 = normalize_text(text2)
+    assert "general issues" in normalized2
+
+    text3 = "我们在workouts投资领域获得超额收益"
+    normalized3 = normalize_text(text3)
+    assert "在 workouts 投资" in normalized3
+
