@@ -154,15 +154,15 @@ class F5Backend(TTSBackend):
                         break
                 except Exception:
                     continue
-            # 【为什么这样设计】：TTSResult.duration 必须代表合成音频的实际物理时长（秒），
-            # 才能供 NativeTTSSubtitleEngine 精确构建字幕时间轴，避免被推理耗时误污染。
             actual_audio_dur = result_data.get("audio_duration")
             if actual_audio_dur is None:
                 actual_audio_dur = result_data.get("duration", 0.0)
 
+            resolved_out = result_data.get("output_path") or str(output_path)
+
             return TTSResult(
                 success=result_data.get("success", False),
-                output_path=Path(result_data.get("output_path", str(output_path))),
+                output_path=Path(resolved_out),
                 duration=float(actual_audio_dur),
                 error_code=result_data.get("error_code"),
                 error_message=result_data.get("error_message")
