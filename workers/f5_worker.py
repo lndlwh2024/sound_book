@@ -83,9 +83,11 @@ def trim_audio_silence(audio, sr: int = 24000, thresh_ratio: float = 0.002):
 
     return arr[first_idx:last_idx]
 
-def split_chinese_sentences(text: str, max_len: int = 40) -> list:
+def split_chinese_sentences(text: str, max_len: int = 26) -> list:
     """
-    智能分句算法，将长篇正文切分为 20~40 字的舒适语音片段。
+    智能分句算法，将长篇正文切分为 15~26 字的黄金语音片段。
+    【设计原因】：F5-TTS 基于参考音频（5~8秒）估算生成时长，分句长度控制在 25 字以内
+    能与参考音频保持近 1:1 的注意力对齐比例，彻底根除跨步漂移导致的忽快忽慢与叠字杂音。
     """
     if not text or not text.strip():
         return []
@@ -295,15 +297,15 @@ def main():
                 pause_paragraph = np.zeros(int(sample_rate * pause_para_sec), dtype=np.float32)
                 tail_silence = np.zeros(int(sample_rate * 0.35), dtype=np.float32)
 
-                # 分句合成与精准停顿重构
-                sentences = split_chinese_sentences(text, max_len=40)
+                # 分句合成与精准停顿重构（采用 26 字黄金分句限制）
+                sentences = split_chinese_sentences(text, max_len=26)
                 all_audio = []
 
                 nfe_step = int(payload.get("nfe_step", 32))
 
                 for sent_idx, sent in enumerate(sentences):
                     # 净化特殊非 ASCII/非拼音合法符号，防止 token 嵌入未定义越界
-                    clean_sent = re.sub(r'[：:；;—–“”（）()《》\n\r\t]', '，', sent)
+                    clean_sent = re.sub(r'[：:；;—–“”（）()《》\n\r\t\[\]【】…\.]', '，', sent)
                     clean_sent = re.sub(r'，+', '，', clean_sent).strip('，')
                     if not clean_sent:
                         clean_sent = sent
@@ -334,6 +336,14 @@ def main():
                         # 自适应剥离首尾静音
                         trimmed = trim_audio_silence(seg_data, sr=sample_rate)
                         if len(trimmed) > 0:
+                            # 防爆音平滑处理：添加 10ms 极微淡入淡出，消除由于音频截断产生的点击杂音
+                            fade_len = int(sample_rate * 0.01)
+                            if len(trimmed) > fade_len * 2:
+                                fade_in = np.linspace(0, 1, fade_len, dtype=np.float32)
+                                fade_out = np.linspace(1, 0, fade_len, dtype=np.float32)
+                                trimmed = trimmed.copy()
+                                trimmed[:fade_len] *= fade_in
+                                trimmed[-fade_len:] *= fade_out
                             all_audio.append(trimmed)
 
                         # 注入对应标点停顿
@@ -368,13 +378,20 @@ def main():
                 if np.max(np.abs(final_audio)) < 1e-4:
                     raise ValueError("合成音频数据校验失败：音频为全静音异常！")
 
-                sf.write(output_path, final_audio, sample_rate)
+                # 动态峰值安全守卫：防止削顶失真产生的刺耳杂音
+                peak_val = np.max(np.abs(final_audio))
+                if peak_val > 0.95:
+                    final_audio = (final_audio / peak_val) * 0.95
+
+                audio_dur = float(len(final_audio) / sample_rate)
+                elapsed_time = float(time.time() - start_time)
 
                 send_ipc({
                     "success": True,
                     "output_path": output_path,
-                    "audio_duration": len(final_audio) / sample_rate,
-                    "duration": time.time() - start_time
+                    "audio_duration": audio_dur,
+                    "duration": audio_dur,  # 规范统一：duration 代表实际音频物理时长（秒）
+                    "elapsed_time": elapsed_time  # 推理消耗的墙钟时间
                 })
 
             except torch.cuda.OutOfMemoryError as e:

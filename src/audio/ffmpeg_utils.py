@@ -22,9 +22,29 @@ def check_ffmpeg() -> bool:
 
 def get_audio_info(wav_path: Path) -> dict:
     """
-    使用 ffprobe 获取音频信息。
+    获取音频信息。
+    【设计原因】：优先使用 Python 标准库 wave 模块读取 WAV 头，
+    具备纳秒级性能且零子进程负担；若非标准 WAV 则降级回退至 ffprobe。
     返回包含 duration, sample_rate, channels, codec 的字典。
     """
+    # 1. 优先使用标准库 wave 极速读取
+    try:
+        import wave
+        with wave.open(str(wav_path), 'rb') as wf:
+            frames = wf.getnframes()
+            rate = wf.getframerate()
+            channels = wf.getnchannels()
+            dur = frames / float(rate) if rate > 0 else 0.0
+            return {
+                "duration": float(dur),
+                "sample_rate": int(rate),
+                "channels": int(channels),
+                "codec": "pcm_s16le"
+            }
+    except Exception:
+        pass
+
+    # 2. 降级使用 ffprobe
     cmd = [
         "ffprobe",
         "-v", "quiet",

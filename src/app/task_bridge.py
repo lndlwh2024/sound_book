@@ -190,7 +190,11 @@ class ProductionWorker(QThread):
                                 voice=voice_profile,
                                 speed=1.0
                             )
-                            if res.success and res.duration > 0:
+                            from ..audio.ffmpeg_utils import get_audio_info
+                            phys_info = get_audio_info(u_wav)
+                            if phys_info.get("duration", 0) > 0:
+                                u.audio_duration = phys_info["duration"]
+                            elif res.success and res.duration > 0:
                                 u.audio_duration = res.duration
                             else:
                                 u.audio_duration = max(1.5, len(u.text) * 0.2)

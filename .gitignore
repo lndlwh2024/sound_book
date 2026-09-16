@@ -50,3 +50,7 @@ models/
 # === OS ===
 Thumbs.db
 .DS_Store
+
+# === 产物与本地语料 ===
+output/
+原声/
