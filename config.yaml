@@ -39,15 +39,24 @@ tts:
   f5:
     repo_id: SWivid/F5-TTS
     subfolder: F5TTS_v1_Base
-    model_path: models/f5_tts
+    model_path: models/f5_tts/F5TTS_v1_Base
     device: cuda
     nfe_step: 16
     cfg_strength: 2.0
     speed: 1.0
-    preset_voice: preset_male_d1_elite
+    preset_voice: preset_male_e1_narrator
     preset_dir: models/f5_tts/presets
-    ref_audio: models/f5_tts/presets/preset_male_d1_elite.wav
-    ref_text: 在去年写给合伙人的信中，我写道：
+    available_presets:
+      d1:
+        name: "D1 (男生低音 - 商业精英)"
+        audio: "models/f5_tts/presets/preset_male_d1_elite.wav"
+        text: "在去年写给合伙人的信中，我写道："
+      e1:
+        name: "E1 (男生中声 - 巴菲特股东信旁白)"
+        audio: "models/f5_tts/presets/preset_male_e1_narrator.wav"
+        text: "介紹了目前的持倉佈局，還透露了在投資策略上的新動向，例如大幅增加短期美債持有量和對日本五大商社的持續加碼。與此同時，外界關心的在現金儲備創下歷史新高（3342億美元）的背景下，巴菲特會如何操作？"
+    ref_audio: models/f5_tts/presets/preset_male_e1_narrator.wav
+    ref_text: "介紹了目前的持倉佈局，還透露了在投資策略上的新動向，例如大幅增加短期美債持有量和對日本五大商社的持續加碼。與此同時，外界關心的在現金儲備創下歷史新高（3342億美元）的背景下，巴菲特會如何操作？"
   azure:
     voice: zh-CN-XiaoxiaoNeural
     rate: '1.0'

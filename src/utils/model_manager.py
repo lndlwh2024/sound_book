@@ -36,8 +36,8 @@ class ModelManager:
             "default_repo": "SWivid/F5-TTS",
             "official_url": "https://huggingface.co/SWivid/F5-TTS",
             "subfolder": "F5TTS_v1_Base",
-            "key_files": ["model_1200000.safetensors"],
-            "description": "F5-TTS v1 Base ???????????",
+            "key_files": ["model_1250000.safetensors", "model_1200000.safetensors"],
+            "description": "F5-TTS v1 Base 扩散语音生成模型",
             "estimated_size_mb": 1300.0
         }
     }
@@ -99,9 +99,13 @@ class ModelManager:
             raise ValueError(f"???? TTS ????: {backend}")
 
         model_info = cls.OFFICIAL_MODELS[backend]
-        backend_config = (config.get(backend, {}) if config else {}) or {}
+        # 兼容传入的既可能是全量 config 字典，也可能是已定位好的单后端配置字典
+        if config and backend in config:
+            backend_config = config[backend]
+        else:
+            backend_config = config or {}
 
-        # 1. ????????? config.yaml ?????????????
+        # 1. 优先检查用户在 config.yaml 中显式指定的本地物理路径
         custom_path = backend_config.get("model_path")
         if custom_path:
             p = Path(custom_path)

@@ -219,6 +219,12 @@ def main():
                     if cand_presets:
                         ref_audio = str(cand_presets[0])
 
+            # 优先从参考音频同名的 .txt 文件读取精准标注文本
+            if not ref_text and ref_audio:
+                companion_txt = Path(ref_audio).with_suffix(".txt")
+                if companion_txt.exists():
+                    ref_text = companion_txt.read_text(encoding="utf-8").strip()
+
             if not ref_text:
                 ref_text = preset_male_text
 

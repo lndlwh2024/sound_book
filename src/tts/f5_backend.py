@@ -178,17 +178,48 @@ class F5Backend(TTSBackend):
         ref_text = options.get("ref_text", "") or self._config.get("ref_text", "")
         device = options.get("device") or self._config.get("device", "auto")
 
-        # 若未指定参考音频，自动使用开箱即用的预设商业精英男声音色 (D1)
-        default_preset_name = self._config.get("preset_voice", "preset_male_d1_elite")
-        default_preset_wav = f"models/f5_tts/presets/{default_preset_name}.wav"
-        default_preset_text = "在去年写给合伙人的信中，我写道："
+        # 智能音色预设解析逻辑 (支持 D1 / E1 等预设音色自动匹配)
+        # 【为什么这样设计】
+        # 将面向表现层的音色选择（如界面上的 "E1 (男生中声)" 或 "preset_male_e1_narrator"）
+        # 自动与 presets 目录下的对应 .wav 与 .txt 参考语料自动关联，实现零冗余配置
+        selected_voice = voice or self._config.get("preset_voice", "preset_male_d1_elite")
+        preset_dir = Path(self._config.get("preset_dir", "models/f5_tts/presets"))
+
         if not ref_audio:
-            if Path(default_preset_wav).exists():
-                ref_audio = default_preset_wav
-                ref_text = default_preset_text
-            elif Path("models/f5_tts/presets/preset_business_male.wav").exists():
-                ref_audio = "models/f5_tts/presets/preset_business_male.wav"
-                ref_text = default_preset_text
+            # 1. 尝试匹配 E1 / 股东信旁白音色
+            if "E1" in str(selected_voice) or "narrator" in str(selected_voice).lower():
+                target_wav = preset_dir / "preset_male_e1_narrator.wav"
+                target_txt = preset_dir / "preset_male_e1_narrator.txt"
+                if target_wav.exists():
+                    ref_audio = str(target_wav)
+                    if target_txt.exists():
+                        ref_text = target_txt.read_text(encoding="utf-8").strip()
+            # 2. 尝试匹配 D1 / 商业精英男声音色
+            elif "D1" in str(selected_voice) or "d1_elite" in str(selected_voice).lower():
+                target_wav = preset_dir / "preset_male_d1_elite.wav"
+                target_txt = preset_dir / "preset_male_d1_elite.txt"
+                if target_wav.exists():
+                    ref_audio = str(target_wav)
+                    if target_txt.exists():
+                        ref_text = target_txt.read_text(encoding="utf-8").strip()
+                    else:
+                        ref_text = "在去年写给合伙人的信中，我写道："
+            # 3. 尝试直接按音色名称查找对应预设
+            elif (preset_dir / f"{selected_voice}.wav").exists():
+                ref_audio = str(preset_dir / f"{selected_voice}.wav")
+                target_txt = preset_dir / f"{selected_voice}.txt"
+                if target_txt.exists():
+                    ref_text = target_txt.read_text(encoding="utf-8").strip()
+            # 4. 回退默认预设
+            else:
+                default_preset_name = self._config.get("preset_voice", "preset_male_d1_elite")
+                default_preset_wav = preset_dir / f"{default_preset_name}.wav"
+                if default_preset_wav.exists():
+                    ref_audio = str(default_preset_wav)
+                    ref_text = "在去年写给合伙人的信中，我写道："
+                elif (preset_dir / "preset_business_male.wav").exists():
+                    ref_audio = str(preset_dir / "preset_business_male.wav")
+                    ref_text = "在去年写给合伙人的信中，我写道："
 
         if not ref_audio:
             return TTSResult(

@@ -190,10 +190,10 @@ class MainWindow(QMainWindow):
 
         self.cmb_voice_profile = QComboBox()
         self.cmb_voice_profile.addItems([
-            "男声 / 商业精英 (D1 定稿推荐)",
-            "男声 / 新闻播报 (D2)",
-            "女声 / 知性解说",
-            "男声 / 纪录片厚重"
+            "E1 (男生中声 - 巴菲特股东信旁白推荐)",
+            "D1 (男生低音 - 商业精英推荐)",
+            "D2 (男生播音 - 新闻纪录片)",
+            "V1 (女声解说 - 知性温和)"
         ])
 
         v_layout.addWidget(QLabel("TTS 引擎:"), 0, 0)
@@ -460,7 +460,9 @@ class MainWindow(QMainWindow):
             "bgm_path": self.txt_bgm_path.text(),
             "main_title": self.txt_main_title.text(),
             "voice_volume_percent": float(self.slider_voice.value()),
-            "bgm_volume_percent": float(self.slider_bgm.value())
+            "bgm_volume_percent": float(self.slider_bgm.value()),
+            "tts_engine": "f5" if "F5" in self.cmb_tts_engine.currentText() else ("kokoro" if "Kokoro" in self.cmb_tts_engine.currentText() else "azure"),
+            "voice_profile": self.cmb_voice_profile.currentText()
         }
 
     def _on_generate_plan(self) -> None:

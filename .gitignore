@@ -38,6 +38,8 @@ validation_report.json
 *.onnx
 *.safetensors
 models/
+!models/f5_tts/presets/*.txt
+!models/f5_tts/presets/*.srt
 
 # === IDE ===
 .idea/
