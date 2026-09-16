@@ -31,10 +31,78 @@ from ..tts.router import create_tts_router
 logger = logging.getLogger(__name__)
 
 
+class PlanWorker(QThread):
+    """
+    生产规划专用工作线程。
+    【为什么这样设计】
+    将“只生成生产计划预览”与“真正开始生产”在线程与状态机层面彻底物理隔离。
+    点击[生成生产计划]时，仅执行阶段一（结构解析、正文清洗、完整性校验、分集规划），
+    规划完成后安全发送 sig_plan_ready 信号并停机就绪，绝对不越界启动底层的语音合成与视频渲染，
+    彻底根治状态混乱与互斥锁死问题。
+    """
+    sig_status_changed = Signal(str)
+    sig_progress_updated = Signal(float, str)
+    sig_plan_ready = Signal(object)
+    sig_error = Signal(str, str)
+
+    def __init__(self, task_config: Dict[str, Any]):
+        super().__init__()
+        self.task_config = task_config
+
+    def run(self) -> None:
+        try:
+            cfg = self.task_config
+            book_path = Path(cfg["book_path"])
+            book_title = cfg.get("book_title", book_path.stem)
+            start_page = int(cfg.get("start_page", 1))
+            target_ep_mins = float(cfg.get("target_duration_mins", 15.0))
+
+            project_root = Path(__file__).resolve().parent.parent.parent
+            book_id = cfg.get("book_id", f"book_{abs(hash(book_path.name)) % 1000000:06d}")
+            book_dir = project_root / "books" / book_id
+            book_dir.mkdir(parents=True, exist_ok=True)
+            manifest_mgr = ManifestManager(book_dir=book_dir)
+
+            # 1. 结构解析阶段
+            self.sig_status_changed.emit("PARSED")
+            self.sig_progress_updated.emit(25.0, "【1/8 结构解析 (PARSED)】正在解析电子书正文结构与章节...")
+            if book_path.suffix.lower() == ".pdf":
+                parser = PDFParser()
+                structure = parser.parse(file_path=book_path, start_page=start_page)
+            else:
+                parser = EPUBParser()
+                structure = parser.parse(str(book_path))
+
+            # 2. 正文清洗阶段
+            self.sig_status_changed.emit("CLEANED")
+            self.sig_progress_updated.emit(50.0, "【2/8 正文清洗 (CLEANED)】正在执行确定性正文清洗与噪音剔除...")
+            cleaner = TextCleaner()
+            cleaned_structure, cleaning_report = cleaner.clean(structure)
+
+            # 3. 质量校验阶段
+            self.sig_status_changed.emit("VALIDATED")
+            self.sig_progress_updated.emit(75.0, "【3/8 质量校验 (VALIDATED)】正在执行字符密度与质量完整性校验...")
+            validator = TextValidator(config.get("validation", {}))
+            val_report = validator.validate(cleaned_structure, cleaning_report)
+            manifest_mgr.save_validation_report(val_report)
+
+            # 4. 分集规划阶段 (阶段一)
+            self.sig_status_changed.emit("PLANNED")
+            self.sig_progress_updated.emit(100.0, "【4/8 规划就绪 (PLANNED)】生产规划已生成完毕，请确认规划并点击[开始生产]")
+            planner = EpisodePlanner(target_duration_mins=target_ep_mins)
+            plan = planner.plan_initial_episodes(book_title, cleaned_structure.chapters)
+            self.sig_plan_ready.emit(plan)
+            logger.info("PlanWorker 规划阶段完成，安全就绪待命中")
+        except Exception as e:
+            logger.exception(f"后台规划任务异常终止: {e}")
+            self.sig_error.emit("PLAN_ERROR", str(e))
+            self.sig_status_changed.emit("FAILED")
+
+
 class ProductionWorker(QThread):
     """
-    后台流水线工作线程。
-    在独立的操作系统线程中运行电子书解析、语音合成、分集规划、字幕对齐、混音与视频合成，
+    正式生产流水线工作线程。
+    在独立的操作系统线程中调度语音合成、字幕对齐、混音与 GPU 硬件加速视频渲染，
     支持安全暂停 (Safe Pause) 与断点续跑 (Resume)。
     """
     sig_status_changed = Signal(str)
@@ -56,10 +124,10 @@ class ProductionWorker(QThread):
         logger.info("收到安全暂停请求，正在等待当前生成单元完成...")
         self._pause_requested = True
         self.sig_status_changed.emit("PAUSING")
-        self.sig_progress_updated.emit(-1.0, "正在安全暂停中（等待当前小段合成完毕并存盘）...")
+        self.sig_progress_updated.emit(-1.0, "【安全暂停中 (PAUSING)】等待当前语音切片落盘后停机...")
 
     def run(self) -> None:
-        """主执行流水线"""
+        """主生产流水线"""
         try:
             self._execute_pipeline()
         except Exception as e:
@@ -73,21 +141,30 @@ class ProductionWorker(QThread):
         book_title = cfg.get("book_title", book_path.stem)
         start_page = int(cfg.get("start_page", 1))
         layout_name = cfg.get("video_layout", "portrait_9_16")
-        target_ep_mins = float(cfg.get("target_duration_mins", 30.0))
+        target_ep_mins = float(cfg.get("target_duration_mins", 15.0))
         run_mode = cfg.get("run_mode", "RUN_NEXT_EPISODE") # RUN_FULL_BOOK | RUN_NEXT_EPISODE | RUN_DURATION_LIMIT
         cover_path = cfg.get("cover_path")
         bgm_path = cfg.get("bgm_path")
         main_title = cfg.get("main_title", f"《{book_title}》精选")
         voice_vol = float(cfg.get("voice_volume_percent", 100.0))
         bgm_vol = float(cfg.get("bgm_volume_percent", 15.0))
+        nfe_step = int(cfg.get("nfe_step", 16))
+        cfg_strength = float(cfg.get("cfg_strength", 2.0))
+        speech_speed = float(cfg.get("speech_speed", 1.0))
+
+        # 彻底锁定绝对物理路径，杜绝随当前终端工作目录漂移
+        project_root = Path(__file__).resolve().parent.parent.parent
+        output_base = (project_root / "output" / book_title).resolve()
+        output_base.mkdir(parents=True, exist_ok=True)
 
         book_id = cfg.get("book_id", f"book_{abs(hash(book_path.name)) % 1000000:06d}")
-        book_dir = Path("books") / book_id
+        book_dir = (project_root / "books" / book_id).resolve()
+        book_dir.mkdir(parents=True, exist_ok=True)
         manifest_mgr = ManifestManager(book_dir=book_dir)
 
         # 1. 解析阶段
         self.sig_status_changed.emit("PARSED")
-        self.sig_progress_updated.emit(5.0, "正在解析电子书正文结构...")
+        self.sig_progress_updated.emit(5.0, "【1/8 结构解析 (PARSED)】正在解析电子书正文结构与章节...")
         if book_path.suffix.lower() == ".pdf":
             parser = PDFParser()
             structure = parser.parse(file_path=book_path, start_page=start_page)
@@ -97,13 +174,13 @@ class ProductionWorker(QThread):
 
         # 2. 清洗阶段
         self.sig_status_changed.emit("CLEANED")
-        self.sig_progress_updated.emit(10.0, "正在执行确定性正文清洗...")
+        self.sig_progress_updated.emit(10.0, "【2/8 正文清洗 (CLEANED)】正在执行确定性正文清洗...")
         cleaner = TextCleaner()
         cleaned_structure, cleaning_report = cleaner.clean(structure)
 
         # 3. 校验阶段
         self.sig_status_changed.emit("VALIDATED")
-        self.sig_progress_updated.emit(15.0, "正在校验正文字符完整性...")
+        self.sig_progress_updated.emit(15.0, "【3/8 质量校验 (VALIDATED)】正在校验正文字符完整性...")
         validator = TextValidator(config.get("validation", {}))
         val_report = validator.validate(cleaned_structure, cleaning_report)
         if not val_report.passed:
@@ -114,17 +191,15 @@ class ProductionWorker(QThread):
         plan = planner.plan_initial_episodes(book_title, cleaned_structure.chapters)
         self.sig_plan_ready.emit(plan)
         self.sig_status_changed.emit("PLANNED")
-        self.sig_progress_updated.emit(20.0, f"生产计划已生成：共 {plan.total_episodes} 集，预估 {plan.estimated_total_minutes} 分钟")
+        self.sig_progress_updated.emit(20.0, f"【4/8 规划就绪 (PLANNED)】共规划 {plan.total_episodes} 集，即将启动语音合成...")
 
         # 5. SpeechUnit 构建
         chunker = TextChunker()
         chunks = chunker.chunk_book(cleaned_structure)
         manifest_mgr.save_tts_manifest(chunks)
 
-        # 6. 模拟/真实 TTS 循环与分集生产
+        # 6. 真实 TTS 循环与分集生产
         self.sig_status_changed.emit("TTS_GENERATING")
-        output_base = Path("output") / book_title
-        os.makedirs(output_base, exist_ok=True)
 
         subtitle_engine = NativeTTSSubtitleEngine()
         audio_mixer = AudioMixer(voice_volume_percent=voice_vol, bgm_volume_percent=bgm_vol)
@@ -141,8 +216,8 @@ class ProductionWorker(QThread):
 
             ep_order = ep.episode_order
             self.sig_progress_updated.emit(
-                30.0 + (ep_order / len(plan.episodes)) * 40.0,
-                f"正在生产第 {ep_order:02d} 集: {ep.subtitle}..."
+                20.0 + (ep_order / max(1, len(plan.episodes))) * 50.0,
+                f"【5/8 语音合成 (TTS_GENERATING)】正在生产第 {ep_order:02d} 集: {ep.subtitle}..."
             )
 
             # 为该分集创建对应产物路径
@@ -157,10 +232,6 @@ class ProductionWorker(QThread):
             for ch in ep_chapters:
                 ep_units.extend(chunker.build_speech_units(ch.paragraphs, chapter_id=getattr(ch, 'chapter_id', ch.id)))
 
-            # 真实 TTS 合成与音频构建
-            # 【为什么这样设计】
-            # 连接 TTSRouter 与具体 TTS 后端（如 F5-TTS / Kokoro），驱动各 SpeechUnit 合成真实语音，
-            # 并使用 AudioQC 组件把关最终拼接音频的质量，实现真正闭环的端到端生产流水线
             tts_engine_name = str(cfg.get("tts_engine", "f5")).lower()
             voice_profile = cfg.get("voice_profile", "E1")
             tts_router = create_tts_router(config.get("tts", {}))
@@ -171,7 +242,7 @@ class ProductionWorker(QThread):
             ep_units_dir.mkdir(parents=True, exist_ok=True)
 
             if tts_backend:
-                logger.info(f"正在使用 TTS 引擎 [{tts_engine_name}] 及音色 [{voice_profile}] 启动分集合成会话")
+                logger.info(f"正在使用 TTS 引擎 [{tts_engine_name}] (音色: {voice_profile}, 步数: {nfe_step}, CFG: {cfg_strength}) 启动分集合成会话")
                 tts_backend.start_session()
                 try:
                     total_u = len(ep_units)
@@ -181,14 +252,18 @@ class ProductionWorker(QThread):
                         u_wav = (ep_units_dir / f"unit_{idx:04d}.wav").resolve()
                         if not u_wav.exists():
                             self.sig_progress_updated.emit(
-                                30.0 + (idx / max(1, total_u)) * 30.0,
-                                f"第 {ep_order:02d} 集语音合成: [{idx+1}/{total_u}] {u.text[:15]}..."
+                                20.0 + ((idx + 1) / max(1, total_u)) * 45.0,
+                                f"【5/8 语音合成 (TTS_GENERATING)】第 {ep_order:02d} 集: [{idx+1}/{total_u}] {u.text[:14]}..."
                             )
                             res = tts_backend.synthesize(
                                 text=u.text,
                                 output_path=u_wav,
                                 voice=voice_profile,
-                                speed=1.0
+                                speed=speech_speed,
+                                options={
+                                    "nfe_step": nfe_step,
+                                    "cfg_strength": cfg_strength
+                                }
                             )
                             from ..audio.ffmpeg_utils import get_audio_info
                             phys_info = get_audio_info(u_wav)
@@ -210,6 +285,8 @@ class ProductionWorker(QThread):
                     if u.audio_duration <= 0:
                         u.audio_duration = max(1.5, len(u.text) * 0.2)
 
+            self.sig_status_changed.emit("ALIGNING_SUBTITLES")
+            self.sig_progress_updated.emit(70.0, f"【6/8 字幕对齐 (ALIGNING_SUBTITLES)】正在对齐生成第 {ep_order:02d} 集双语字幕...")
             sub_items = subtitle_engine.align(ep_units)
             subtitle_engine.export_srt(sub_items, str(ep_srt_path))
             subtitle_engine.export_ass(sub_items, str(ep_ass_path), layout=layout_name)
@@ -232,8 +309,8 @@ class ProductionWorker(QThread):
 
             # 音频混音与视频合成（若封面存在）
             if cover_path and Path(cover_path).exists():
-
                 self.sig_status_changed.emit("AUDIO_MIXING")
+                self.sig_progress_updated.emit(75.0, f"【7/8 混音渲染 (AUDIO_MIXING)】正在执行人声与背景音乐智能侧链混音...")
                 audio_mixer.mix_episode(
                     voice_path=ep_voice_tmp,
                     bgm_path=bgm_path,
@@ -241,6 +318,7 @@ class ProductionWorker(QThread):
                 )
 
                 self.sig_status_changed.emit("VIDEO_RENDERING")
+                self.sig_progress_updated.emit(85.0, f"【7/8 视频合成 (VIDEO_RENDERING)】正在调用 GPU 硬件加速压制 MP4 视频...")
                 video_composer.render_episode_video(
                     cover_path=cover_path,
                     audio_path=ep_audio_path,
@@ -269,14 +347,14 @@ class ProductionWorker(QThread):
 
         manifest_mgr.save_episode_manifest(episodes_manifests)
         self.sig_status_changed.emit("COMPLETED")
-        self.sig_progress_updated.emit(100.0, "全部分集生产完成！")
+        self.sig_progress_updated.emit(100.0, "【8/8 生产完成 (COMPLETED)】分集视频与有声书已全部就绪！")
         self.sig_task_completed.emit(str(output_base.absolute()))
 
 
 class TaskManagerBridge(QObject):
     """
     GUI 表现层与后台 Worker 的专用桥接器。
-    负责管理 Worker 线程的创建、信号转发与安全销毁。
+    负责管理 PlanWorker 与 ProductionWorker 线程的生命周期、信号转发与安全销毁。
     """
     sig_status_changed = Signal(str)
     sig_progress_updated = Signal(float, str)
@@ -288,27 +366,51 @@ class TaskManagerBridge(QObject):
 
     def __init__(self):
         super().__init__()
-        self.worker: Optional[ProductionWorker] = None
+        self.worker: Optional[QThread] = None
 
-    def start_task(self, task_config: Dict[str, Any]) -> None:
-        """启动生产任务"""
+    def _connect_worker_signals(self, worker: QThread) -> None:
+        if hasattr(worker, "sig_status_changed"):
+            worker.sig_status_changed.connect(self.sig_status_changed)
+        if hasattr(worker, "sig_progress_updated"):
+            worker.sig_progress_updated.connect(self.sig_progress_updated)
+        if hasattr(worker, "sig_preview_ready"):
+            worker.sig_preview_ready.connect(self.sig_preview_ready)
+        if hasattr(worker, "sig_plan_ready"):
+            worker.sig_plan_ready.connect(self.sig_plan_ready)
+        if hasattr(worker, "sig_task_completed"):
+            worker.sig_task_completed.connect(self.sig_task_completed)
+        if hasattr(worker, "sig_task_paused"):
+            worker.sig_task_paused.connect(self.sig_task_paused)
+        if hasattr(worker, "sig_error"):
+            worker.sig_error.connect(self.sig_error)
+
+    def generate_plan(self, task_config: Dict[str, Any]) -> None:
+        """仅生成生产规划，绝不启动 TTS"""
+        if self.worker and self.worker.isRunning():
+            logger.warning("已有后台任务正在运行中，忽略重复启动")
+            return
+
+        self.worker = PlanWorker(task_config)
+        self._connect_worker_signals(self.worker)
+        self.worker.start()
+        logger.info("后台规划 PlanWorker 线程已启动")
+
+    def start_production(self, task_config: Dict[str, Any]) -> None:
+        """启动正式生产流水线"""
         if self.worker and self.worker.isRunning():
             logger.warning("已有后台任务正在运行中，忽略重复启动")
             return
 
         self.worker = ProductionWorker(task_config)
-        self.worker.sig_status_changed.connect(self.sig_status_changed)
-        self.worker.sig_progress_updated.connect(self.sig_progress_updated)
-        self.worker.sig_preview_ready.connect(self.sig_preview_ready)
-        self.worker.sig_plan_ready.connect(self.sig_plan_ready)
-        self.worker.sig_task_completed.connect(self.sig_task_completed)
-        self.worker.sig_task_paused.connect(self.sig_task_paused)
-        self.worker.sig_error.connect(self.sig_error)
-
+        self._connect_worker_signals(self.worker)
         self.worker.start()
-        logger.info("后台生产 Worker 线程已启动")
+        logger.info("后台生产 ProductionWorker 线程已启动")
+
+    def start_task(self, task_config: Dict[str, Any]) -> None:
+        """向后兼容接口"""
+        self.start_production(task_config)
 
     def request_pause(self) -> None:
         """向工作线程发出安全暂停请求"""
-        if self.worker and self.worker.isRunning():
+        if self.worker and self.worker.isRunning() and hasattr(self.worker, "request_safe_pause"):
             self.worker.request_safe_pause()

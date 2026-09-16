@@ -36,7 +36,8 @@ def test_main_window_initial_state(qapp):
     # 3. 默认版式与运行模式
     assert "9:16" in window.cmb_video_layout.currentText()
     assert "仅生成下一集" in window.cmb_run_mode.currentText()
-    assert "30 分钟" in window.cmb_target_duration.currentText()
+    assert window.spn_target_duration.value() == 15
+    assert window.spn_min_interval.value() == 3
 
     # 4. 按钮初始可用状态
     assert window.btn_start.isEnabled() is True
@@ -54,7 +55,12 @@ def test_main_window_get_current_config(qapp):
     assert cfg["book_title"] == "人类简史"
     assert cfg["start_page"] == 15
     assert cfg["video_layout"] == "portrait_9_16"
-    assert cfg["target_duration_mins"] == 30.0
+    assert cfg["target_duration_mins"] == 15.0
+    assert cfg["min_interval_mins"] == 3.0
+    assert cfg["nfe_step"] == 16
+    assert cfg["cfg_strength"] == 2.0
+    assert cfg["speech_speed"] == 1.0
     assert cfg["run_mode"] == "RUN_NEXT_EPISODE"
     assert cfg["voice_volume_percent"] == 100.0
     assert cfg["bgm_volume_percent"] == 15.0
+

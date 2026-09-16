@@ -11,7 +11,7 @@ from typing import Optional, Dict, Any
 
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
-    QLabel, QLineEdit, QSpinBox, QComboBox, QSlider, QPushButton,
+    QLabel, QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox, QSlider, QPushButton,
     QProgressBar, QFileDialog, QMessageBox, QGroupBox, QScrollArea,
     QFrame, QTextEdit
 )
@@ -24,6 +24,120 @@ from ..audio.audio_mixer import AudioMixer
 from ..utils.config import config
 
 logger = logging.getLogger(__name__)
+
+
+class PipelineFlowWidget(QWidget):
+    """
+    全流程管线 8 节点可视化指示图。
+    【为什么这样设计】
+    将自动化有声视频从正文解析到最终分集成品的 8 个关键节点视觉化呈现，
+    支持'人话 + 专业术语'双语标注，实时反馈当前处于哪一环节，
+    使黑盒生产转变为透明可视的专业创作流水线。
+    """
+    STAGES = [
+        ("PARSED", "1. 结构解析", "PARSED"),
+        ("CLEANED", "2. 正文清洗", "CLEANED"),
+        ("VALIDATED", "3. 质量校验", "VALIDATED"),
+        ("PLANNED", "4. 规划就绪", "PLANNED"),
+        ("TTS_GENERATING", "5. 语音合成", "TTS_GEN"),
+        ("ALIGNING_SUBTITLES", "6. 字幕对齐", "SUBTITLES"),
+        ("AUDIO_MIXING", "7. 混音渲染", "RENDERING"),
+        ("COMPLETED", "8. 生产完成", "COMPLETED"),
+    ]
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.current_stage = ""
+        self.completed_stages = set()
+        self.node_frames = []
+        self._init_ui()
+
+    def _init_ui(self):
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 4, 0, 4)
+        layout.setSpacing(6)
+
+        for code, zh_name, en_term in self.STAGES:
+            frame = QFrame()
+            frame.setObjectName(f"node_{code}")
+            f_layout = QVBoxLayout(frame)
+            f_layout.setContentsMargins(4, 3, 4, 3)
+            f_layout.setSpacing(1)
+
+            lbl_zh = QLabel(zh_name)
+            lbl_zh.setAlignment(Qt.AlignCenter)
+            lbl_zh.setStyleSheet("font-size: 11px; font-weight: bold; color: #777788;")
+
+            lbl_en = QLabel(f"({en_term})")
+            lbl_en.setAlignment(Qt.AlignCenter)
+            lbl_en.setStyleSheet("font-size: 9px; color: #555566;")
+
+            f_layout.addWidget(lbl_zh)
+            f_layout.addWidget(lbl_en)
+
+            frame.setStyleSheet("""
+                QFrame {
+                    background-color: #1A1A22;
+                    border: 1px solid #333344;
+                    border-radius: 4px;
+                }
+            """)
+            layout.addWidget(frame)
+            self.node_frames.append((code, frame, lbl_zh, lbl_en))
+
+    def set_stage(self, stage: str):
+        self.current_stage = stage
+        stage_order = [s[0] for s in self.STAGES]
+        
+        # 兼容 VIDEO_RENDERING 映射到混音渲染节点
+        normalized_stage = "AUDIO_MIXING" if stage == "VIDEO_RENDERING" else stage
+
+        if normalized_stage in stage_order:
+            curr_idx = stage_order.index(normalized_stage)
+            for i in range(curr_idx):
+                self.completed_stages.add(stage_order[i])
+            if normalized_stage == "COMPLETED":
+                self.completed_stages.add("COMPLETED")
+
+        for code, frame, lbl_zh, lbl_en in self.node_frames:
+            if code == normalized_stage and normalized_stage != "COMPLETED":
+                # 当前节点：高亮亮绿 + 粗体
+                frame.setStyleSheet("""
+                    QFrame {
+                        background-color: #143520;
+                        border: 2px solid #00E676;
+                        border-radius: 4px;
+                    }
+                """)
+                lbl_zh.setStyleSheet("font-size: 11px; font-weight: bold; color: #00E676;")
+                lbl_en.setStyleSheet("font-size: 9px; font-weight: bold; color: #70DB93;")
+            elif code in self.completed_stages:
+                # 已完成节点：深绿实线
+                frame.setStyleSheet("""
+                    QFrame {
+                        background-color: #1A2E20;
+                        border: 1px solid #2E8B57;
+                        border-radius: 4px;
+                    }
+                """)
+                lbl_zh.setStyleSheet("font-size: 11px; font-weight: bold; color: #3CB371;")
+                lbl_en.setStyleSheet("font-size: 9px; color: #2E8B57;")
+            else:
+                # 未开始节点：暗灰
+                frame.setStyleSheet("""
+                    QFrame {
+                        background-color: #16161C;
+                        border: 1px solid #33333F;
+                        border-radius: 4px;
+                    }
+                """)
+                lbl_zh.setStyleSheet("font-size: 11px; color: #666677;")
+                lbl_en.setStyleSheet("font-size: 9px; color: #444455;")
+
+    def reset_pipeline(self):
+        self.current_stage = ""
+        self.completed_stages.clear()
+        self.set_stage("")
 
 
 class MainWindow(QMainWindow):
@@ -56,15 +170,35 @@ class MainWindow(QMainWindow):
                 padding: 0 8px;
                 color: #4DA6FF;
             }
-            QLineEdit, QSpinBox, QComboBox {
+            QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox {
                 background-color: #16161C;
                 border: 1px solid #444455;
                 border-radius: 4px;
                 padding: 6px 10px;
                 color: #FFFFFF;
             }
-            QLineEdit:focus, QSpinBox:focus, QComboBox:focus {
+            QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus {
                 border: 1px solid #007ACC;
+            }
+            QMessageBox {
+                background-color: #202028;
+                border: 1px solid #444455;
+            }
+            QMessageBox QLabel {
+                color: #FFFFFF;
+                font-size: 13px;
+                background-color: transparent;
+            }
+            QMessageBox QPushButton {
+                background-color: #2E8B57;
+                color: #FFFFFF;
+                border-radius: 4px;
+                padding: 6px 18px;
+                font-weight: bold;
+                min-width: 70px;
+            }
+            QMessageBox QPushButton:hover {
+                background-color: #3CB371;
             }
             QPushButton {
                 background-color: #2E5B88;
@@ -196,11 +330,38 @@ class MainWindow(QMainWindow):
             "V1 (女声解说 - 知性温和)"
         ])
 
+        # 大模型扩散推理参数面板
+        self.spn_nfe_step = QSpinBox()
+        self.spn_nfe_step.setRange(8, 64)
+        self.spn_nfe_step.setValue(16)
+        self.spn_nfe_step.setToolTip("大模型扩散推理步数：默认 16 步（Quadro T1000 推荐 16 步，兼顾速度与发音饱满度）")
+
+        self.spn_cfg_strength = QDoubleSpinBox()
+        self.spn_cfg_strength.setRange(1.0, 5.0)
+        self.spn_cfg_strength.setSingleStep(0.1)
+        self.spn_cfg_strength.setValue(2.0)
+        self.spn_cfg_strength.setToolTip("无分类器引导强度 (CFG)：系统黄金默认 2.0，普通用户无需修改")
+
+        self.spn_speed = QDoubleSpinBox()
+        self.spn_speed.setRange(0.8, 1.5)
+        self.spn_speed.setSingleStep(0.05)
+        self.spn_speed.setValue(1.0)
+        self.spn_speed.setSuffix("x")
+        self.spn_speed.setToolTip("朗读语速倍率：默认 1.0x 标准语速")
+
         v_layout.addWidget(QLabel("TTS 引擎:"), 0, 0)
-        v_layout.addWidget(self.cmb_tts_engine, 0, 1)
+        v_layout.addWidget(self.cmb_tts_engine, 0, 1, 1, 3)
 
         v_layout.addWidget(QLabel("音色预设:"), 1, 0)
-        v_layout.addWidget(self.cmb_voice_profile, 1, 1)
+        v_layout.addWidget(self.cmb_voice_profile, 1, 1, 1, 3)
+
+        v_layout.addWidget(QLabel("推理步数:"), 2, 0)
+        v_layout.addWidget(self.spn_nfe_step, 2, 1)
+        v_layout.addWidget(QLabel("CFG引导:"), 2, 2)
+        v_layout.addWidget(self.spn_cfg_strength, 2, 3)
+
+        v_layout.addWidget(QLabel("朗读语速:"), 3, 0)
+        v_layout.addWidget(self.spn_speed, 3, 1)
 
         layout.addWidget(grp_voice)
 
@@ -213,8 +374,18 @@ class MainWindow(QMainWindow):
         self.cmb_video_layout.addItems(["竖屏 9:16 (1080×1920，手机/短视频推荐)", "横屏 16:9 (1920×1080，B站/PC大屏)"])
         self.cmb_video_layout.currentIndexChanged.connect(self._on_layout_changed)
 
-        self.cmb_target_duration = QComboBox()
-        self.cmb_target_duration.addItems(["30 分钟 (默认最佳)", "15 分钟", "45 分钟", "60 分钟"])
+        # 单集目标时长与最小切分间隔
+        self.spn_target_duration = QSpinBox()
+        self.spn_target_duration.setRange(3, 180)
+        self.spn_target_duration.setValue(15)
+        self.spn_target_duration.setSuffix(" 分钟")
+        self.spn_target_duration.setToolTip("单集目标时长：支持自由输入 3~180 分钟")
+
+        self.spn_min_interval = QSpinBox()
+        self.spn_min_interval.setRange(1, 30)
+        self.spn_min_interval.setValue(3)
+        self.spn_min_interval.setSuffix(" 分钟")
+        self.spn_min_interval.setToolTip("章节切分/合并的最小时间跨度间隔")
 
         self.cmb_run_mode = QComboBox()
         self.cmb_run_mode.addItems(["仅生成下一集 (推荐夜间/防降频)", "全书连续生成", "单次限时运行 (60分钟)"])
@@ -226,6 +397,12 @@ class MainWindow(QMainWindow):
 
         self.txt_bgm_path = QLineEdit()
         self.txt_bgm_path.setPlaceholderText("选择背景音乐 (可选 MP3/WAV)...")
+        # 默认自动加载项目内置的优质钢琴背景音乐
+        project_root = Path(__file__).resolve().parent.parent.parent
+        default_piano_bgm = project_root / "resources" / "bgm" / "preset_piano_gentle.mp3"
+        if default_piano_bgm.exists():
+            self.txt_bgm_path.setText(str(default_piano_bgm.resolve()))
+
         btn_browse_bgm = QPushButton("选择音乐...")
         btn_browse_bgm.clicked.connect(self._on_browse_bgm)
 
@@ -233,24 +410,26 @@ class MainWindow(QMainWindow):
         self.txt_main_title.setPlaceholderText("视频顶部固定主标题")
 
         m_layout.addWidget(QLabel("视频版式:"), 0, 0)
-        m_layout.addWidget(self.cmb_video_layout, 0, 1, 1, 2)
+        m_layout.addWidget(self.cmb_video_layout, 0, 1, 1, 3)
 
         m_layout.addWidget(QLabel("单集时长:"), 1, 0)
-        m_layout.addWidget(self.cmb_target_duration, 1, 1, 1, 2)
+        m_layout.addWidget(self.spn_target_duration, 1, 1)
+        m_layout.addWidget(QLabel("最小间隔:"), 1, 2)
+        m_layout.addWidget(self.spn_min_interval, 1, 3)
 
         m_layout.addWidget(QLabel("运行方式:"), 2, 0)
-        m_layout.addWidget(self.cmb_run_mode, 2, 1, 1, 2)
+        m_layout.addWidget(self.cmb_run_mode, 2, 1, 1, 3)
 
         m_layout.addWidget(QLabel("封面图片:"), 3, 0)
-        m_layout.addWidget(self.txt_cover_path, 3, 1)
-        m_layout.addWidget(btn_browse_cover, 3, 2)
+        m_layout.addWidget(self.txt_cover_path, 3, 1, 1, 2)
+        m_layout.addWidget(btn_browse_cover, 3, 3)
 
         m_layout.addWidget(QLabel("背景音乐:"), 4, 0)
-        m_layout.addWidget(self.txt_bgm_path, 4, 1)
-        m_layout.addWidget(btn_browse_bgm, 4, 2)
+        m_layout.addWidget(self.txt_bgm_path, 4, 1, 1, 2)
+        m_layout.addWidget(btn_browse_bgm, 4, 3)
 
         m_layout.addWidget(QLabel("视频主标题:"), 5, 0)
-        m_layout.addWidget(self.txt_main_title, 5, 1, 1, 2)
+        m_layout.addWidget(self.txt_main_title, 5, 1, 1, 3)
 
         layout.addWidget(grp_video)
         layout.addStretch()
@@ -330,7 +509,7 @@ class MainWindow(QMainWindow):
         return panel
 
     def _build_bottom_control_panel(self) -> QWidget:
-        """构建底部控制按钮与进度条"""
+        """构建底部控制按钮、指示灯、进度条与全流程管线图"""
         panel = QWidget()
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(0, 4, 0, 0)
@@ -365,17 +544,28 @@ class MainWindow(QMainWindow):
         btn_layout.addWidget(self.btn_open_output)
         layout.addLayout(btn_layout)
 
-        # 进度指示
+        # 进度指示与状态灯
         prog_layout = QHBoxLayout()
-        self.lbl_status = QLabel("就绪")
-        self.lbl_status.setStyleSheet("color: #AAAAAA; font-size: 12px;")
+        prog_layout.setSpacing(8)
+
+        self.lbl_status_led = QLabel("⚪")
+        self.lbl_status_led.setStyleSheet("font-size: 14px;")
+
+        self.lbl_status = QLabel("空闲就绪 (IDLE)")
+        self.lbl_status.setStyleSheet("color: #CCCCCC; font-size: 12px; font-weight: bold;")
+
         self.progress_bar = QProgressBar()
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(0)
 
-        prog_layout.addWidget(self.lbl_status, 3)
-        prog_layout.addWidget(self.progress_bar, 7)
+        prog_layout.addWidget(self.lbl_status_led)
+        prog_layout.addWidget(self.lbl_status, 4)
+        prog_layout.addWidget(self.progress_bar, 6)
         layout.addLayout(prog_layout)
+
+        # 全流程管线 8 节点可视化指示图
+        self.pipeline_flow = PipelineFlowWidget()
+        layout.addWidget(self.pipeline_flow)
 
         return panel
 
@@ -441,7 +631,7 @@ class MainWindow(QMainWindow):
             logger.warning(f"更新封面排版预览图失败: {e}")
 
     def _get_current_config(self) -> Dict[str, Any]:
-        """获取当前界面的全部配置参数"""
+        """获取当前界面的全部配置参数（含大模型推理参数与单集微调）"""
         layout_name = "landscape_16_9" if "16:9" in self.cmb_video_layout.currentText() else "portrait_9_16"
         run_mode = "RUN_NEXT_EPISODE"
         if "全书连续" in self.cmb_run_mode.currentText():
@@ -454,7 +644,8 @@ class MainWindow(QMainWindow):
             "book_title": self.txt_book_title.text(),
             "start_page": self.spn_start_page.value(),
             "video_layout": layout_name,
-            "target_duration_mins": float(self.cmb_target_duration.currentText().split()[0]),
+            "target_duration_mins": float(self.spn_target_duration.value()),
+            "min_interval_mins": float(self.spn_min_interval.value()),
             "run_mode": run_mode,
             "cover_path": self.txt_cover_path.text(),
             "bgm_path": self.txt_bgm_path.text(),
@@ -462,20 +653,26 @@ class MainWindow(QMainWindow):
             "voice_volume_percent": float(self.slider_voice.value()),
             "bgm_volume_percent": float(self.slider_bgm.value()),
             "tts_engine": "f5" if "F5" in self.cmb_tts_engine.currentText() else ("kokoro" if "Kokoro" in self.cmb_tts_engine.currentText() else "azure"),
-            "voice_profile": self.cmb_voice_profile.currentText()
+            "voice_profile": self.cmb_voice_profile.currentText(),
+            "nfe_step": self.spn_nfe_step.value(),
+            "cfg_strength": self.spn_cfg_strength.value(),
+            "speech_speed": self.spn_speed.value()
         }
 
     def _on_generate_plan(self) -> None:
-        """生成生产计划"""
+        """生成生产计划（阶段一：仅解析与规划，绝不越界执行 TTS）"""
         cfg = self._get_current_config()
         if not cfg["book_path"] or not os.path.exists(cfg["book_path"]):
             QMessageBox.warning(self, "提示", "请先选择有效的电子书文件！")
             return
-        self.lbl_status.setText("正在分析全书章节与生成生产计划...")
-        self.bridge.start_task(cfg)
+        self.btn_gen_plan.setEnabled(False)
+        self.lbl_status_led.setText("🟡")
+        self.lbl_status.setText("正在分析全书章节与生成生产计划 (PLANNING)...")
+        self.pipeline_flow.reset_pipeline()
+        self.bridge.generate_plan(cfg)
 
     def _on_start_production(self) -> None:
-        """开始生产"""
+        """开始正式生产流水线（阶段二：TTS 语音合成、字幕与视频渲染）"""
         cfg = self._get_current_config()
         if not cfg["book_path"] or not os.path.exists(cfg["book_path"]):
             QMessageBox.warning(self, "提示", "请先选择电子书文件！")
@@ -483,7 +680,9 @@ class MainWindow(QMainWindow):
         self.btn_start.setEnabled(False)
         self.btn_pause.setEnabled(True)
         self.btn_resume.setEnabled(False)
-        self.bridge.start_task(cfg)
+        self.lbl_status_led.setText("🟢")
+        self.lbl_status.setText("正式生产流水线已启动 (PRODUCING)...")
+        self.bridge.start_production(cfg)
 
     def _on_safe_pause(self) -> None:
         """安全暂停"""
@@ -491,23 +690,93 @@ class MainWindow(QMainWindow):
         self.bridge.request_pause()
 
     def _on_test_mix(self) -> None:
-        """15 秒混音试听"""
-        bgm_path = self.txt_bgm_path.text()
-        QMessageBox.information(self, "混音试听", f"已应用旁白 {self.slider_voice.value()}% 与音乐 {self.slider_bgm.value()}%\n侧链闪避与增益已生效。")
+        """15 秒混音试听真实发声落地"""
+        try:
+            cfg = self._get_current_config()
+            project_root = Path(__file__).resolve().parent.parent.parent
+
+            # 优先使用固化的 E1 黄金参考音频作为旁白试听素材
+            voice_sample = project_root / "models" / "f5_tts" / "presets" / "preset_male_e1_narrator.wav"
+            if not voice_sample.exists():
+                voice_sample = project_root / "outputtest" / "E1.wav"
+
+            bgm_path = cfg.get("bgm_path")
+            if not bgm_path or not os.path.exists(bgm_path):
+                default_bgm = project_root / "resources" / "bgm" / "preset_piano_gentle.mp3"
+                if default_bgm.exists():
+                    bgm_path = str(default_bgm.resolve())
+
+            if not voice_sample.exists():
+                QMessageBox.warning(self, "试听提示", "未找到 E1 旁白参考音频资产，无法生成混音试听。")
+                return
+
+            out_preview = (project_root / "output" / "temp_mix_preview.wav").resolve()
+            out_preview.parent.mkdir(parents=True, exist_ok=True)
+
+            mixer = AudioMixer(
+                voice_volume_percent=cfg["voice_volume_percent"],
+                bgm_volume_percent=cfg["bgm_volume_percent"]
+            )
+            mixer.mix_episode(
+                voice_path=voice_sample,
+                bgm_path=bgm_path if bgm_path and os.path.exists(bgm_path) else None,
+                output_path=out_preview
+            )
+
+            if out_preview.exists():
+                if sys.platform == "win32":
+                    os.startfile(str(out_preview))
+                QMessageBox.information(
+                    self,
+                    "混音试听就绪",
+                    f"【15秒混音试听生成成功】\n\n"
+                    f"• 旁白音量: {cfg['voice_volume_percent']}%\n"
+                    f"• 背景音乐: {cfg['bgm_volume_percent']}% (已开启人声智能闪避)\n"
+                    f"• 试听文件: {out_preview.name}\n\n"
+                    f"已调用系统默认播放器发声播放，请佩戴耳机或打开音响试听！"
+                )
+        except Exception as e:
+            logger.exception(f"混音试听失败: {e}")
+            QMessageBox.warning(self, "试听失败", f"生成混音试听时发生异常:\n{e}")
 
     def _on_open_output(self) -> None:
-        """打开输出目录"""
-        out_dir = Path("output").absolute()
-        os.makedirs(out_dir, exist_ok=True)
+        """打开输出目录（优先直达具体书籍成品子目录）"""
+        project_root = Path(__file__).resolve().parent.parent.parent
+        book_title = self.txt_book_title.text() or (Path(self.txt_book_path.text()).stem if self.txt_book_path.text() else "")
+        target_dir = (project_root / "output" / book_title).resolve() if book_title else (project_root / "output").resolve()
+        if not target_dir.exists():
+            target_dir = (project_root / "output").resolve()
+        target_dir.mkdir(parents=True, exist_ok=True)
+
         if sys.platform == "win32":
-            os.startfile(str(out_dir))
+            os.startfile(str(target_dir))
         else:
-            QMessageBox.information(self, "输出目录", str(out_dir))
+            QMessageBox.information(self, "输出目录", str(target_dir))
 
     # ---------------- 异步回调响应 ----------------
 
     def _on_worker_status_changed(self, status: str) -> None:
-        self.lbl_status.setText(f"当前阶段: {status}")
+        self.pipeline_flow.set_stage(status)
+        stage_map = {
+            "IDLE": ("⚪", "空闲就绪 (IDLE)"),
+            "PARSED": ("🟡", "【1/8】正在解析正文结构与章节 (PARSED)"),
+            "CLEANED": ("🟡", "【2/8】正在执行确定性正文清洗 (CLEANED)"),
+            "VALIDATED": ("🟡", "【3/8】正在校验文本质量与完整性 (VALIDATED)"),
+            "PLANNED": ("⚪", "【4/8】生产计划已就绪 (PLANNED) - 请核对分集并点击[开始生产]"),
+            "TTS_GENERATING": ("🟢", "【5/8】正在进行大模型语音合成 (TTS_GENERATING)"),
+            "ALIGNING_SUBTITLES": ("🟢", "【6/8】正在生成并对齐精准双语字幕 (ALIGNING_SUBTITLES)"),
+            "AUDIO_MIXING": ("🟢", "【7/8】正在执行人声与背景音乐智能侧链混音 (AUDIO_MIXING)"),
+            "VIDEO_RENDERING": ("🟢", "【7/8】正在调用 GPU 硬件加速压制 MP4 视频 (VIDEO_RENDERING)"),
+            "COMPLETED": ("🟢", "【8/8】全部分集生产完成 (COMPLETED)"),
+            "PAUSING": ("🟠", "正在安全暂停中 (PAUSING)..."),
+            "PAUSED": ("🟠", "生产任务已安全暂停 (PAUSED)"),
+            "FAILED": ("🔴", "生产任务异常终止 (FAILED)")
+        }
+        led, text = stage_map.get(status, ("⚪", f"当前阶段: {status}"))
+        self.lbl_status_led.setText(led)
+        self.lbl_status.setText(text)
+        if status in ["PLANNED", "FAILED"]:
+            self.btn_gen_plan.setEnabled(True)
 
     def _on_worker_progress_updated(self, pct: float, msg: str) -> None:
         if pct >= 0:
@@ -515,6 +784,12 @@ class MainWindow(QMainWindow):
         self.lbl_status.setText(msg)
 
     def _on_worker_plan_ready(self, plan: Any) -> None:
+        self.btn_gen_plan.setEnabled(True)
+        self.btn_start.setEnabled(True)
+        self.lbl_status_led.setText("⚪")
+        self.lbl_status.setText("【4/8 规划就绪 (PLANNED)】请核对分集规划表，点击[开始生产]启动流水线")
+        self.pipeline_flow.set_stage("PLANNED")
+
         text = f"书名：《{plan.book_title}》\n"
         text += f"全书总章节：{plan.total_chapters} 章 | 总字符数：{plan.total_chars:,} 字\n"
         text += f"预估朗读总长：{plan.estimated_total_minutes} 分钟 | 预计规划分集：{plan.total_episodes} 集\n\n"
@@ -526,16 +801,28 @@ class MainWindow(QMainWindow):
     def _on_worker_task_completed(self, out_path: str) -> None:
         self.btn_start.setEnabled(True)
         self.btn_pause.setEnabled(False)
-        QMessageBox.information(self, "完成", f"视频与有声书生产全部完成！\n导出位置:\n{out_path}")
+        self.lbl_status_led.setText("🟢")
+        self.lbl_status.setText("【8/8 生产完成 (COMPLETED)】分集视频与有声书已全部就绪！")
+        self.pipeline_flow.set_stage("COMPLETED")
+        QMessageBox.information(
+            self,
+            "生产完成",
+            f"🎉 视频与有声书全部分集已成功生产！\n\n"
+            f"【导出位置】\n{out_path}\n\n"
+            f"点击界面右下角 [打开输出目录] 即可直接打开文件夹试听或查看视频！"
+        )
 
     def _on_worker_task_paused(self) -> None:
         self.btn_start.setEnabled(False)
         self.btn_pause.setEnabled(False)
         self.btn_resume.setEnabled(True)
+        self.lbl_status_led.setText("🟠")
         self.lbl_status.setText("任务已安全暂停。所有断点与已生成音频已完整存盘。")
         QMessageBox.information(self, "安全暂停", "任务已安全暂停。\n当前进度已持久化，随时可点击 [继续生产] 断点无缝接续。")
 
     def _on_worker_error(self, err_code: str, err_msg: str) -> None:
         self.btn_start.setEnabled(True)
         self.btn_pause.setEnabled(False)
+        self.lbl_status_led.setText("🔴")
+        self.lbl_status.setText(f"生产异常: {err_code}")
         QMessageBox.critical(self, f"生产异常 ({err_code})", f"发生错误:\n{err_msg}")

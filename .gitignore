@@ -19,9 +19,11 @@ build/
 *.mp3
 *.m4b
 *.m4a
-# 保留测试 fixture
+# 保留测试 fixture 与系统固化预设资源
 !tests/fixtures/**/*.wav
 !tests/fixtures/**/*.mp3
+!models/f5_tts/presets/*.wav
+!resources/bgm/*.mp3
 
 # === 书籍工作目录 ===
 books/
@@ -40,6 +42,7 @@ validation_report.json
 models/
 !models/f5_tts/presets/*.txt
 !models/f5_tts/presets/*.srt
+!models/f5_tts/presets/*.wav
 
 # === IDE ===
 .idea/
