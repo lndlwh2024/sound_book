@@ -1,6 +1,7 @@
 @echo off
 chcp 65001 >nul 2>&1
-echo BookAgent v0.1
+echo [书声 ShuSheng v2.0] 自动化有声视频与音频生产工具
+echo 启动中，请稍候...
 echo.
 
 if not exist envs\main\Scripts\python.exe (

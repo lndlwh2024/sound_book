@@ -1,1644 +1,369 @@
-# BookAgent v0.1 概要设计与产品架构
-
-## 1. 文档目的
-
-本文档定义 BookAgent v0.1 的总体架构、模块划分、运行环境、TTS 接入方式、数据流、缓存机制、故障恢复机制和扩展原则。
-
-本版本只实现：
-
-**MODE_A_AUDIOBOOK：原文有声书**
-
-暂不实现：
-
-- 深度精讲
-- OCR
-- Web UI
-- 视频生成
-- 数字人
-- LLM 总结或改写
+# 书声（ShuSheng）v2.0 系统架构与概要设计
 
 ---
 
-# 2. 架构目标
+## 1. 文档目的与架构愿景
 
-BookAgent 采用：
+### 1.1 文档定位
+本文档定义“书声（ShuSheng）v2.0”的总体软件系统架构、分层设计、核心模块边界、数据流与控制流、线程与进程隔离模型、硬件自适应策略以及故障恢复机制。
 
-**单应用 + 多 TTS Backend + 本地 Worker 环境隔离**
+本文档回答的核心问题是：
+> “书声内部由哪些子系统与模块组成，它们如何协同完成一本长篇电子书的高可靠自动化有声视频生产。”
 
-架构。
-
-核心目标：
-
-1. 用户只操作一个 BookAgent；
-2. 用户运行时选择 TTS 引擎；
-3. 用户不需要理解或操作多个 Python 环境；
-4. Kokoro、F5-TTS、Azure AI Speech 对上层业务提供统一接口；
-5. TTS 引擎之间互相隔离，不因依赖冲突影响整个应用；
-6. 支持长书；
-7. 支持缓存；
-8. 支持断点续跑；
-9. 支持失败重试；
-10. 支持以后增加新的 TTS Backend，而无需修改核心 Book Pipeline。
+### 1.2 核心架构原则
+1. **单应用一体化体验（Single App Surface）**：用户操作的是一个统一的 PySide6 图形应用。内部复杂的 Python 多环境隔离、后台 Worker 进程管理、FFmpeg 命令调用对用户完全透明。
+2. **GUI 线程绝对隔离（Non-blocking GUI）**：GUI 主线程仅负责交互响应、界面渲染与命令分发，绝不直接执行 TTS 推理、FFmpeg 音视频渲染、模型下载或大文件解析，杜绝 Windows 系统“未响应”现象。
+3. **确定性管道与原文忠实（Deterministic Pipeline）**：从电子书解析到字幕生成，全程基于确定性规则与数学累加，正文字幕 100% 取自原文，严禁引入 LLM 临场修改。
+4. **全过程可恢复性（Crash-Resilient State）**：以 Manifest 和 Fingerprint 为核心，所有中间资产均可幂等复用。支持任务安全暂停（Safe Pause）、断点续跑（Resume）与进程崩溃自愈。
+5. **引擎与音色正交解耦（Engine-Voice Decoupling）**：TTS 引擎抽象为执行管道，音色抽象为独立配置（VoiceProfile），上层业务流水线不与具体 TTS 库硬编码绑定。
+6. **字幕与 TTS 单元对齐（SpeechUnit Convergence）**：V2.0 创新性地将字幕时间单位与 TTS 调度单元统一定义为 `SpeechUnit`，默认实现 1:1 映射，无需额外挂载沉重 ASR 模型即可获得高精度时间轴。
 
 ---
 
-# 3. 用户视角架构
+## 2. 总体系统分层架构
 
-对于最终用户，BookAgent 始终表现为一个应用。
+书声采用清晰的垂直分层与横向解耦架构，从上至下分为五大层次：
 
-启动方式：
-
-    run.bat
-
-或：
-
-    python app.py
-
-启动后：
-
-    BookAgent v0.1
-
-    请输入书籍路径：
-    > D:\Books\book.pdf
-
-    请选择 TTS：
-
-    1. Kokoro
-    2. F5-TTS
-    3. Azure AI Speech
-
-    > 1
-
-用户不得手工执行：
-
-    activate
-    deactivate
-
-也不得要求用户手动切换 Kokoro 或 F5 的 Python 环境。
-
-所有环境选择和 Worker 调用均由 BookAgent 自动完成。
-
----
-
-# 4. 总体产品架构
-
-总体数据流：
-
-    PDF / EPUB
-          │
-          ▼
-      BookAgent
-          │
-          ▼
-    Application Layer
-          │
-          ▼
-      Task Manager
-          │
-          ▼
-      Book Pipeline
-          │
-          ├───────────────┐
-          │               │
-          ▼               ▼
-     Book Parser      State Manager
-          │               │
-          ▼               │
-     Text Cleaner          │
-          │               │
-          ▼               │
-      Validator            │
-          │               │
-          ▼               │
-       Chunker             │
-          │               │
-          └───────┬───────┘
-                  ▼
-              TTS Router
-                  │
-       ┌──────────┼──────────┐
-       │          │          │
-       ▼          ▼          ▼
-    Kokoro      F5-TTS      Azure
-    Backend     Backend      Backend
-       │          │          │
-       ▼          ▼          ▼
-    Kokoro      F5-TTS    Azure Speech
-    Worker       Worker      API
-       │          │          │
-       └──────────┼──────────┘
-                  ▼
-               WAV Cache
-                  │
-                  ▼
-              Audio QC
-                  │
-                  ▼
-               FFmpeg
-                  │
-          ┌───────┴────────┐
-          ▼                ▼
-    Chapter MP3        Book M4B
+```text
+┌────────────────────────────────────────────────────────────────────────┐
+│                        1. 表现层 (GUI Presentation)                     │
+│    PySide6 MainWindow | ViewModels | Preview Widgets | Progress Panels │
+└───────────────────────────────────┬────────────────────────────────────┘
+                                    │ Qt Signals & Slots (非阻塞跨线程)
+┌───────────────────────────────────▼────────────────────────────────────┐
+│                    2. 编排与应用层 (Application & Task)                  │
+│    Application Core | Task Manager | Episode Planner | Config Manager │
+└──────┬────────────────────────────┬─────────────────────────────┬──────┘
+       │                            │                             │
+┌──────▼──────────────────┐  ┌──────▼──────────────────┐  ┌───────▼──────┐
+│  3.1 内容解析与验证子系统  │  │   3.2 引擎与资源管理系统  │  │ 3.3 音视频流水线│
+│  - Book Parser (PDF/EPUB)│  │   - Engine Resource Mgr │  │ - Audio QC   │
+│  - Text Cleaner          │  │   - Hardware Checker    │  │ - Audio Mixer│
+│  - Content Validator     │  │   - Model Manager       │  │ - Video      │
+│  - Chapter Detector      │  │   - VoiceProfile Manager│  │   Composer   │
+│  - SpeechUnit Builder    │  │   - TTS Router          │  │ - Video      │
+│                          │  │                         │  │   Layout     │
+└──────┬───────────────────┘  └──────┬──────────────────┘  └───────┬──────┘
+       │                             │                             │
+┌──────▼─────────────────────────────▼─────────────────────────────▼──────┐
+│                      4. 执行与适配层 (Execution & Workers)              │
+│    TTS Backend Abstraction (F5Backend | KokoroBackend | AzureBackend)   │
+│    Task-scoped Persistent Workers (IPC via JSON Lines over stdio)       │
+│    FFmpeg Process Adapter (Filters, Mixing, Encoding, muxing)          │
+│    Subtitle Formatter (TTS 原生时间轴生成器 / SubtitleAligner 扩展点)  │
+└────────────────────────────────────┬────────────────────────────────────┘
+                                     │
+┌────────────────────────────────────▼────────────────────────────────────┐
+│                      5. 存储与状态持久层 (Persistence & State)          │
+│    Task Manifest | TTS Manifest | Chapter Manifest | Episode Manifest   │
+│    Audio Chunks Cache | Atomic File Writer | Structured Logging         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
 
 ---
 
-# 5. 核心设计思想
+## 3. GUI 与业务层线程/进程通信架构
 
-## 5.1 单应用体验
+### 3.1 线程隔离原则
+为了确保 Windows 桌面端界面的流畅度与稳定性：
+- **GUI 主线程（Qt Main Thread）**：只执行 QEvents 分发、控件绘制、用户输入校验与轻量状态更新；
+- **后台任务执行器（Task Manager ThreadPool / QThread）**：所有重型业务流水线在独立的工作线程中跑；
+- **重型计算子进程（Isolated Subprocesses）**：F5-TTS 模型推理、Kokoro 语音合成、FFmpeg 滤镜转码等均在受控的子进程中执行。
 
-BookAgent 对用户必须表现为一个完整应用。
+### 3.2 信号与槽（Signals & Slots）通信链路
+GUI 与后台 Task Manager 之间通过线程安全的信号槽双向交互：
 
-虽然内部可能存在：
-
-- 主 Python 环境；
-- Kokoro Python 环境；
-- F5-TTS Python 环境；
-
-但这些实现细节必须对用户透明。
-
----
-
-## 5.2 TTS Backend 解耦
-
-业务 Pipeline 不允许直接依赖：
-
-- Kokoro；
-- F5-TTS；
-- Azure SDK。
-
-必须通过统一的 TTS Backend 接口调用。
-
-因此：
-
-Book Pipeline 只关心：
-
-    text
-    voice
-    speed
-    output_path
-
-不关心底层到底是：
-
-    Kokoro
-    F5-TTS
-    Azure
-    未来其他 TTS
+```text
+[用户交互] ──点击"开始生产"──> [GUI Main Thread]
+                                   │
+                                emit sig_start_task(config)
+                                   ▼
+                            [Task Manager (Worker Thread)]
+                                   │
+                                   ├── 1. 检查硬件与模型状态
+                                   ├── 2. 解析正文 & 规划 SpeechUnit
+                                   ├── 3. 调度 TTS Worker 逐段生成
+                                   ├── 4. 状态变迁 & 原子存盘
+                                   │
+       [GUI Main Thread] <── emit sig_progress_updated(pct, msg) ──┤
+               │                   │
+        更新进度条与状态文案       ├── 5. 触发 Audio Mixer & Video Composer
+                                   │
+       [GUI Main Thread] <── emit sig_task_completed(output_dir) ──┘
+```
 
 ---
 
-## 5.3 中间数据可恢复
+## 4. 核心系统模块划分与职责
 
-整个项目必须保存关键中间结果，包括：
+系统划分为以下 18 个高内聚、低耦合的核心模块：
 
-- 原始文本；
-- 清洗文本；
-- 书籍结构；
-- TTS Manifest；
-- Chunk 状态；
-- Chunk WAV；
-- Chapter MP3；
-- 日志。
-
-任何一个阶段失败后，都应该尽量从失败点继续，而不是重新处理整本书。
-
----
-
-# 6. 核心模块划分
-
-BookAgent v0.1 主要包括以下模块：
-
-1. Application Layer
-2. Task Manager
-3. Book Parser
-4. Text Cleaner
-5. Validator
-6. Chunker
-7. State Manager
-8. TTS Router
-9. TTS Backend
-10. TTS Worker
-11. Audio Cache
-12. Audio QC
-13. Audio Assembler
-14. Logging
-15. Config Manager
+| 模块名称 | 归属子系统 | 核心职责 |
+| :--- | :--- | :--- |
+| **GUI Layer** | 表现层 | 负责用户参数输入、封面/混音/计划预览展示、控制按钮与进度反馈。 |
+| **Task Manager** | 应用编排 | 管理任务全生命周期，协调各子阶段流转，处理安全暂停、错误与断点恢复。 |
+| **Engine Resource Mgr** | 引擎管理 | 硬件能力诊断（CUDA/显存/TDP）、环境校验、模型一键自动下载与就绪检查。 |
+| **Hardware Checker** | 引擎管理 | 检查显卡型号、VRAM 容量与可用性，决定运行步数与降温策略。 |
+| **Model Manager** | 引擎管理 | 统一管理 HuggingFace/ModelScope 权重下载、完整性校验与本地缓存路径。 |
+| **Book Ingest & Parser** | 文本解析 | 支持 PDF/EPUB 导入，提取文字层、目录与元数据；提供纯扫描件拦截保护。 |
+| **Text Cleaner** | 文本解析 | 确定性清洗页眉、页脚、页码及格式乱码，绝对不改变正文字词。 |
+| **Validator** | 文本解析 | 校验正文字符损失率、空章节与异常截断，超阈值自动触发 `NEEDS_REVIEW`。 |
+| **Chapter Detector** | 文本解析 | 识别书籍大纲、章节标题与层级结构，构建统一的内部书籍大纲树。 |
+| **SpeechUnit Builder** | 文本解析 | 将章节切分为兼具自然朗读体验与字幕展示适宜性的最小生成单元。 |
+| **TTS Router** | 语音调度 | 统一调度 F5、Kokoro、Azure 后端，实现请求路由与参数转换。 |
+| **VoiceProfile Manager** | 语音调度 | 集中管理音色配置资产，解耦音色名称与底层模型参数。 |
+| **Persistent Worker** | 语音执行 | 跨环境 Python 工作进程，单次启动常驻显存，连续批处理，隔离运行依赖。 |
+| **Subtitle Engine** | 视频字幕 | 基于 1:1 WAV 实际时长生成精准原文字幕，保留 SubtitleAligner 对齐接口。 |
+| **Audio QC** | 音频流水线 | 检查生成的 WAV 文件完整性、静音异常、振幅削顶及 NaN 溢出。 |
+| **Audio Mixer** | 音频流水线 | 旁白与 BGM 增益换算、基于侧链压缩的自动闪避（Ducking）、BGM 自动循环淡出。 |
+| **Video Layout Engine** | 视频流水线 | 智能计算 9:16 / 16:9 画布布局，实现封面 Contain 等比缩放与高斯模糊填充。 |
+| **Video Composer** | 视频流水线 | 调用 FFmpeg 将背景、标题、字幕、混音音轨一次性封装渲染为分集 MP4。 |
 
 ---
 
-# 7. Application Layer
+## 5. 引擎资源管理器 (Engine Resource Manager)
 
-职责：
+### 5.1 硬件适配与等级划分
+为了让不同硬件（特别是类似 NVIDIA T1000 4GB 笔记本显卡）均能稳定跑通长任务：
+- **硬件探针（Hardware Checker）**：
+  - 检测 CUDA 是否可用、当前可用显存大小、GPU 核心数及功耗等级；
+  - 判定等级：`TIER_ENTRY_GPU` (<=4GB VRAM，如 T1000)、`TIER_MID_GPU` (6~8GB)、`TIER_HIGH_GPU` (>=12GB)、`TIER_CPU_ONLY`。
+- **动态运行策略匹配**：
+  - T1000 等级：强制单句串行处理（batch_size=1）、强制 float32 精度（防止 ODE 扩散数值溢出）、默认采用 16 步轻量扩散、设置 30 秒呼吸冷却间隔防热降频；
+  - 高配显卡：可提升步数至 32 步，缩短或取消冷却等待。
 
-- 程序入口；
-- CLI 参数解析；
-- 用户交互；
-- 书籍路径输入；
-- TTS 选择；
-- Voice 选择；
-- Speed 设置；
-- 启动任务；
-- 显示执行进度；
-- 显示错误摘要。
-
-主要文件建议：
-
-    app.py
-
-Application Layer 不应该实现：
-
-- PDF 解析逻辑；
-- TTS 具体逻辑；
-- 音频拼接逻辑；
-- 缓存判断逻辑。
-
-它只负责协调各模块。
+### 5.2 模型自动部署与初始化
+- 用户首次选用某本地引擎（如 F5-TTS）时，Engine Resource Manager 自动检测模型文件完整性；
+- 若缺失权重，弹出下载向导，后台启动多线程下载并显示百分比进度与校验码核对；
+- 权重下载完成后，自动执行内置的轻量 Smoke Test（合成测试音频）；通过后状态置为 `READY`，方可允许启动生产任务。
 
 ---
 
-# 8. Task Manager
+## 6. 文本处理流水线与 SpeechUnit 体系
 
-Task Manager 管理一本书从输入到最终输出的完整任务。
+### 6.1 文本流水线流向
+```text
+PDF / EPUB 原始文件
+       │
+       ▼
+[Book Parser] ──> 提取页面/章节文字与结构，检测文本层有效性
+       │
+       ▼
+[Text Cleaner] ──> 消除重复页眉、页脚、页码，连接断行（纯确定性正则表达式）
+       │
+       ▼
+[Validator] ──> 对比清洗前后字符变化率，异常时进入 NEEDS_REVIEW 阻断
+       │
+       ▼
+[Chapter Detector] ──> 确定正式物理章节清单与标题
+       │
+       ▼
+[SpeechUnit Builder] ──> 构建自然朗读最小单元
+```
 
-主要职责：
+### 6.2 SpeechUnit 与 Chunk 的关系体系
+为了从根本上解决“TTS 音频与字幕起止时间边界不确定”的问题，书声 v2.0 正式确立 **SpeechUnit** 核心概念：
 
-- 创建 book_id；
-- 加载已有任务；
-- 创建新任务；
-- 保存当前任务状态；
-- 控制各阶段执行顺序；
-- 判断是否继续已有任务；
-- 处理 FAILED；
-- 处理 NEEDS_REVIEW；
-- 控制 Resume。
+```text
+Chapter (章节)
+   └── Paragraph (段落)
+          └── Sentence (自然句)
+                 └── SpeechUnit (自然朗读单元 / 字幕单元)
+                        └── Chunk (TTS 任务调度与执行单元)
+                               └── WAV (独立音频资产)
+```
 
-任务状态：
-
-    INGEST
-      ↓
-    PARSED
-      ↓
-    CLEANED
-      ↓
-    VALIDATED
-      ↓
-    TTS_READY
-      ↓
-    TTS_GENERATING
-      ↓
-    AUDIO_QC
-      ↓
-    ASSEMBLED
-      ↓
-    COMPLETED
-
-异常状态：
-
-    NEEDS_REVIEW
-
-    FAILED
-
----
-
-# 9. Book Parser
-
-Book Parser 负责将原始书籍转换为结构化文本。
-
-v0.1 支持：
-
-- PDF
-- EPUB
-
-暂不支持：
-
-- OCR；
-- 扫描图片型 PDF；
-- DOCX；
-- 网页。
+1. **核心职责划分**：
+   - **SpeechUnit**：面向正文的自然朗读与字幕时间区间的最小单元。首要目标是保证朗读断句自然流畅，同时文字体量适合字幕行显示；
+   - **Chunk**：面向底层系统的调度实体，承载 ID、文本哈希、引擎参数、Fingerprint、状态流转、重试（Retry）、缓存（Cache）与断点续跑（Resume）。
+2. **V2.0 默认 1:1 极简映射**：
+   - 当前版本默认：`1 SpeechUnit = 1 Chunk = 1 WAV 文件`；
+   - 彻底避免在系统初期引入复杂的“多对一”或“一对多”双向映射树，保持系统精炼高可靠；
+   - *架构保留点*：未来若接入流式输出 TTS 或段落级超大上下文 TTS 模型，可在 TTS Router 内部解耦，上层接口保持不变。
+3. **切分策略约束**：
+   - 优先保持自然句完整，在句号、问号、感叹号等边界处聚合；
+   - 短句合理并入一个 SpeechUnit，避免把语音切得过碎导致发音断续；
+   - 独立配置 `speech_unit_max_chars`（默认通过 F5 连贯性测试优化确定），不随意压缩底层单 Chunk 安全最大字符限制。
 
 ---
 
-# 10. PDF Parser
+## 7. TTS 路由与持久化 Worker 架构
 
-推荐：
+### 7.1 引擎与音色解耦体系 (VoiceProfile)
+业务流水线仅与抽象的 `VoiceProfile` 交互：
+- 一个 `VoiceProfile` 包含：
+  - `profile_id`（全局唯一标识，如 `preset_male_d1_elite`）
+  - `display_name`（面向用户的名称，如“男声 / 商业精英 (D1)”）
+  - `engine`（绑定引擎：`f5_tts` / `kokoro` / `azure`）
+  - `ref_audio_path` / `ref_text`（针对克隆引擎的参考声音）
+  - `speed`（语速微调系数，默认 1.0）
+  - `nfe_step`（推理步数，默认 16）
+  - `cooling_seconds`（降温间隔，默认 30）
 
-**PyMuPDF**
+### 7.2 Task-scoped Persistent Worker 机制
+对于本地模型（F5 / Kokoro），绝不在每个 Chunk 执行时重新启动 Python 进程和加载数 GB 模型权重。系统采用“任务级持久化 Worker”：
 
-主要职责：
+```text
+[书声主进程 Main App (Python 3.10)]
+       │
+       │ 1. 启动任务: 孵化专用环境子进程
+       ▼
+[F5 Worker Subprocess (envs/f5/python.exe)]
+       │
+       │ 2. 模型仅在启动时加载一次至 GPU (EMA to Float32)
+       │ 3. 向标准输出写入就绪信号: {"status": "READY"}
+       ▼
+[IPC 通信循环 (JSON Lines over stdio)]
+   Main App ──发送 TTS 请求──> Worker stdin
+   Main App <──接收生成完成── Worker stdout (专用通道，隔离三方输出)
+       │
+       │ 4. 本次运行结束 / 用户点击安全暂停 / 异常发生
+       ▼
+[Worker 优雅安全退出，释放显存]
+```
 
-1. 打开 PDF；
-2. 检测 PDF 是否存在有效文本层；
-3. 按页提取文字；
-4. 保存页码与文本的对应关系；
-5. 获取 PDF metadata；
-6. 尝试读取 PDF TOC；
-7. 输出原始文本；
-8. 输出候选章节结构。
-
-如果文本密度过低：
-
-返回：
-
-    SCAN_PDF_NOT_SUPPORTED
-
-不得默认启动 OCR。
-
----
-
-# 11. EPUB Parser
-
-主要职责：
-
-- 读取 EPUB metadata；
-- 读取导航结构；
-- 读取 spine；
-- 保留章节顺序；
-- 提取 XHTML 正文；
-- 去除 HTML tag；
-- 去除 CSS；
-- 去除 JavaScript；
-- 保留标题；
-- 保留段落。
-
-输出格式应与 PDF Parser 尽量统一。
+- **三方日志干扰防御**：Worker 内部将 `sys.stdout` 强行重定向至 `sys.stderr`，仅开辟独立的 `_ipc_stdout` 句柄收发纯净 JSON Lines，彻底杜绝 PyTorch / tqdm / Vocos 的控制台字符破坏通信协议。
+- **崩溃自动复原**：若 Worker 进程因意外 CUDA 错误退出，主程序捕获异常信号后，将当前 Chunk 标为待重试，重新唤醒 Worker 继续处理，已成功的历史 Chunk 绝不重做。
 
 ---
 
-# 12. Book Structure
+## 8. 字幕时间对齐架构 (Subtitle Architecture)
 
-统一书籍结构建议：
+### 8.1 默认模式：TTS 原生时间轴
+书声 v2.0 字幕系统的最大工程优势在于：**在已知权威原文的前提下，利用 TTS 真实音频时间建立字幕，不重复执行 ASR 识别。**
 
-    Book
-    ├── Metadata
-    ├── Front Matter
-    ├── Chapter 001
-    │   ├── Section
-    │   └── Paragraphs
-    ├── Chapter 002
-    ├── ...
-    ├── Appendix
-    └── End Matter
+- **核心工程定论**：
+  > “如果字幕单元与独立 TTS 音频单元一一对应（1 SpeechUnit = 1 WAV），则单元起止时间可以直接使用实际音频时长准确获得；如果一个音频单元内部包含多个字幕句，则不能靠字数比例宣称精确，需要进一步时间对齐。”
 
-程序不得根据猜测创造不存在的章节。
+- **时间累计算法流程**：
+  1. 每个 SpeechUnit 经 TTS 生成一个独立的 WAV 文件；
+  2. Audio QC 验证通过后，读取其真实物理时长（`duration`，精度达毫秒级）；
+  3. 维护当前分集的累加游标 `timeline_cursor`；
+  4. 第 $i$ 个字幕区间的开始时间即为当前游标，结束时间为 `timeline_cursor + duration`，随后游标推进；
+  5. 字幕内容直接填充该 SpeechUnit 对应的电子书原文字符串。
 
----
-
-# 13. Text Cleaner
-
-Text Cleaner 负责确定性文本清理。
-
-允许处理：
-
-- 页码；
-- 重复页眉；
-- 重复页脚；
-- PDF 异常换行；
-- 连续空格；
-- 多余空行；
-- 排版产生的错误换行；
-- 明显排版噪声。
-
-禁止：
-
-- AI 改写；
-- AI 润色；
-- 自动总结；
-- 改变作者措辞；
-- 删除正常正文。
+### 8.2 扩展架构：SubtitleAligner 接口预留
+系统中保留 `SubtitleAligner` 抽象基类，但不作为 V2.0 默认依赖项，仅在未来满足以下条件时按需挂载：
+- 单个 Chunk 包含多句且无法细拆；
+- 需要词级（Word-level）逐字卡拉OK动效；
+- 实际测试发现部分语段的前后静音造成字幕感知滞后。
 
 ---
 
-# 14. Cleaner 数据流
+## 9. 智能混音与音频处理流水线
 
-输入：
+### 9.1 音量增益模型与试听一致性
+系统杜绝“试听与最终成片响度不一”的工程隐患，采用统一的线性百分比到分贝（dB）增益模型：
+$$	ext{Gain (dB)} = 20 	imes \log_{10}\left(rac{	ext{Volume Percent}}{100}ight)$$
+无论是 15 秒混音试听还是最终整集 MP4 合成，统一调用相同的 FFmpeg 滤镜链参数生成。
 
-    raw_text.json
-
-输出：
-
-    cleaned_text.json
-
-同时生成：
-
-    cleaning_report.json
-
-报告至少包含：
-
-- before_chars；
-- after_chars；
-- removed_headers；
-- removed_footers；
-- removed_page_numbers；
-- change_ratio。
+### 9.2 自动闪避 (Ducking / 侧链压缩)
+为了保证旁白清晰听辨，系统采用侧链压缩（Sidechain Compression）实现智能动态压音：
+- **旁白主轨（Master Voice Track）** 作为触发侧链；
+- **背景音乐轨（BGM Track）** 作为受控对象；
+- 当检测到旁白信号超过阈值时，BGM 自动快速平滑下潜指定的压降量（如 -14dB）；当旁白停顿或结束时，BGM 缓慢回弹至基准音量；
+- 整集结束前 3~5 秒，BGM 自动触发线性淡出（Fade-out）。
 
 ---
 
-# 15. Validator
+## 10. 视频合成与自动排版引擎 (Video Layout Engine)
 
-Validator 用于防止 BookAgent 在文本已经损坏时继续生成几小时音频。
+### 10.1 视频版面架构
+Video Layout Engine 负责计算不同长宽比下的几何变换矩阵，杜绝图像拉伸与变形：
 
-需要检查：
+```text
+       【竖屏 9:16 (1080×1920)】                       【横屏 16:9 (1920×1080)】
+┌──────────────────────────────────────┐     ┌──────────────────────────────────────────┐
+│  主标题区 (Safe Zone Top: 80~240px)  │     │ 顶部安全区                               │
+│  第XX集·章节副标题                   │     ├──────────┬────────────────────┬──────────┤
+│                                      │     │          │   主标题与副标题   │          │
+│ ┌──────────────────────────────────┐ │     │ 封面等比 │                    │ 模糊背景 │
+│ │                                  │ │     │ 完整居中 │   字幕显示安全区   │          │
+│ │         封面图片 (Contain)       │ │     │ (Contain)│                    │          │
+│ │       等比居中，保留原书名       │ │     │          │                    │          │
+│ │                                  │ │     │          │                    │          │
+│ └──────────────────────────────────┘ │     ├──────────┴────────────────────┴──────────┤
+│ 动态高斯模糊背景填充 (Blur Sigma: 20) │     │ 底部留白安全区                           │
+│                                      │     └──────────────────────────────────────────┘
+│  高对比度原文字幕区 (Bottom: 1500px) │
+└──────────────────────────────────────┘
+```
 
-- 原始字符数量；
-- 清洗后字符数量；
-- 章节数量；
-- 是否存在空章节；
-- 是否存在异常字符损失；
-- 是否存在明显解析失败。
-
-正常：
-
-    VALIDATED
-
-异常：
-
-    NEEDS_REVIEW
-
-进入 NEEDS_REVIEW 后：
-
-不得自动开始 TTS。
-
----
-
-# 16. Chunker
-
-Chunker 将章节正文切分为适合 TTS 的最小生成单元。
-
-切分优先级：
-
-    Chapter
-        ↓
-    Paragraph
-        ↓
-    Sentence
-        ↓
-    Chunk
-
-禁止机械按照固定字符位置切断一句话。
-
-只有单句本身超过 Backend 限制时，才允许进一步拆分。
+### 10.2 合成流水线 (Video Pipeline)
+1. **静态视觉图层构建**：生成高斯模糊背景流，并将封面原图等比叠加在中央；
+2. **文本图层渲染**：利用 `drawtext` 滤镜渲染主标题与自动副标题，内置抗锯齿与阴影描边；
+3. **字幕流挂载**：挂载由 SpeechUnit 累加生成的 ASS 格式字幕流；
+4. **复合音轨注入**：注入经 Audio Mixer 处理完毕的高品质 AAC 混音音轨；
+5. **硬件编码加速（NVENC / libx264）**：自动检测 GPU 硬件编码器（h264_nvenc），不可用时平滑回退至 libx264 软件编码，输出符合主流播放器规范的分集 MP4。
 
 ---
 
-# 17. TTS Chunk
+## 11. 分集规划架构 (Episode Planning)
 
-每个 Chunk 必须拥有稳定 ID。
+分集规划采用 **两阶段规划机制**，兼顾预估确定性与成片精确度：
 
-示例：
+```text
+阶段一：TTS 启动前 (预估规划)
+输入: 全书各章节字符数 + 所选音色基准语速 (chars/min)
+计算: 预估章节时长 -> 结合"单集目标时长"执行动态规划分组
+产出: 生产计划预览表 (预计总集数、各集章节归属、预估耗时) -> 呈现给用户确认
 
-    chapter_001_chunk_0001
-    chapter_001_chunk_0002
-    chapter_002_chunk_0001
-
-每个 Chunk 保存：
-
-- chunk_id；
-- chapter_id；
-- order；
-- text；
-- text_hash；
-- backend；
-- voice；
-- speed；
-- fingerprint；
-- status；
-- output_file；
-- retry_count；
-- error。
+阶段二：TTS 完成后 (真实规划)
+输入: 各章节所有 SpeechUnit 生成的真实 WAV 物理时长汇总
+计算: 累加精确物理时长 -> 在完整章节边界处划分正式 Episode
+约束: 严禁将单个章节横切拆分到两集中；若单章真实时长已超目标，则单章独立成集
+产出: 最终分集元数据清单 (Episode Manifest) -> 驱动后续混音与视频合成
+```
 
 ---
 
-# 18. TTS Manifest
+## 12. 状态机、Manifest 与断点续跑体系
 
-所有 Chunk 状态统一存储于：
+### 12.1 全局任务状态机 (Task State Machine)
+任务状态在应用生命周期内严格单向流转，异常与暂停具备专门恢复路径：
 
-    tts_manifest.json
+```text
+CREATED ──> INGESTING ──> PARSED ──> CLEANED ──> VALIDATED
+                                                    │ (字符异常)
+                                                    ▼
+                                              NEEDS_REVIEW (需人工确认)
+                                                    │ (确认继续)
+                                                    ▼
+AUDIO_QC <── TTS_GENERATING <── PLANNED <───────────┘
+   │               │ (点击安全暂停)
+   │               ▼
+   │           PAUSING ──> PAUSED (保存断点，释放显存)
+   │                         │ (点击继续)
+   │                         ▼
+   │                   TTS_GENERATING (接续未完 Chunk)
+   ▼
+ALIGNING_SUBTITLES ──> AUDIO_MIXING ──> VIDEO_RENDERING ──> COMPLETED
+       │                                     │
+       └────────── 异常中断或失败 ────────────┴──> PARTIAL_FAILED / FAILED
+```
 
-Manifest 是：
+### 12.2 Manifest 存储与原子写入
+1. **结构化清单**：
+   - `tts_manifest.json`：持久化记录每一个 Chunk / SpeechUnit 的哈希、音色、时长、生成状态与物理路径；
+   - `episode_manifest.json`：记录最终分集划分、包含的章节、合成的 MP4 与 SRT 路径；
+2. **原子写入保障（Atomic Write Protocol）**：
+   - 任何状态或清单的更新，严禁直接在原文件上流式覆盖；
+   - 必须先写入 `.tmp` 临时文件，执行操作系统的 `flush` 与 `fsync` 确保落盘，再通过 `os.replace` 原子性替换原文件；
+   - 彻底杜绝因断电、崩溃造成的 Manifest 文件半截截断损坏。
 
-- 缓存；
-- Resume；
-- 重试；
-- 音频拼接；
-
-的核心依据。
-
-每生成成功一个 Chunk：
-
-必须立即保存状态。
-
-禁止等整本书完成后才更新 Manifest。
-
----
-
-# 19. State Manager
-
-State Manager 负责：
-
-- Book 状态；
-- Chapter 状态；
-- Chunk 状态；
-- Resume；
-- Atomic Save；
-- Crash Recovery。
-
-关键 JSON 文件建议采用：
-
-    temp write
-        ↓
-    fsync
-        ↓
-    atomic replace
-
-避免程序异常退出导致 Manifest 损坏。
-
----
-
-# 20. TTS Router
-
-TTS Router 是 Book Pipeline 与所有 TTS 引擎之间的唯一入口。
-
-逻辑：
-
-    Book Pipeline
-          │
-          ▼
-      TTS Router
-          │
-          ├── KokoroBackend
-          ├── F5Backend
-          └── AzureBackend
-
-Pipeline 不允许直接出现大量：
-
-    if backend == kokoro
-    elif backend == f5
-    elif backend == azure
-
-这种分支逻辑。
-
-Backend 的选择统一集中到 Router / Factory。
+### 12.3 安全暂停 (Safe Pause) 控制流
+用户点击“安全暂停”后：
+1. GUI 向 Task Manager 发出 `sig_request_pause` 信号；
+2. Task Manager 将内部原子标记 `pause_requested = True`；
+3. TTS Worker 当前正在执行的微小 SpeechUnit（通常 5~10 秒）继续合成直至结束；
+4. 结果落盘并更新 Manifest，状态置为 `PAUSED`；
+5. 优雅终止 Worker 子进程，释放 GPU 显存；
+6. GUI 状态栏提示“任务已安全暂停，所有进度已保存”。
 
 ---
 
-# 21. 统一 TTS Backend 接口
-
-三个 Backend 必须实现统一逻辑接口：
-
-    synthesize(
-        text,
-        output_path,
-        voice=None,
-        speed=1.0,
-        options=None
-    )
-
-建议同时提供：
-
-    health_check()
-
-统一返回：
-
-    TTSResult
-
-其中至少包含：
-
-- success；
-- output_path；
-- duration；
-- error_code；
-- error_message。
-
----
-
-# 22. TTS 环境架构
-
-BookAgent 内部建议使用三个 Python 环境。
-
-## 22.1 bookagent-main
-
-负责：
-
-- 主应用；
-- Parser；
-- Cleaner；
-- Validator；
-- Chunker；
-- State；
-- Router；
-- FFmpeg；
-- Azure SDK；
-- 日志。
-
----
-
-## 22.2 bookagent-kokoro
-
-专门负责：
-
-**Kokoro TTS**
-
-不运行其他业务模块。
-
----
-
-## 22.3 bookagent-f5
-
-专门负责：
-
-**F5-TTS**
-
-不运行其他业务模块。
-
----
-
-# 23. 为什么本地 TTS 独立环境
-
-Kokoro 和 F5-TTS 可能拥有不同版本的：
-
-- torch；
-- torchaudio；
-- transformers；
-- numpy；
-- tokenizer；
-- vocoder；
-- CUDA 相关依赖。
-
-如果全部安装在一个 Python 环境里，可能产生依赖冲突。
-
-因此：
-
-用户看到：
-
-    一个 BookAgent
-
-内部实际上运行：
-
-    bookagent-main
-    bookagent-kokoro
-    bookagent-f5
-
-但环境切换由程序自动完成。
-
----
-
-# 24. Worker 调用架构
-
-主应用使用 subprocess 调用本地 Worker。
-
-示例：
-
-    BookAgent Main
-          │
-          ▼
-      TTS Router
-          │
-          ▼
-    KokoroBackend
-          │
-          ▼
-      subprocess
-          │
-          ▼
-    envs/kokoro/Scripts/python.exe
-          │
-          ▼
-    workers/kokoro_worker.py
-          │
-          ▼
-        WAV
-
-F5 同理。
-
----
-
-# 25. Worker 通信
-
-v0.1 优先采用：
-
-**subprocess + JSON**
-
-不引入：
-
-- Redis；
-- RabbitMQ；
-- Docker；
-- HTTP 微服务；
-- 消息队列。
-
-输入示例：
-
-    {
-      "text": "BookAgent 测试文字",
-      "voice": "...",
-      "speed": 1.0,
-      "output_path": "..."
-    }
-
-输出示例：
-
-    {
-      "success": true,
-      "output_file": "...",
-      "duration": 5.8,
-      "error_code": null,
-      "error_message": null
-    }
-
----
-
-# 26. Kokoro Backend
-
-架构：
-
-    Main Application
-          │
-          ▼
-    KokoroBackend
-          │
-          ▼
-    Kokoro Worker
-          │
-          ▼
-    Kokoro Model
-          │
-          ▼
-        WAV
-
-要求：
-
-- 支持 voice；
-- 支持 speed；
-- 支持 device=auto；
-- 支持 CPU；
-- 如 CUDA 可用可尝试 CUDA；
-- 输出统一 WAV。
-
----
-
-# 27. F5-TTS Backend
-
-架构：
-
-    Main Application
-          │
-          ▼
-      F5Backend
-          │
-          ▼
-      F5 Worker
-          │
-          ▼
-      F5-TTS
-          │
-          ▼
-        WAV
-
-支持参数：
-
-- text；
-- ref_audio；
-- ref_text；
-- speed；
-- device；
-- output_path。
-
-设备：
-
-    auto
-    cuda
-    cpu
-
-当前开发机器只有：
-
-**4GB NVIDIA VRAM**
-
-因此 F5-TTS 不保证 CUDA 一定能够运行。
-
-如果 CUDA OOM：
-
-返回：
-
-    CUDA_OOM
-
-不得无限重试。
-
-是否允许 CPU fallback：
-
-通过配置控制。
-
----
-
-# 28. Azure AI Speech Backend
-
-Azure 使用：
-
-**Microsoft Azure AI Speech Text-to-Speech 官方 API**
-
-不使用 edge-tts 替代。
-
-运行于：
-
-    bookagent-main
-
-无需单独 Python 环境。
-
-使用官方 Python SDK：
-
-    azure-cognitiveservices-speech
-
-支持：
-
-- voice；
-- rate；
-- volume；
-- SSML；
-- WAV 输出。
-
----
-
-# 29. Azure 配置安全
-
-Azure 凭据从：
-
-    .env
-
-读取。
-
-变量：
-
-    AZURE_SPEECH_KEY
-
-    AZURE_SPEECH_REGION
-
-禁止：
-
-- 写入代码；
-- 写入 config.yaml；
-- 提交 Git；
-- 输出到日志。
-
-项目提供：
-
-    .env.example
-
----
-
-# 30. Azure 错误处理
-
-可以重试：
-
-- timeout；
-- 网络错误；
-- HTTP 429；
-- 服务端 5xx。
-
-建议：
-
-**有限次数指数退避重试**
-
-认证失败：
-
-    AZURE_AUTH_FAILED
-
-应立即停止，不做无限重试。
-
----
-
-# 31. Cache 架构
-
-所有成功生成的 TTS Chunk 应缓存。
-
-结构：
-
-    audio_chunks/
-        chapter_001_chunk_0001.wav
-        chapter_001_chunk_0002.wav
-        ...
-
-缓存是否有效由：
-
-**fingerprint**
-
-判断。
-
----
-
-# 32. Fingerprint
-
-Fingerprint 至少包含：
-
-- text_hash；
-- backend；
-- voice；
-- speed；
-- 影响语音生成结果的 Backend 参数。
-
-例如：
-
-    SHA256(
-        text_hash
-        + backend
-        + voice
-        + speed
-        + relevant_options
-    )
-
-如果 fingerprint 一致：
-
-且输出 WAV 有效：
-
-    SKIP
-
-如果 fingerprint 改变：
-
-    REGENERATE
-
----
-
-# 33. Resume 架构
-
-例如一本书：
-
-    Chunk 001 SUCCESS
-    Chunk 002 SUCCESS
-    ...
-    Chunk 350 SUCCESS
-    Chunk 351 FAILED
-    Chunk 352 PENDING
-
-程序重启后：
-
-从 Chunk 351 继续。
-
-不得重新生成 Chunk 001～350。
-
----
-
-# 34. Retry 架构
-
-单个 Chunk 默认最多：
-
-    3 retries
-
-超过最大次数：
-
-    FAILED
-
-但其他已成功 Chunk 不删除。
-
-整书任务可进入：
-
-    PARTIAL_FAILED
-
-用户修复原因后：
-
-再次 Resume。
-
----
-
-# 35. Audio Cache
-
-所有 Backend 最终统一提供：
-
-    WAV
-
-这样后续 Audio Pipeline 不需要关心原始 TTS 引擎。
-
-数据流：
-
-    TTS Backend
-          ↓
-        WAV
-          ↓
-    Audio QC
-          ↓
-    Chapter Assembly
-          ↓
-      MP3 / M4B
-
----
-
-# 36. Audio QC
-
-最低检查：
-
-1. 文件是否存在；
-2. 文件大小是否正常；
-3. FFmpeg 是否可读取；
-4. duration 是否大于 0；
-5. 是否出现明显异常静音；
-6. 是否缺失 Chunk。
-
-Audio QC 不负责：
-
-复杂语音语义检查。
-
-v0.1 不引入额外语音识别模型进行逐字校验。
-
----
-
-# 37. Audio Assembly
-
-职责：
-
-- Chunk WAV 合并；
-- 章节生成；
-- 整书生成；
-- metadata；
-- chapter timestamp。
-
-使用：
-
-**FFmpeg**
-
----
-
-# 38. Chapter Assembly
-
-只有当某章节的所有必须 Chunk：
-
-    SUCCESS
-
-才能生成：
-
-    chapter_001.mp3
-
-Chunk 排序必须严格依据：
-
-Manifest 中的 order。
-
-不能依赖文件系统默认排序。
-
----
-
-# 39. Chapter Manifest
-
-章节生成后保存：
-
-    chapter_manifest.json
-
-至少包含：
-
-- chapter_id；
-- title；
-- order；
-- audio_file；
-- duration；
-- start_time；
-- end_time。
-
----
-
-# 40. M4B Assembly
-
-最终整书输出：
-
-    book.m4b
-
-M4B 应包含：
-
-- Title；
-- Author；
-- Cover；
-- Chapter Name；
-- Chapter Start Time；
-- Chapter End Time。
-
-章节时间必须依据：
-
-**真实音频时长**
-
-不得依据文字长度估算。
-
----
-
-# 41. 配置体系
-
-非敏感配置放：
-
-    config.yaml
-
-建议结构：
-
-    tts:
-      default_backend: kokoro
-
-      kokoro:
-        voice: ""
-        speed: 1.0
-        device: auto
-
-      f5:
-        speed: 1.0
-        device: auto
-        ref_audio: ""
-        ref_text: ""
-        cpu_fallback: true
-
-      azure:
-        voice: zh-CN-XiaoxiaoNeural
-        rate: 1.0
-        volume: 1.0
-
-    chunking:
-      max_chars: 1000
-
-    audio:
-      sample_rate: 24000
-      channels: 1
-      mp3_bitrate: 128k
-
-敏感信息只允许：
-
-    .env
-
----
-
-# 42. 推荐项目目录
-
-    BookAgent/
-    │
-    ├── app.py
-    ├── config.yaml
-    ├── requirements.txt
-    ├── .env.example
-    ├── .gitignore
-    ├── setup.bat
-    ├── run.bat
-    │
-    ├── docs/
-    │   ├── 01_PRD.md
-    │   ├── 02_ARCHITECTURE.md
-    │   └── 03_DETAILED_DESIGN.md
-    │
-    ├── src/
-    │   ├── app/
-    │   ├── parser/
-    │   ├── cleaner/
-    │   ├── validator/
-    │   ├── chunker/
-    │   ├── state/
-    │   ├── tts/
-    │   │   ├── base.py
-    │   │   ├── router.py
-    │   │   ├── kokoro_backend.py
-    │   │   ├── f5_backend.py
-    │   │   └── azure_backend.py
-    │   │
-    │   ├── audio/
-    │   └── utils/
-    │
-    ├── workers/
-    │   ├── kokoro_worker.py
-    │   └── f5_worker.py
-    │
-    ├── envs/
-    │   ├── kokoro/
-    │   └── f5/
-    │
-    ├── books/
-    ├── output/
-    └── logs/
-
----
-
-# 43. 单本书目录
-
-每本书建立独立工作目录。
-
-例如：
-
-    books/
-    └── <book_id>/
-        │
-        ├── source/
-        │   └── book.pdf
-        │
-        ├── parsed/
-        │   ├── metadata.json
-        │   ├── structure.json
-        │   └── raw_text.json
-        │
-        ├── cleaned/
-        │   ├── cleaned_text.json
-        │   └── cleaning_report.json
-        │
-        ├── manifests/
-        │   ├── task_manifest.json
-        │   └── tts_manifest.json
-        │
-        ├── audio_chunks/
-        │
-        ├── chapters/
-        │
-        ├── output/
-        │   └── book.m4b
-        │
-        └── logs/
-
----
-
-# 44. setup.bat 架构
-
-提供：
-
-    setup.bat
-
-职责：
-
-1. 检查 Python；
-2. 检查 FFmpeg；
-3. 创建主环境；
-4. 安装主环境依赖；
-5. 创建 Kokoro 环境；
-6. 安装 Kokoro 依赖；
-7. 创建 F5 环境；
-8. 安装 F5 依赖；
-9. 创建必要目录；
-10. 创建或提示配置 .env；
-11. 执行 smoke test。
-
-如果某一个 TTS 安装失败：
-
-必须明确指出：
-
-    KOKORO_SETUP_FAILED
-
-或：
-
-    F5_SETUP_FAILED
-
-不得把安装失败伪装为成功。
-
----
-
-# 45. run.bat 架构
-
-run.bat 的职责应该非常简单：
-
-    启动 bookagent-main
-        ↓
-    执行 app.py
-
-用户不需要知道 Python venv 的具体路径。
-
----
-
-# 46. Smoke Test
-
-三个 Backend 必须独立提供 smoke test。
-
-## Kokoro
-
-测试：
-
-    “这是 BookAgent Kokoro 测试。”
-
-成功标准：
-
-生成有效 WAV。
-
----
-
-## F5-TTS
-
-使用：
-
-最小合法 reference。
-
-如果用户尚未提供：
-
-    ref_audio
-
-则返回：
-
-    NOT_CONFIGURED
-
-而不是伪造 reference。
-
----
-
-## Azure
-
-如果没有配置 Key：
-
-    NOT_CONFIGURED
-
-如果存在合法配置：
-
-生成短 WAV。
-
----
-
-# 47. Logging
-
-日志级别：
-
-- DEBUG
-- INFO
-- WARNING
-- ERROR
-
-日志内容至少记录：
-
-- 当前阶段；
-- 当前 Chapter；
-- 当前 Chunk；
-- Backend；
-- Retry；
-- Error Code；
-- 总进度。
-
-禁止记录：
-
-- Azure API Key；
-- Token；
-- 完整敏感环境变量。
-
----
-
-# 48. 错误体系
-
-建议定义统一错误代码。
-
-输入类：
-
-    INVALID_INPUT
-    UNSUPPORTED_FILE
-    SCAN_PDF_NOT_SUPPORTED
-
-解析类：
-
-    PARSE_FAILED
-    VALIDATION_FAILED
-
-TTS 类：
-
-    TTS_BACKEND_UNAVAILABLE
-    TTS_FAILED
-    CUDA_OOM
-    AZURE_AUTH_FAILED
-    AZURE_RATE_LIMITED
-
-音频类：
-
-    FFMPEG_NOT_FOUND
-    AUDIO_INVALID
-
-状态类：
-
-    MANIFEST_CORRUPTED
-
-统一错误代码有利于：
-
-- 日志；
-- UI；
-- Resume；
-- 后续自动处理。
-
----
-
-# 49. Git 与数据管理
-
-不得提交：
-
-    .env
-    envs/
-    .venv/
-    __pycache__/
-    *.wav
-    *.mp3
-    *.m4b
-    logs/
-    下载的大模型文件
-
-测试 fixture 可例外。
-
----
-
-# 50. 当前硬件环境
-
-目标开发机器：
-
-- Windows 11
-- NVIDIA Quadro T1000
-- 4GB VRAM
-- 约 40GB RAM
-
-因此：
-
-## Kokoro
-
-要求：
-
-优先保证可以稳定运行。
-
-## F5-TTS
-
-允许：
-
-由于显存不足导致 CUDA 不可用。
-
-但是：
-
-不得因为 F5 失败导致 BookAgent 整体无法使用。
-
-Azure 和 Kokoro 必须仍可正常工作。
-
----
-
-# 51. 性能原则
-
-BookAgent 第一版优先保证：
-
-- 正确；
-- 可恢复；
-- 稳定；
-
-其次才是速度。
-
-禁止为了提升速度而牺牲：
-
-- 原文完整性；
-- Manifest；
-- Cache；
-- Resume；
-- 音频正确顺序。
-
----
-
-# 52. 模块依赖原则
-
-依赖方向建议：
-
-    Application
-         ↓
-    Task Manager
-         ↓
-    Book Pipeline
-         ↓
-    Parser / Cleaner / Validator / Chunker
-         ↓
-    TTS Router
-         ↓
-    Backend
-         ↓
-    Worker / Azure API
-
-Audio 模块独立于：
-
-具体 TTS Backend。
-
-Parser 不得依赖：
-
-Audio。
-
-Cleaner 不得依赖：
-
-TTS。
-
----
-
-# 53. v0.1 禁止过度设计
-
-当前版本不引入：
-
-- 数据库服务器；
-- Redis；
-- Celery；
-- RabbitMQ；
-- Docker 集群；
-- Kubernetes；
-- 微服务架构；
-- Web API Gateway；
-- 多 Agent 自主协作。
-
-本项目当前是：
-
-**单机 Python 应用**
-
-优先保持简单、可靠、可维护。
-
----
-
-# 54. 未来 TTS 扩展
-
-未来可能扩展为：
-
-    TTSBackend
-    ├── Kokoro
-    ├── F5-TTS
-    ├── Azure AI Speech
-    ├── Edge TTS
-    ├── OpenAI TTS
-    └── Other
-
-增加新 TTS 时：
-
-只增加：
-
-- Backend；
-- 必要 Worker；
-- Config。
-
-不得要求修改核心 Book Pipeline。
-
----
-
-# 55. 未来 Deep Dive 扩展
-
-未来：
-
-    MODE_B_DEEP_DIVE
-
-将复用以下模块：
-
-- Parser；
-- Cleaner；
-- Book Structure；
-- Validator；
-- State Manager；
-- TTS；
-- Audio Pipeline。
-
-新增：
-
-    Knowledge Extraction
-            ↓
-    Coverage Matrix
-            ↓
-    Lecture Structure
-            ↓
-    Lecture Script
-            ↓
-    Fact / Coverage Audit
-            ↓
-    Storyboard
-            ↓
-    Narration
-            ↓
-    Visual Production
-
-因此 v0.1 的 Parser 和 Book Structure 应避免与“原文朗读”场景过度耦合。
-
----
-
-# 56. v0.1 架构验收标准
-
-概要架构通过标准：
-
-1. 用户只运行一个 BookAgent；
-2. 用户运行时可以选择 Kokoro / F5-TTS / Azure；
-3. 用户无需手工切换 Python 环境；
-4. Kokoro 和 F5 依赖互相隔离；
-5. 三个 TTS 使用统一 Backend 接口；
-6. PDF / EPUB Pipeline 与 TTS Backend 解耦；
-7. 所有 TTS Chunk 有 Manifest；
-8. 已完成 Chunk 可以缓存；
-9. 任务支持 Resume；
-10. 单个 Chunk 失败不导致整本书从头开始；
-11. F5 CUDA 失败不影响 Kokoro 和 Azure；
-12. Azure Key 不进入源码或 Git；
-13. FFmpeg 统一负责最终音频处理；
-14. 可以输出章节 MP3；
-15. 可以输出整书 M4B；
-16. 第二本书无需修改程序；
-17. 后续增加第四个 TTS 不需要重构核心 Pipeline。
-
----
-
-# 57. 最终架构原则总结
-
-BookAgent v0.1 的核心架构原则为：
-
-**一个应用**
-
-用户只看到一个 BookAgent。
-
-**三个 TTS Backend**
-
-Kokoro、F5-TTS、Azure AI Speech。
-
-**两个隔离本地 Worker**
-
-Kokoro 和 F5-TTS 独立运行环境。
-
-**一个统一 Pipeline**
-
-书籍解析、清洗、验证、Chunk、TTS、音频合并。
-
-**全过程可恢复**
-
-Manifest、Cache、Retry、Resume。
-
-**原文优先**
-
-不使用 LLM 自动改写书籍正文。
-
-**简单优先**
-
-第一版拒绝不必要的微服务、数据库和复杂基础设施。
-
-**扩展优先**
-
-未来新增 TTS 或 Deep Dive 模式时，不推翻现有 BookAgent 核心架构。
+## 13. 错误隔离与韧性原则
+
+1. **引擎故障隔离**：本地 F5 模型发生 CUDA 异常，只导致当前 Chunk 重试或标记为局部错误，绝不导致主界面崩溃闪退，更不影响 Kokoro 或 Azure 引擎的独立运行。
+2. **音频质量熔断（Audio QC Safeguard）**：任何单段音频一旦出现持续静音、时长为零、振幅溢出或 NaN，立即阻断合并流程，记录错误日志并触发有限次数重试。
+3. **安全凭据防泄漏**：云端 API Key（如 Azure Speech Key）严禁写入源码、配置及日志文件，仅允许通过本地环境变量或加密配置加载，日志打印自动脱敏。

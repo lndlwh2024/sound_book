@@ -1,95 +1,69 @@
-# ==============================================================================
-# SoundBook 有声书转换工程全局配置文件 (v0.2.7 定稿版)
-# 架构原则：
-# 1. 跨模型通用配置（Universal / Non-Model Specific）：文本正规化、标点停顿规约、分块策略、音频输出规格
-# 2. 模型专属配置（Model-Specific）：各 TTS 引擎专属模型路径、发音人权重、采样步数等
-# ==============================================================================
-
-# ------------------------------------------------------------------------------
-# 1. 基础应用配置 (Application Settings)
-# ------------------------------------------------------------------------------
 app:
-  log_level: "INFO"                    # 日志级别: DEBUG / INFO / WARNING / ERROR
-  books_dir: "books"                  # 书籍主数据与状态持久化根目录
-  output_dir: "output"                # 最终整书与章节合并有声书导出目录
-
-# ------------------------------------------------------------------------------
-# 2. 文本正规化与语音学增强 (Universal Text Normalization) - 跨模型共享
-# 无论选用何种 TTS 模型，所有文本在送入声码器前均需完成口语化转换
-# ------------------------------------------------------------------------------
+  log_level: INFO
+  books_dir: books
+  output_dir: output
 normalization:
-  enable_year_oral: true              # 四位年份口语位读转换（如 "1957" 转换为 "一九五七"）
-  enable_polyphone_fix: true          # 金融量词多音字校准（如 "两只股票" 之 "只" 校准为第一声 zhī）
-  enable_third_tone_guard: true       # 三声"我"字本调加固（在"我写道/买入"后注入微气口，阻断二声变调）
-  enable_bilingual_g2p: true          # 英文术语美式带重音 IPA 注入（如 "workouts" 注入带重音音标）
-
-# ------------------------------------------------------------------------------
-# 3. 跨模型通用标点符号停顿规约 (Universal Punctuation Pauses)
-# 配合自适应静音剥离引擎，彻底消除模型自带静音造成的"长短不一与超长停顿"
-# 单位：秒 (Seconds)
-# ------------------------------------------------------------------------------
+  enable_year_oral: true
+  enable_polyphone_fix: true
+  enable_third_tone_guard: true
+  enable_bilingual_g2p: true
 pauses:
-  comma: 0.20                         # 逗号/顿号/从属从句：200ms（自然微喘息停顿）
-  colon: 0.28                         # 冒号/分号/引言：280ms（引言承上启下自然停顿）
-  period: 0.40                        # 句号/感叹号/问号：400ms（沉稳句末终结停顿）
-  paragraph: 0.65                     # 自然段换行/小标题：650ms（段落呼吸感停顿）
-  chapter: 1.20                       # 大章节跨节停顿：1200ms（章节转换仪式感长停顿）
-
-# ------------------------------------------------------------------------------
-# 4. 章节切分与分块管理 (Chunking & Structure Management)
-# ------------------------------------------------------------------------------
+  comma: 0.2
+  colon: 0.28
+  period: 0.4
+  paragraph: 0.65
+  chapter: 1.2
 chunking:
-  default_max_chars: 1000             # 单个音频 Chunk 建议字符数上限
-  split_by_chapter: true              # 严格按大章节边界划分 Chunk（禁止跨章节合并）
-  output_chapter_mapping: true        # 导出音频时自动输出大章节与所属文件编号映射表
-  heading_pause_ms: 800               # 小标题与正文之间的独立物理间隔（毫秒）
-
-# ------------------------------------------------------------------------------
-# 5. 音频最终压制规格 (Universal Audio Output Specifications)
-# ------------------------------------------------------------------------------
+  default_max_chars: 1000
+  split_by_chapter: true
+  output_chapter_mapping: true
+  heading_pause_ms: 800
 audio_output:
-  sample_rate: 24000                  # 统一标准工业采样率 (24000 Hz)
-  channels: 1                         # 单声道 (Mono)
-  mp3_bitrate: "128k"                 # 导出 MP3 音频码率 (128 kbps)
-  trim_silence: true                  # 强制开启模型推理端首尾冗余静音剥离
-
-# ------------------------------------------------------------------------------
-# 6. TTS 引擎与模型专属配置 (Model-Specific Configurations)
-# ------------------------------------------------------------------------------
+  sample_rate: 24000
+  channels: 1
+  mp3_bitrate: 128k
+  trim_silence: true
 tts:
-  default_backend: "kokoro"           # 当前默认活动后端：kokoro / f5 / azure
-  models_dir: "models"                # 离线权重统一存放目录
-  retry_count: 3                      # Worker 推理失败重试次数
-  worker_timeout_seconds: 600         # Worker 进程单次任务超时阈值（秒）
-
-  # --- Kokoro-82M 专属配置 ---
+  default_backend: kokoro
+  models_dir: models
+  retry_count: 3
+  worker_timeout_seconds: 600
   kokoro:
-    repo_id: "hexgrad/Kokoro-82M"
-    model_path: ""                    # 离线模型路径（空表示自适应从缓存或 Hub 加载）
-    voice: "zm_yunjian"               # 中文主发音人（沉稳播音男声）
-    speed: 0.85                       # 基础舒适沉稳语速
-    device: "cuda"                    # 推理硬件环境: cuda / cpu / auto
-    # 方案 B 专属：英文术语同一人声线微调
-    blend_en_voice: "am_onyx"         # 英文辅助成熟男声音色
-    blend_en_ratio: 0.20              # 辅助音色混合权重 (主声线 80% 依然保持云健)
-
-  # --- F5-TTS v1 Base 专属配置 ---
+    repo_id: hexgrad/Kokoro-82M
+    model_path: ''
+    voice: zm_yunjian
+    speed: 0.85
+    device: cuda
+    blend_en_voice: am_onyx
+    blend_en_ratio: 0.2
   f5:
-    repo_id: "SWivid/F5-TTS"          # 官方开源仓库
-    subfolder: "F5TTS_v1_Base"        # 采用 v1 Base 架构
-    model_path: "models/f5_tts"       # 权重本地存放路径
-    device: "cuda"                    # 推理硬件环境: cuda / cpu / auto
-    nfe_step: 16                      # ODE 扩散推理步数 (16 步兼具极速推理与无损高保真品质)
-    cfg_strength: 2.0                 # 无分类器引导系数 (Classifier-Free Guidance)
-    speed: 1.0                        # 语速调节倍率
-    # 预置轻熟商业精英男声音色 (D1 定稿音色，开箱即用)
-    preset_voice: "preset_male_d1_elite"
-    preset_dir: "models/f5_tts/presets"
-    ref_audio: "models/f5_tts/presets/preset_male_d1_elite.wav"
-    ref_text: "在去年写给合伙人的信中，我写道："
-
-  # --- Azure Neural TTS 专属配置 ---
+    repo_id: SWivid/F5-TTS
+    subfolder: F5TTS_v1_Base
+    model_path: models/f5_tts
+    device: cuda
+    nfe_step: 16
+    cfg_strength: 2.0
+    speed: 1.0
+    preset_voice: preset_male_d1_elite
+    preset_dir: models/f5_tts/presets
+    ref_audio: models/f5_tts/presets/preset_male_d1_elite.wav
+    ref_text: 在去年写给合伙人的信中，我写道：
   azure:
-    voice: "zh-CN-XiaoxiaoNeural"     # 微软发音人
-    rate: "1.0"
-    volume: "1.0"
+    voice: zh-CN-XiaoxiaoNeural
+    rate: '1.0'
+    volume: '1.0'
+hardware:
+  force_float32: true
+  cooling_pause_seconds: 30
+  gpu_temp_limit: 78
+speech_unit:
+  max_chars: 120
+  max_sentences: 2
+  min_chars: 10
+video:
+  default_layout: portrait_9_16
+  fps: 30
+  bg_blur_sigma: 20
+  font_family: Microsoft YaHei
+  title_font_size: 48
+  subtitle_font_size: 38

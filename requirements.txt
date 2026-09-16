@@ -5,3 +5,4 @@ lxml>=4.9.0
 PyYAML>=6.0
 python-dotenv>=1.0.0
 azure-cognitiveservices-speech>=1.40.0
+PySide6>=6.5.0

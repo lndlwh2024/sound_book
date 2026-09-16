@@ -1,83 +1,74 @@
+# -*- coding: utf-8 -*-
 """
-BookAgent v0.1 主入口
-负责初始化组件、加载配置、处理命令行参数及调度核心任务。
+书声 (ShuSheng) v2.0 主入口
+默认启动：PySide6 桌面图形客户端
+诊断/批处理模式：使用 --cli 参数启动命令行界面
 """
 import sys
+import argparse
 import logging
-from src.app.cli import parse_args, interactive_input
+from pathlib import Path
 
-# 这里导入的模块将在其它任务中实现，此处使用安全的 fallback 机制或直接导入
-try:
-    from src.utils.config import ConfigManager
-except ImportError:
-    class ConfigManager:
-        def __init__(self, path=None):
-            self.config = {}
-        def get(self, key, default=None):
-            return default
+from src.utils.config import config
+from src.utils.logging_config import setup_logger
+from src.audio.ffmpeg_utils import check_ffmpeg
 
-try:
-    from src.utils.logging_config import setup_logger
-except ImportError:
-    def setup_logger(level="INFO", book_id=None):
-        logging.basicConfig(level=level)
 
-try:
-    from src.audio.ffmpeg_utils import check_ffmpeg
-except ImportError:
-    def check_ffmpeg():
-        return True
+def run_gui():
+    """启动 PySide6 桌面图形界面"""
+    from PySide6.QtWidgets import QApplication
+    from PySide6.QtCore import Qt
+    from src.app.main_window import MainWindow
 
-try:
+    # 适配 Windows 高 DPI 屏幕显示
+    if hasattr(Qt, "AA_EnableHighDpiScaling"):
+        QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
+    if hasattr(Qt, "AA_UseHighDpiPixmaps"):
+        QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
+
+    app = QApplication(sys.argv)
+    app.setApplicationName("书声 ShuSheng")
+    window = MainWindow()
+    window.show()
+    sys.exit(app.exec())
+
+
+def run_cli():
+    """命令行模式 (保留作为开发调试、单元测试与自动化批处理)"""
+    from src.app.cli import parse_args, interactive_input
     from src.app.task_manager import TaskManager
-except ImportError:
-    class TaskManager:
-        def __init__(self, config, params):
-            self.config = config
-            self.params = params
-        def run(self):
-            return True
 
-
-
-def main():
-    # 1. 解析 CLI 参数
     args = parse_args()
-    
-    # 2. 加载配置
-    config_path = getattr(args, 'config', None)
-    config = ConfigManager(config_path)
-    
-    # 3. 初始化日志
     log_level = config.get('app.log_level', 'INFO')
     setup_logger(log_level)
-    
-    # 4. 检查 FFmpeg
+
     if not check_ffmpeg():
-        print("错误：FFmpeg 未找到，请先安装...")
+        print("错误：FFmpeg 未找到，请检查 PATH 环境变量。")
         sys.exit(1)
-        
-    # 5. 交互模式补全参数
+
     if not args.book_file:
         params = interactive_input(config.config)
-        # 将已有的命令行参数合并到 params 中
         for k, v in vars(args).items():
             if k not in params and v is not None:
                 params[k] = v
     else:
         params = vars(args)
-        
-    print("\n开始处理...")
-    
-    # 6. 创建并运行 TaskManager
+
+    print("\n[书声 CLI] 开始执行批处理生产...")
     task_manager = TaskManager(config, params)
     result = task_manager.run()
-    
-    # 7. 显示结果
     if result:
-        print("生成完成。")
+        print("生产完成。")
     else:
-        print("生成过程中遇到错误。")
+        print("生产过程中遇到错误。")
+
+
+def main():
+    if "--cli" in sys.argv:
+        sys.argv.remove("--cli")
+        run_cli()
+    else:
+        run_gui()
 
 
 if __name__ == '__main__':

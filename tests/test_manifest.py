@@ -49,3 +49,26 @@ def test_update_chunk_status(manifest_manager):
     # 验证 chunk 状态已更新
     chunk = next(c for c in loaded["chunks"] if c["id"] == "c1")
     assert chunk["status"] == "done"
+
+def test_save_and_load_episode_manifest(manifest_manager):
+    """测试保存和加载 Episode Manifest (书声 v2.0)"""
+    from src.state.models import EpisodeManifest
+    episodes = [
+        EpisodeManifest(
+            episode_id="ep_01",
+            order=1,
+            title="第01集",
+            subtitle="第01集 · 认知革命",
+            chapters=["ch_01", "ch_02"],
+            duration=1820.5,
+            video_file="Episode_01.mp4",
+            subtitle_file="Episode_01.srt"
+        )
+    ]
+    manifest_manager.save_episode_manifest(episodes)
+    loaded = manifest_manager.load_episode_manifest()
+    assert loaded is not None
+    assert len(loaded) == 1
+    assert loaded[0].episode_id == "ep_01"
+    assert loaded[0].duration == 1820.5
+    assert loaded[0].chapters == ["ch_01", "ch_02"]

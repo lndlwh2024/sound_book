@@ -67,6 +67,24 @@ class ConfigManager:
             return default
 
 
+from dataclasses import dataclass
+from typing import Optional, Dict
+
+@dataclass
+class VoiceProfile:
+    """
+    音色配置数据模型。
+    将面向用户的音色呈现（如"商业精英D1"）与底层具体的TTS引擎（F5/Kokoro/Azure）及技术参数彻底解耦。
+    """
+    profile_id: str
+    display_name: str
+    engine: str
+    speed: float = 1.0
+    ref_audio: Optional[str] = None
+    ref_text: Optional[str] = None
+    extra_options: Optional[Dict[str, Any]] = None
+
+
 # 导出全局默认配置实例
 config = ConfigManager()
 

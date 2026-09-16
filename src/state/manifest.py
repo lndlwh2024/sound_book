@@ -5,17 +5,18 @@ import logging
 from pathlib import Path
 from typing import List, Optional, Any
 
-from ..state.models import TTSChunk, TaskManifest, ChapterManifest
+from ..state.models import TTSChunk, TaskManifest, ChapterManifest, EpisodeManifest, SpeechUnit
 
 logger = logging.getLogger(__name__)
 
 class ManifestManager:
     """
-    状态清单管理器，负责原子读写以下三个清单：
-    1. tts_manifest.json：管理所有 TTSChunk 状态
+    状态清单管理器，负责原子读写以下核心清单：
+    1. tts_manifest.json：管理所有 TTSChunk 与 SpeechUnit 状态
     2. task_manifest.json：管理全局任务配置与状态
     3. chapter_manifest.json：管理各章节的处理状态
-    通过原子写入防止异常退出时状态文件损坏。
+    4. episode_manifest.json：管理分集视频与字幕产物状态
+    通过临时文件 + fsync + 操作系统原子替换防止异常退出时状态文件损坏。
     """
     
     def __init__(self, book_dir: Optional[Path] = None, base_dir: Optional[str] = None):
@@ -36,6 +37,7 @@ class ManifestManager:
         self.tts_manifest_path = self.manifests_dir / "tts_manifest.json"
         self.task_manifest_path = self.manifests_dir / "task_manifest.json"
         self.chapter_manifest_path = self.manifests_dir / "chapter_manifest.json"
+        self.episode_manifest_path = self.manifests_dir / "episode_manifest.json"
 
 
     def _atomic_write(self, file_path: Path, data: Any) -> None:
@@ -202,5 +204,23 @@ class ManifestManager:
                 return [ChapterManifest.from_dict(item) if isinstance(item, dict) else item for item in data]
         except Exception as e:
             logger.error(f"读取 Chapter Manifest 失败: {e}")
+            return None
+
+    # Episode Manifest (书声 v2.0 分集产物清单)
+    def save_episode_manifest(self, episodes: List[EpisodeManifest]) -> None:
+        """保存分集视频产物清单"""
+        self._atomic_write(self.episode_manifest_path, episodes)
+        logger.debug(f"已保存 Episode Manifest，包含 {len(episodes)} 个分集")
+
+    def load_episode_manifest(self) -> Optional[List[EpisodeManifest]]:
+        """加载分集视频产物清单"""
+        if not self.episode_manifest_path.exists():
+            return None
+        try:
+            with open(self.episode_manifest_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                return [EpisodeManifest.from_dict(item) if isinstance(item, dict) else item for item in data]
+        except Exception as e:
+            logger.error(f"读取 Episode Manifest 失败: {e}")
             return None
 

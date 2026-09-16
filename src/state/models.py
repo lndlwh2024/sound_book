@@ -15,14 +15,22 @@ class ChunkStatus(str, Enum):
     SKIPPED = "SKIPPED"
 
 class TaskStatus(str, Enum):
-    """整体有声书转换任务的状态机枚举"""
+    """整体有声书与视频转换任务的状态机枚举（覆盖书声 v2.0 完整生命周期）"""
+    CREATED = "CREATED"
     INGEST = "INGEST"
+    INGESTING = "INGESTING"
     PARSED = "PARSED"
     CLEANED = "CLEANED"
     VALIDATED = "VALIDATED"
+    PLANNED = "PLANNED"
     TTS_READY = "TTS_READY"
     TTS_GENERATING = "TTS_GENERATING"
+    PAUSING = "PAUSING"
+    PAUSED = "PAUSED"
     AUDIO_QC = "AUDIO_QC"
+    ALIGNING_SUBTITLES = "ALIGNING_SUBTITLES"
+    AUDIO_MIXING = "AUDIO_MIXING"
+    VIDEO_RENDERING = "VIDEO_RENDERING"
     ASSEMBLED = "ASSEMBLED"
     COMPLETED = "COMPLETED"
     NEEDS_REVIEW = "NEEDS_REVIEW"
@@ -120,12 +128,17 @@ class Chapter:
     sections: List[Section] = field(default_factory=list)
     paragraphs: List[str] = field(default_factory=list)
 
-    def __init__(self, chapter_id: str = "", title: str = "", order: int = 1, sections: List[Section] = None, paragraphs: List[str] = None, id: str = None, **kwargs):
+    def __init__(self, chapter_id: str = "", title: str = "", order: int = 1, sections: List[Section] = None, paragraphs: List[str] = None, id: str = None, content: str = None, **kwargs):
         self.chapter_id = id if id is not None else chapter_id
         self.title = title
         self.order = order
         self.sections = sections if sections is not None else []
-        self.paragraphs = paragraphs if paragraphs is not None else []
+        if paragraphs is not None:
+            self.paragraphs = paragraphs
+        elif content is not None:
+            self.paragraphs = [p for p in content.split("\n") if p.strip()]
+        else:
+            self.paragraphs = []
 
     @property
     def id(self) -> str:
@@ -354,5 +367,53 @@ class ValidationReport:
 
     @classmethod
     def from_dict(cls, data: dict) -> 'ValidationReport':
+        return cls(**data)
+
+
+@dataclass
+class SpeechUnit:
+    """
+    自然朗读单元（SpeechUnit）
+    定义：适合一次 TTS 生成，同时可直接对应一条字幕时间区间的最小自然朗读单元。
+    在书声 v2.0 中，默认 1 SpeechUnit = 1 TTS Chunk = 1 WAV。
+    """
+    unit_id: str
+    chapter_id: str
+    order: int
+    text: str
+    text_hash: str = ""
+    audio_duration: float = 0.0
+    status: str = "PENDING"
+    output_file: str = ""
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict) -> 'SpeechUnit':
+        return cls(**data)
+
+
+@dataclass
+class EpisodeManifest:
+    """
+    单集视频与音频产物清单（Episode Manifest）
+    记录分集视频、字幕及所包含的章节信息。
+    """
+    episode_id: str
+    order: int
+    title: str
+    subtitle: str
+    chapters: List[str]
+    duration: float
+    video_file: str = ""
+    subtitle_file: str = ""
+    audio_file: str = ""
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict) -> 'EpisodeManifest':
         return cls(**data)
 
