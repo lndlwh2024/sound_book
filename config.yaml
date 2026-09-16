@@ -54,9 +54,9 @@ tts:
       e1:
         name: "E1 (男生中声 - 巴菲特股东信旁白)"
         audio: "models/f5_tts/presets/preset_male_e1_narrator.wav"
-        text: "介紹了目前的持倉佈局，還透露了在投資策略上的新動向，例如大幅增加短期美債持有量和對日本五大商社的持續加碼。與此同時，外界關心的在現金儲備創下歷史新高（3342億美元）的背景下，巴菲特會如何操作？"
+        text: "例如大幅增加短期美债持有量和对日本五大商社的持续加码。"
     ref_audio: models/f5_tts/presets/preset_male_e1_narrator.wav
-    ref_text: "介紹了目前的持倉佈局，還透露了在投資策略上的新動向，例如大幅增加短期美債持有量和對日本五大商社的持續加碼。與此同時，外界關心的在現金儲備創下歷史新高（3342億美元）的背景下，巴菲特會如何操作？"
+    ref_text: "例如大幅增加短期美债持有量和对日本五大商社的持续加码。"
   azure:
     voice: zh-CN-XiaoxiaoNeural
     rate: '1.0'

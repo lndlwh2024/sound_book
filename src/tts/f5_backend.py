@@ -183,24 +183,31 @@ class F5Backend(TTSBackend):
         合成文本切片音频，支持预置成熟商业男声音色与跨模型标点停顿注入，具备 CUDA OOM 自动降级能力。
         """
         options = options or {}
-        ref_audio = options.get("ref_audio") or self._config.get("ref_audio")
-        ref_text = options.get("ref_text", "") or self._config.get("ref_text", "")
         device = options.get("device") or self._config.get("device", "auto")
 
         # 智能音色预设解析逻辑 (支持 D1 / E1 等预设音色自动匹配)
         # 【为什么这样设计】
-        # 将面向表现层的音色选择（如界面上的 "E1 (男生中声)" 或 "preset_male_e1_narrator"）
-        # 自动与 presets 目录下的对应 .wav 与 .txt 参考语料自动关联，实现零冗余配置
-        selected_voice = voice or self._config.get("preset_voice", "preset_male_d1_elite")
-        preset_dir = Path(self._config.get("preset_dir", "models/f5_tts/presets"))
+        # 1. 显式自定义优先：若 options 显式传入了用户自定义的 ref_audio，尊重调用方指定的临时音频；
+        # 2. 预设音色强绑定：若由界面下拉框 (voice) 选择预设（如 "E1 (男生中声...)"），
+        #    强制将预设 .wav 与对应纯正简体 .txt 配对加载，杜绝配置漂移或文本失配引发的乱音；
+        # 3. 兜底回退：若未指定 voice 且无自定义音频，则读取配置文件的默认预设。
+        custom_ref_audio = options.get("ref_audio")
+        ref_audio = None
+        ref_text = ""
 
-        if not ref_audio:
-            # 1. 尝试匹配 E1 / 股东信旁白音色
+        if custom_ref_audio:
+            ref_audio = custom_ref_audio
+            ref_text = options.get("ref_text", "") or self._config.get("ref_text", "")
+        else:
+            selected_voice = voice or self._config.get("preset_voice", "preset_male_e1_narrator")
+            preset_dir = Path(self._config.get("preset_dir", "models/f5_tts/presets"))
+
+            # 1. 尝试匹配 E1 / 股东信旁白推荐音色
             if "E1" in str(selected_voice) or "narrator" in str(selected_voice).lower():
                 target_wav = preset_dir / "preset_male_e1_narrator.wav"
                 target_txt = preset_dir / "preset_male_e1_narrator.txt"
                 if target_wav.exists():
-                    ref_audio = str(target_wav)
+                    ref_audio = str(target_wav.resolve())
                     if target_txt.exists():
                         ref_text = target_txt.read_text(encoding="utf-8").strip()
             # 2. 尝试匹配 D1 / 商业精英男声音色
@@ -208,27 +215,40 @@ class F5Backend(TTSBackend):
                 target_wav = preset_dir / "preset_male_d1_elite.wav"
                 target_txt = preset_dir / "preset_male_d1_elite.txt"
                 if target_wav.exists():
-                    ref_audio = str(target_wav)
+                    ref_audio = str(target_wav.resolve())
                     if target_txt.exists():
                         ref_text = target_txt.read_text(encoding="utf-8").strip()
                     else:
                         ref_text = "在去年写给合伙人的信中，我写道："
             # 3. 尝试直接按音色名称查找对应预设
             elif (preset_dir / f"{selected_voice}.wav").exists():
-                ref_audio = str(preset_dir / f"{selected_voice}.wav")
+                ref_audio = str((preset_dir / f"{selected_voice}.wav").resolve())
                 target_txt = preset_dir / f"{selected_voice}.txt"
                 if target_txt.exists():
                     ref_text = target_txt.read_text(encoding="utf-8").strip()
-            # 4. 回退默认预设
-            else:
-                default_preset_name = self._config.get("preset_voice", "preset_male_d1_elite")
-                default_preset_wav = preset_dir / f"{default_preset_name}.wav"
-                if default_preset_wav.exists():
-                    ref_audio = str(default_preset_wav)
-                    ref_text = "在去年写给合伙人的信中，我写道："
-                elif (preset_dir / "preset_business_male.wav").exists():
-                    ref_audio = str(preset_dir / "preset_business_male.wav")
-                    ref_text = "在去年写给合伙人的信中，我写道："
+
+            # 4. 回退默认预设配置
+            if not ref_audio:
+                cfg_ref = self._config.get("ref_audio")
+                if cfg_ref and Path(cfg_ref).exists():
+                    ref_audio = str(Path(cfg_ref).resolve())
+                    ref_text = self._config.get("ref_text", "")
+                    target_txt = Path(ref_audio).with_suffix(".txt")
+                    if target_txt.exists():
+                        ref_text = target_txt.read_text(encoding="utf-8").strip()
+                else:
+                    default_preset_name = self._config.get("preset_voice", "preset_male_e1_narrator")
+                    default_preset_wav = preset_dir / f"{default_preset_name}.wav"
+                    default_preset_txt = preset_dir / f"{default_preset_name}.txt"
+                    if default_preset_wav.exists():
+                        ref_audio = str(default_preset_wav.resolve())
+                        if default_preset_txt.exists():
+                            ref_text = default_preset_txt.read_text(encoding="utf-8").strip()
+                        else:
+                            ref_text = "例如大幅增加短期美债持有量和对日本五大商社的持续加码。"
+                    elif (preset_dir / "preset_business_male.wav").exists():
+                        ref_audio = str((preset_dir / "preset_business_male.wav").resolve())
+                        ref_text = "在去年写给合伙人的信中，我写道："
 
         if not ref_audio:
             return TTSResult(
