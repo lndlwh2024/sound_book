@@ -583,26 +583,30 @@ class MainWindow(QMainWindow):
     def _on_browse_book(self) -> None:
         file_path, _ = QFileDialog.getOpenFileName(self, "选择电子书文件", "", "Ebooks (*.pdf *.epub)")
         if file_path:
-            self.txt_book_path.setText(file_path)
-            p = Path(file_path)
-            if not self.txt_book_title.text():
-                self.txt_book_title.setText(p.stem)
-            if not self.txt_main_title.text():
-                self.txt_main_title.setText(f"《{p.stem}》精选")
+            clean_path = file_path.strip()
+            self.txt_book_path.setText(clean_path)
+            p = Path(clean_path)
+            clean_stem = p.stem.strip()
+            if not self.txt_book_title.text().strip():
+                self.txt_book_title.setText(clean_stem)
+            if not self.txt_main_title.text().strip():
+                self.txt_main_title.setText(f"《{clean_stem}》精选")
 
     def _on_browse_cover(self) -> None:
         file_path, _ = QFileDialog.getOpenFileName(self, "选择封面图像", "", "Images (*.jpg *.jpeg *.png *.webp)")
         if file_path:
-            self.txt_cover_path.setText(file_path)
-            self._update_preview_image(file_path)
+            clean_path = file_path.strip()
+            self.txt_cover_path.setText(clean_path)
+            self._update_preview_image(clean_path)
 
     def _on_browse_bgm(self) -> None:
         file_path, _ = QFileDialog.getOpenFileName(self, "选择背景音乐", "", "Audio (*.mp3 *.wav *.m4a)")
         if file_path:
-            self.txt_bgm_path.setText(file_path)
+            clean_path = file_path.strip()
+            self.txt_bgm_path.setText(clean_path)
 
     def _on_layout_changed(self) -> None:
-        cover_path = self.txt_cover_path.text()
+        cover_path = self.txt_cover_path.text().strip()
         if cover_path and os.path.exists(cover_path):
             self._update_preview_image(cover_path)
 
@@ -614,7 +618,7 @@ class MainWindow(QMainWindow):
             composer = VideoComposer(layout_name=layout)
             composer.render_preview_frame(
                 cover_path=cover_path,
-                main_title=self.txt_main_title.text() or "主标题预览",
+                main_title=self.txt_main_title.text().strip() or "主标题预览",
                 subtitle="第01集 · 章节副标题",
                 output_image_path=tmp_preview,
                 layout_name=layout
@@ -640,16 +644,16 @@ class MainWindow(QMainWindow):
             run_mode = "RUN_DURATION_LIMIT"
 
         return {
-            "book_path": self.txt_book_path.text(),
-            "book_title": self.txt_book_title.text(),
+            "book_path": self.txt_book_path.text().strip(),
+            "book_title": self.txt_book_title.text().strip(),
             "start_page": self.spn_start_page.value(),
             "video_layout": layout_name,
             "target_duration_mins": float(self.spn_target_duration.value()),
             "min_interval_mins": float(self.spn_min_interval.value()),
             "run_mode": run_mode,
-            "cover_path": self.txt_cover_path.text(),
-            "bgm_path": self.txt_bgm_path.text(),
-            "main_title": self.txt_main_title.text(),
+            "cover_path": self.txt_cover_path.text().strip(),
+            "bgm_path": self.txt_bgm_path.text().strip(),
+            "main_title": self.txt_main_title.text().strip(),
             "voice_volume_percent": float(self.slider_voice.value()),
             "bgm_volume_percent": float(self.slider_bgm.value()),
             "tts_engine": "f5" if "F5" in self.cmb_tts_engine.currentText() else ("kokoro" if "Kokoro" in self.cmb_tts_engine.currentText() else "azure"),

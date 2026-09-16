@@ -27,6 +27,7 @@ from ..video.video_composer import VideoComposer
 from ..state.models import TaskStatus, EpisodeManifest, BookStructure
 from ..state.manifest import ManifestManager
 from ..tts.router import create_tts_router
+from ..utils.path_utils import sanitize_filename
 
 logger = logging.getLogger(__name__)
 
@@ -52,13 +53,15 @@ class PlanWorker(QThread):
     def run(self) -> None:
         try:
             cfg = self.task_config
-            book_path = Path(cfg["book_path"])
-            book_title = cfg.get("book_title", book_path.stem)
+            book_path = Path(str(cfg["book_path"]).strip())
+            raw_title = cfg.get("book_title", book_path.stem)
+            book_title = sanitize_filename(raw_title)
             start_page = int(cfg.get("start_page", 1))
             target_ep_mins = float(cfg.get("target_duration_mins", 15.0))
 
             project_root = Path(__file__).resolve().parent.parent.parent
-            book_id = cfg.get("book_id", f"book_{abs(hash(book_path.name)) % 1000000:06d}")
+            raw_book_id = cfg.get("book_id", f"book_{abs(hash(book_path.name)) % 1000000:06d}")
+            book_id = sanitize_filename(raw_book_id)
             book_dir = project_root / "books" / book_id
             book_dir.mkdir(parents=True, exist_ok=True)
             manifest_mgr = ManifestManager(book_dir=book_dir)
@@ -137,15 +140,16 @@ class ProductionWorker(QThread):
 
     def _execute_pipeline(self) -> None:
         cfg = self.task_config
-        book_path = Path(cfg["book_path"])
-        book_title = cfg.get("book_title", book_path.stem)
+        book_path = Path(str(cfg["book_path"]).strip())
+        raw_title = cfg.get("book_title", book_path.stem)
+        book_title = sanitize_filename(raw_title)
         start_page = int(cfg.get("start_page", 1))
         layout_name = cfg.get("video_layout", "portrait_9_16")
         target_ep_mins = float(cfg.get("target_duration_mins", 15.0))
         run_mode = cfg.get("run_mode", "RUN_NEXT_EPISODE") # RUN_FULL_BOOK | RUN_NEXT_EPISODE | RUN_DURATION_LIMIT
-        cover_path = cfg.get("cover_path")
-        bgm_path = cfg.get("bgm_path")
-        main_title = cfg.get("main_title", f"《{book_title}》精选")
+        cover_path = str(cfg.get("cover_path", "")).strip() if cfg.get("cover_path") else ""
+        bgm_path = str(cfg.get("bgm_path", "")).strip() if cfg.get("bgm_path") else ""
+        main_title = str(cfg.get("main_title", f"《{book_title}》精选")).strip()
         voice_vol = float(cfg.get("voice_volume_percent", 100.0))
         bgm_vol = float(cfg.get("bgm_volume_percent", 15.0))
         nfe_step = int(cfg.get("nfe_step", 16))
@@ -157,7 +161,8 @@ class ProductionWorker(QThread):
         output_base = (project_root / "output" / book_title).resolve()
         output_base.mkdir(parents=True, exist_ok=True)
 
-        book_id = cfg.get("book_id", f"book_{abs(hash(book_path.name)) % 1000000:06d}")
+        raw_book_id = cfg.get("book_id", f"book_{abs(hash(book_path.name)) % 1000000:06d}")
+        book_id = sanitize_filename(raw_book_id)
         book_dir = (project_root / "books" / book_id).resolve()
         book_dir.mkdir(parents=True, exist_ok=True)
         manifest_mgr = ManifestManager(book_dir=book_dir)
