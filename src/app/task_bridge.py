@@ -178,7 +178,7 @@ class ProductionWorker(QThread):
                     for idx, u in enumerate(ep_units):
                         if self._pause_requested:
                             break
-                        u_wav = ep_units_dir / f"unit_{idx:04d}.wav"
+                        u_wav = (ep_units_dir / f"unit_{idx:04d}.wav").resolve()
                         if not u_wav.exists():
                             self.sig_progress_updated.emit(
                                 30.0 + (idx / max(1, total_u)) * 30.0,

@@ -48,12 +48,15 @@ class F5Backend(TTSBackend):
 
         logger.info("启动 F5-TTS Task-scoped Persistent Worker 进程")
         try:
-            cmd = [str(self._python_exe), str(self._worker_path)]
+            cmd = [str(self._python_exe.resolve()), str(self._worker_path.resolve())]
             if self._cached_model_path:
-                cmd.extend(["--model-path", str(self._cached_model_path)])
+                cmd.extend(["--model-path", str(Path(self._cached_model_path).resolve())])
 
+            # 【为什么这样设计】：显式锁定子进程工作目录为项目根目录绝对路径，
+            # 避免多进程调度时相对路径解析分歧导致切片写失踪。
             self._process = subprocess.Popen(
                 cmd,
+                cwd=str(Path.cwd().resolve()),
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -244,9 +247,14 @@ class F5Backend(TTSBackend):
                 error_message=f"参考音频文件不存在: {ref_audio}"
             )
 
+        # 【为什么这样设计】：强制将 output_path 转为绝对物理路径并确保父目录存在，
+        # 杜绝多进程上下文下因相对路径解析失准导致音频写漏、触发静音兜底的致命隐患。
+        abs_output_path = Path(output_path).resolve()
+        abs_output_path.parent.mkdir(parents=True, exist_ok=True)
+
         payload = {
             "text": text,
-            "output_path": str(output_path),
+            "output_path": str(abs_output_path),
             "voice": voice or default_preset_name,
             "speed": speed,
             "ref_audio": str(ref_audio_path),

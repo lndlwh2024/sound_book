@@ -378,17 +378,17 @@ def main():
                 if np.max(np.abs(final_audio)) < 1e-4:
                     raise ValueError("合成音频数据校验失败：音频为全静音异常！")
 
-                # 动态峰值安全守卫：防止削顶失真产生的刺耳杂音
-                peak_val = np.max(np.abs(final_audio))
-                if peak_val > 0.95:
-                    final_audio = (final_audio / peak_val) * 0.95
+                # 确保输出文件绝对路径与目标目录存在，执行物理落盘
+                target_out_path = Path(output_path).resolve()
+                target_out_path.parent.mkdir(parents=True, exist_ok=True)
+                sf.write(str(target_out_path), final_audio, sample_rate)
 
                 audio_dur = float(len(final_audio) / sample_rate)
                 elapsed_time = float(time.time() - start_time)
 
                 send_ipc({
                     "success": True,
-                    "output_path": output_path,
+                    "output_path": str(target_out_path),
                     "audio_duration": audio_dur,
                     "duration": audio_dur,  # 规范统一：duration 代表实际音频物理时长（秒）
                     "elapsed_time": elapsed_time  # 推理消耗的墙钟时间
