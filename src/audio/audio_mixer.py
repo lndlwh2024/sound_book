@@ -107,14 +107,22 @@ class AudioMixer:
             f"[v_main][bgm_faded]amix=inputs=2:duration=first:dropout_transition=2[aout]"
         )
 
+        # 智能匹配音频编码器，杜绝容器与编码失配
+        ext = output_path.suffix.lower()
+        if ext == ".wav":
+            codec_args = ["-c:a", "pcm_s16le"]
+        elif ext == ".mp3":
+            codec_args = ["-c:a", "libmp3lame", "-b:a", "192k"]
+        else:
+            codec_args = ["-c:a", "aac", "-b:a", "192k"]
+
         cmd = [
             "ffmpeg", "-y",
             "-i", str(voice_path.absolute()),
             "-stream_loop", "-1", "-i", str(bgm_path.absolute()),
             "-filter_complex", filter_complex,
             "-map", "[aout]",
-            "-c:a", "aac",
-            "-b:a", "192k",
+            *codec_args,
             str(output_path.absolute())
         ]
 
@@ -154,40 +162,51 @@ class AudioMixer:
         voice_db = percent_to_db(v_pct)
         bgm_db = percent_to_db(b_pct)
 
+        ext = output_path.suffix.lower()
+        if ext == ".mp3":
+            codec_args = ["-c:a", "libmp3lame", "-b:a", "192k"]
+        elif ext == ".wav":
+            codec_args = ["-c:a", "pcm_s16le"]
+        else:
+            codec_args = ["-c:a", "aac", "-b:a", "192k"]
+
+        fade_out_st = max(0.0, preview_seconds - 2.0)
+
         if not bgm_path or not Path(bgm_path).exists() or b_pct <= 0.0:
             cmd = [
                 "ffmpeg", "-y",
-                "-t", str(preview_seconds),
                 "-i", str(voice_path.absolute()),
-                "-af", f"volume={voice_db}dB",
-                "-c:a", "aac",
-                "-b:a", "192k",
+                "-af", f"volume={voice_db}dB,apad,afade=t=out:st={fade_out_st:.2f}:d=2.0",
+                "-t", str(preview_seconds),
+                *codec_args,
                 str(output_path.absolute())
             ]
         else:
             bgm_path = Path(bgm_path)
-            # 使用 asplit=2 分流人声
+            # 【为什么这样设计】：
+            # 使用 apad 填充人声音轨至满 15 秒，前 7 秒人声发音 BGM 智能下潜，
+            # 7 秒后人声停顿 BGM 柔和自然回弹，并在最后 2 秒优雅淡出，
+            # 让用户完整感知侧链避让与回弹全流程。
             filter_complex = (
-                f"[0:a]volume={voice_db}dB,asplit=2[v_main][v_side];"
+                f"[0:a]volume={voice_db}dB,apad,asplit=2[v_main][v_side];"
                 f"[1:a]volume={bgm_db}dB[bgm_norm];"
                 f"[bgm_norm][v_side]sidechaincompress="
                 f"threshold={self.ducking_threshold}:"
                 f"ratio={self.ducking_ratio}:"
                 f"attack={self.ducking_attack_ms}:"
                 f"release={self.ducking_release_ms}[bgm_ducked];"
-                f"[v_main][bgm_ducked]amix=inputs=2:duration=first:dropout_transition=2[aout]"
+                f"[bgm_ducked]afade=t=out:st={fade_out_st:.2f}:d=2.0[bgm_faded];"
+                f"[v_main][bgm_faded]amix=inputs=2:duration=first:dropout_transition=2[aout]"
             )
 
             cmd = [
                 "ffmpeg", "-y",
-                "-t", str(preview_seconds),
                 "-i", str(voice_path.absolute()),
                 "-stream_loop", "-1", "-i", str(bgm_path.absolute()),
                 "-filter_complex", filter_complex,
                 "-map", "[aout]",
                 "-t", str(preview_seconds),
-                "-c:a", "aac",
-                "-b:a", "192k",
+                *codec_args,
                 str(output_path.absolute())
             ]
 

@@ -72,3 +72,20 @@ def test_save_and_load_episode_manifest(manifest_manager):
     assert loaded[0].episode_id == "ep_01"
     assert loaded[0].duration == 1820.5
     assert loaded[0].chapters == ["ch_01", "ch_02"]
+
+
+def test_save_and_load_validation_report(manifest_manager):
+    """测试保存和加载数据完整性校验报告 (Validation Report)"""
+    dummy_report = {
+        "passed": True,
+        "total_chars": 88000,
+        "text_loss_ratio": 0.002,
+        "issues": []
+    }
+    manifest_manager.save_validation_report(dummy_report)
+    loaded = manifest_manager.load_validation_report()
+    assert loaded is not None
+    assert loaded["passed"] is True
+    assert loaded["total_chars"] == 88000
+    assert loaded["text_loss_ratio"] == 0.002
+

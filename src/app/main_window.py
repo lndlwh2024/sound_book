@@ -710,18 +710,23 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "试听提示", "未找到 E1 旁白参考音频资产，无法生成混音试听。")
                 return
 
-            out_preview = (project_root / "output" / "temp_mix_preview.wav").resolve()
+            # 【为什么这样设计】
+            # 使用通用标准 MP3 格式输出 15 秒混音试听，杜绝 Windows 媒体播放器解码失配挂起；
+            # 规范调用 generate_preview_mix，提供完整 15 秒人声侧链避让与片尾回弹体验。
+            out_preview = (project_root / "output" / "temp_mix_preview.mp3").resolve()
             out_preview.parent.mkdir(parents=True, exist_ok=True)
 
             mixer = AudioMixer(
                 voice_volume_percent=cfg["voice_volume_percent"],
                 bgm_volume_percent=cfg["bgm_volume_percent"]
             )
-            mixer.mix_episode(
+            mixer.generate_preview_mix(
                 voice_path=voice_sample,
                 bgm_path=bgm_path if bgm_path and os.path.exists(bgm_path) else None,
-                output_path=out_preview
+                output_path=out_preview,
+                preview_seconds=15.0
             )
+
 
             if out_preview.exists():
                 if sys.platform == "win32":

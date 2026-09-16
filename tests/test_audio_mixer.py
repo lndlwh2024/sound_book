@@ -82,3 +82,28 @@ def test_mixer_full_episode_with_bgm(tmp_path):
     assert success is True
     assert output_m4a.exists()
     assert output_m4a.stat().st_size > 0
+
+
+def test_mixer_preview_mp3_generation(tmp_path):
+    """测试生成标准 MP3 格式的混音试听文件"""
+    mixer = AudioMixer(voice_volume_percent=100.0, bgm_volume_percent=15.0)
+    voice_wav = tmp_path / "voice_e1.wav"
+    bgm_wav = tmp_path / "bgm_piano.wav"
+    preview_output = tmp_path / "temp_mix_preview.mp3"
+
+    _generate_silence(2000, voice_wav)
+    _generate_silence(2000, bgm_wav)
+
+    success = mixer.generate_preview_mix(
+        voice_path=voice_wav,
+        bgm_path=bgm_wav,
+        output_path=preview_output,
+        preview_seconds=2.0
+    )
+    assert success is True
+    assert preview_output.exists()
+    assert preview_output.stat().st_size > 0
+    from src.audio.ffmpeg_utils import get_audio_info
+    info = get_audio_info(preview_output)
+    assert info.get("codec") == "mp3"
+

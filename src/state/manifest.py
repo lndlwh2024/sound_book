@@ -3,7 +3,7 @@ import os
 import time
 import logging
 from pathlib import Path
-from typing import List, Optional, Any
+from typing import List, Optional, Any, Dict
 
 from ..state.models import TTSChunk, TaskManifest, ChapterManifest, EpisodeManifest, SpeechUnit
 
@@ -38,6 +38,8 @@ class ManifestManager:
         self.task_manifest_path = self.manifests_dir / "task_manifest.json"
         self.chapter_manifest_path = self.manifests_dir / "chapter_manifest.json"
         self.episode_manifest_path = self.manifests_dir / "episode_manifest.json"
+        self.validation_report_path = self.manifests_dir / "validation_report.json"
+
 
 
     def _atomic_write(self, file_path: Path, data: Any) -> None:
@@ -223,4 +225,27 @@ class ManifestManager:
         except Exception as e:
             logger.error(f"读取 Episode Manifest 失败: {e}")
             return None
+
+    # Validation Report (数据校验报告持久化)
+    def save_validation_report(self, report: Any) -> None:
+        """
+        保存电子书结构与正文清洗校验报告。
+        【为什么这样设计】
+        阶段一正文清洗与完整性校验通过后，必须持久化 validation_report.json，
+        供生产规划、质检审计以及断点恢复时查验文本损耗率与异常字符统计。
+        """
+        self._atomic_write(self.validation_report_path, report)
+        logger.debug(f"已保存 Validation Report 至 {self.validation_report_path}")
+
+    def load_validation_report(self) -> Optional[Dict[str, Any]]:
+        """加载数据校验报告"""
+        if not self.validation_report_path.exists():
+            return None
+        try:
+            with open(self.validation_report_path, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception as e:
+            logger.error(f"读取 Validation Report 失败: {e}")
+            return None
+
 
