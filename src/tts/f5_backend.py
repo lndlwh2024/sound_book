@@ -11,6 +11,9 @@ from src.utils.model_manager import ModelManager, ModelDownloadError
 
 logger = logging.getLogger(__name__)
 
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+
+
 class F5Backend(TTSBackend):
     """
     F5-TTS 跨进程 Task-scoped Persistent Worker 架构后端。
@@ -22,8 +25,8 @@ class F5Backend(TTSBackend):
     
     def __init__(self, config: dict):
         self._config = config
-        self._worker_path = Path("workers/f5_worker.py")
-        self._python_exe = Path("envs/f5/Scripts/python.exe")
+        self._worker_path = (PROJECT_ROOT / "workers" / "f5_worker.py").resolve()
+        self._python_exe = (PROJECT_ROOT / "envs" / "f5" / "Scripts" / "python.exe").resolve()
         self._timeout = self._config.get("worker_timeout_seconds", 300)
         self._cpu_fallback = self._config.get("cpu_fallback", True)
         self._process: Optional[subprocess.Popen] = None
@@ -52,11 +55,11 @@ class F5Backend(TTSBackend):
             if self._cached_model_path:
                 cmd.extend(["--model-path", str(Path(self._cached_model_path).resolve())])
 
-            # 【为什么这样设计】：显式锁定子进程工作目录为项目根目录绝对路径，
-            # 避免多进程调度时相对路径解析分歧导致切片写失踪。
+            # 【为什么这样设计】：显式锁定子进程工作目录为项目根目录物理绝对路径，
+            # 避免用户在 C 盘或其他工作目录启动时导致相对路径解析分歧、模型寻址失败。
             self._process = subprocess.Popen(
                 cmd,
-                cwd=str(Path.cwd().resolve()),
+                cwd=str(PROJECT_ROOT.resolve()),
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -64,6 +67,7 @@ class F5Backend(TTSBackend):
                 encoding="utf-8",
                 bufsize=1
             )
+
             
             # 读取启动阶段就绪握手信号，跳过第三方库警告
             while True:
@@ -200,7 +204,10 @@ class F5Backend(TTSBackend):
             ref_text = options.get("ref_text", "") or self._config.get("ref_text", "")
         else:
             selected_voice = voice or self._config.get("preset_voice", "preset_male_e1_narrator")
-            preset_dir = Path(self._config.get("preset_dir", "models/f5_tts/presets"))
+            # 【为什么这样设计】：使用 PROJECT_ROOT 物理绝对路径解析 preset_dir，
+            # 杜绝从 C:\Users\xxx 等任意外部工作目录启动时相对路径找不到预设音色。
+            raw_preset = Path(self._config.get("preset_dir", "models/f5_tts/presets"))
+            preset_dir = raw_preset if raw_preset.is_absolute() else (PROJECT_ROOT / raw_preset).resolve()
 
             # 1. 尝试匹配 E1 / 股东信旁白推荐音色
             if "E1" in str(selected_voice) or "narrator" in str(selected_voice).lower():
@@ -230,12 +237,16 @@ class F5Backend(TTSBackend):
             # 4. 回退默认预设配置
             if not ref_audio:
                 cfg_ref = self._config.get("ref_audio")
-                if cfg_ref and Path(cfg_ref).exists():
-                    ref_audio = str(Path(cfg_ref).resolve())
-                    ref_text = self._config.get("ref_text", "")
-                    target_txt = Path(ref_audio).with_suffix(".txt")
-                    if target_txt.exists():
-                        ref_text = target_txt.read_text(encoding="utf-8").strip()
+                if cfg_ref:
+                    p_ref = Path(cfg_ref)
+                    p_ref = p_ref if p_ref.is_absolute() else (PROJECT_ROOT / p_ref).resolve()
+                    if p_ref.exists():
+                        ref_audio = str(p_ref.resolve())
+                        ref_text = self._config.get("ref_text", "")
+                        target_txt = Path(ref_audio).with_suffix(".txt")
+                        if target_txt.exists():
+                            ref_text = target_txt.read_text(encoding="utf-8").strip()
+
                 else:
                     default_preset_name = self._config.get("preset_voice", "preset_male_e1_narrator")
                     default_preset_wav = preset_dir / f"{default_preset_name}.wav"

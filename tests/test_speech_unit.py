@@ -51,3 +51,17 @@ def test_text_chunker_build_speech_units_integration():
     assert isinstance(units[0], SpeechUnit)
     assert units[0].chapter_id == "ch_01"
     assert units[0].text_hash != ""
+
+
+def test_single_sentence_golden_chunking():
+    """测试自然单句切分：保证完整语义自然句，绝不机械切碎破坏 TTS 音质与语流"""
+    chunker = TextChunker()  # 使用默认自然单句配置 (max_chars=70, max_sentences=1)
+    text = "无论如何，我认为，五年之后回头来看，人们不太可能觉得现在的价格很便宜。就算大规模熊市出现，我们的套利类(workouts)部分投资的市场价值也不会受到影响。"
+    units = chunker.build_speech_units([text], chapter_id="ch_01")
+
+    # 验证切分出的单元数量正好为 2 个自然句，完整保留上下文语气
+    assert len(units) == 2
+    assert units[0].text == "无论如何，我认为，五年之后回头来看，人们不太可能觉得现在的价格很便宜。"
+    assert units[1].text == "就算大规模熊市出现，我们的套利类(workouts)部分投资的市场价值也不会受到影响。"
+
+

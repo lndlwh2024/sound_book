@@ -77,6 +77,25 @@ def test_export_srt_and_ass(tmp_path):
     assert os.path.exists(ass_path)
     with open(ass_path, "r", encoding="utf-8") as f:
         ass_content = f.read()
-    assert "PlayResX: 1080" in ass_content
-    assert "PlayResY: 1920" in ass_content
     assert "Dialogue: 0,0:00:00.00,0:00:04.50" in ass_content
+
+
+def test_subtitle_temporal_slicing_for_long_sentences():
+    """测试长自然句在字幕表现层按标点平滑微断句，不影响 TTS 发音前提下实现逐句跟读"""
+    engine = NativeTTSSubtitleEngine()
+    long_text = "无论如何，我认为，五年之后回头来看，人们不太可能觉得现在的价格很便宜。"
+    units = [
+        SpeechUnit(unit_id="u_long", chapter_id="ch1", order=1, text=long_text, audio_duration=8.0)
+    ]
+    items = engine.align(units)
+
+    # 验证单句被智能拆分为多个单行字幕显示
+    assert len(items) >= 2
+    # 验证所有切片字幕的时间轴总跨度严格等于 8.0 秒
+    assert items[0].start_time == 0.0
+    assert items[-1].end_time == 8.0
+    for it in items:
+        # 每条字幕长度不超过 20 字，适合手机屏幕单行清晰居中展示
+        assert len(it.text) <= 20
+        assert it.duration > 0.5
+

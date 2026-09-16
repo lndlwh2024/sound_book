@@ -7,7 +7,10 @@ import argparse
 import traceback
 from pathlib import Path
 
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
 # 强制统一跨进程标准输入、输出与错误流为 UTF-8 编码
+
 if hasattr(sys.stdin, "reconfigure"):
     sys.stdin.reconfigure(encoding="utf-8")
 if hasattr(sys.stdout, "reconfigure"):
@@ -258,23 +261,29 @@ def main():
                     vocab_file = None
 
                     # 探测 v1 Base 权重路径
-                    model_base_dir = Path(args.model_path) if args.model_path else Path("models/f5_tts")
+                    model_base_dir = Path(args.model_path) if args.model_path else (PROJECT_ROOT / "models" / "f5_tts")
                     if (model_base_dir / "F5TTS_v1_Base" / "model_1250000.safetensors").exists():
-                        ckpt_file = str(model_base_dir / "F5TTS_v1_Base" / "model_1250000.safetensors")
-                        vocab_file = str(model_base_dir / "F5TTS_v1_Base" / "vocab.txt")
+                        ckpt_file = str((model_base_dir / "F5TTS_v1_Base" / "model_1250000.safetensors").resolve())
+                        v_path = model_base_dir / "F5TTS_v1_Base" / "vocab.txt"
+                        vocab_file = str(v_path.resolve()) if v_path.exists() else ""
                     else:
                         candidates = list(model_base_dir.rglob("*.safetensors")) + list(model_base_dir.rglob("*.pt"))
                         if candidates:
-                            ckpt_file = str(candidates[0])
+                            ckpt_file = str(candidates[0].resolve())
                         vocab_cands = list(model_base_dir.rglob("vocab.txt"))
-                        if vocab_cands:
-                            vocab_file = str(vocab_cands[0])
+                        vocab_file = str(vocab_cands[0].resolve()) if vocab_cands else ""
 
+                    # 【为什么这样设计】：严格避免向 F5TTS 传入 NoneType 的 vocab_file，
+                    # 仅当词表文件真实存在时传入，否则不传让 F5TTS 自动采用模型内嵌的标准词表。
+                    kwargs = {"device": device}
                     if ckpt_file:
                         sys.stderr.write(f"Using checkpoint: {ckpt_file}\n")
-                        f5_model = F5TTS(ckpt_file=ckpt_file, vocab_file=vocab_file, device=device)
-                    else:
-                        f5_model = F5TTS(device=device)
+                        kwargs["ckpt_file"] = ckpt_file
+                    if vocab_file:
+                        sys.stderr.write(f"Using vocab: {vocab_file}\n")
+                        kwargs["vocab_file"] = vocab_file
+                    f5_model = F5TTS(**kwargs)
+
 
                     # 关键修复：强制全精度 float32 运行，防止 Flow Matching ODE 在 fp16 下下溢溢出导致 NaN
                     if hasattr(f5_model, "ema_model"):

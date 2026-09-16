@@ -221,8 +221,15 @@ class ProductionWorker(QThread):
             )
 
             # 为该分集创建对应产物路径
+            # 【为什么这样设计】
+            # MP4 视频画面已内嵌专业大字烧录硬字幕。若在 MP4 同级目录输出同名 Episode_01.srt，
+            # PotPlayer 等主流播放器会自动强制加载外挂小字，导致“大字叠小字”双重重叠。
+            # 因此将外挂字幕移至 subtitles/ 子目录及 .transcript.srt，彻底杜绝播放器冲突。
             ep_audio_path = book_dir / f"episode_{ep_order:02d}_mixed.m4a"
-            ep_srt_path = output_base / f"Episode_{ep_order:02d}.srt"
+            subtitles_dir = output_base / "subtitles"
+            subtitles_dir.mkdir(parents=True, exist_ok=True)
+            ep_srt_path = subtitles_dir / f"Episode_{ep_order:02d}.srt"
+            ep_srt_transcript_path = output_base / f"Episode_{ep_order:02d}.transcript.srt"
             ep_ass_path = book_dir / f"episode_{ep_order:02d}.ass"
             ep_mp4_path = output_base / f"Episode_{ep_order:02d}.mp4"
 
@@ -231,6 +238,7 @@ class ProductionWorker(QThread):
             ep_units = []
             for ch in ep_chapters:
                 ep_units.extend(chunker.build_speech_units(ch.paragraphs, chapter_id=getattr(ch, 'chapter_id', ch.id)))
+
 
             tts_engine_name = str(cfg.get("tts_engine", "f5")).lower()
             voice_profile = cfg.get("voice_profile", "E1")
@@ -289,17 +297,34 @@ class ProductionWorker(QThread):
             self.sig_progress_updated.emit(70.0, f"【6/8 字幕对齐 (ALIGNING_SUBTITLES)】正在对齐生成第 {ep_order:02d} 集双语字幕...")
             sub_items = subtitle_engine.align(ep_units)
             subtitle_engine.export_srt(sub_items, str(ep_srt_path))
+            subtitle_engine.export_srt(sub_items, str(ep_srt_transcript_path))
             subtitle_engine.export_ass(sub_items, str(ep_ass_path), layout=layout_name)
 
+
             # 音频拼接与质检
+            # 【为什么这样设计】
+            # 坚决贯彻“零假冒、零静默兜底”的安全原则。若任何语音片段未能成功生成，
+            # 或拼接后质检发现全静音/时长异常，严禁伪造静音糊弄下游混音与视频，必须立即报错熔断。
             ep_voice_tmp = book_dir / f"episode_{ep_order:02d}_voice.wav"
             if unit_wavs and all(w.exists() for w in unit_wavs):
                 concat_wavs(unit_wavs, ep_voice_tmp)
                 qc = AudioQC()
                 qc_res = qc.check_wav(ep_voice_tmp)
                 logger.info(f"第 {ep_order} 集音频质检报告: 有效性={qc_res.get('valid')}, 时长={qc_res.get('duration')}s")
-            elif not ep_voice_tmp.exists():
-                _generate_silence(int(sub_items[-1].end_time * 1000) if sub_items else 2000, ep_voice_tmp)
+                if not qc_res.get("valid", False) or qc_res.get("duration", 0.0) <= 0.1:
+                    err_msg = f"第 {ep_order:02d} 集音频拼接质检未通过：生成音频全静音或损坏！"
+                    logger.error(err_msg)
+                    self.sig_status_changed.emit("ERROR")
+                    self.sig_error.emit("AUDIO_QC_FAILED", err_msg)
+                    return
+            else:
+                missing_cnt = sum(1 for w in unit_wavs if not w.exists())
+                err_msg = f"第 {ep_order:02d} 集语音合成失败：共有 {missing_cnt}/{len(unit_wavs)} 个音频切片未能生成！"
+                logger.error(err_msg)
+                self.sig_status_changed.emit("ERROR")
+                self.sig_error.emit("TTS_SYNTHESIS_FAILED", err_msg)
+                return
+
 
             # 无论是否渲染视频，均将高品质单集音频交付至最终产物目录
             ep_final_wav = output_base / f"Episode_{ep_order:02d}.wav"

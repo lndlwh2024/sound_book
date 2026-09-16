@@ -44,10 +44,13 @@ class ModelManager:
 
     @classmethod
     def get_cache_root(cls, config: Optional[dict] = None) -> Path:
-        """??????????????"""
+        """获取模型根缓存目录，绝对物理锚定项目工程根目录，杜绝随工作目录漂移"""
+        project_root = Path(__file__).resolve().parent.parent.parent
         if config and "models_dir" in config:
-            return Path(config["models_dir"])
-        return Path("models")
+            p = Path(config["models_dir"])
+            return p if p.is_absolute() else (project_root / p).resolve()
+        return (project_root / "models").resolve()
+
 
     @classmethod
     def get_model_cache_dir(cls, backend: str, config: Optional[dict] = None) -> Path:

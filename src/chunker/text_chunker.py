@@ -26,7 +26,7 @@ class SpeechUnitBuilder:
     3. 长句保持独立，避免单段过长导致扩散模型显存峰值或失真；
     4. 字幕排版由上层负责，切分绝不为了屏幕宽度过度切碎句子。
     """
-    def __init__(self, max_chars: int = 120, max_sentences: int = 2, min_chars: int = 10):
+    def __init__(self, max_chars: int = 70, max_sentences: int = 1, min_chars: int = 8):
         self.max_chars = max_chars
         self.max_sentences = max_sentences
         self.min_chars = min_chars
@@ -36,7 +36,7 @@ class SpeechUnitBuilder:
         self.en_sentence_end_re = re.compile(r'(?<!\bMr)(?<!\bMrs)(?<!\bMs)(?<!\bDr)(?<!\bProf)(?<!\bSt)(?<!\bEtc)(?<!\bi\.e)(?<!\be\.g)(?<=[.!?;\n])\s+')
 
     def split_into_sentences(self, text: str) -> List[str]:
-        """将段落文本按中英文标点拆解为原子自然句"""
+        """将段落文本按中英文标点拆解为完整的原子自然句，保证 TTS 连读语调与情感连贯"""
         parts = self.zh_sentence_end_re.split(text)
         sentences = []
         for i in range(0, len(parts) - 1, 2):
@@ -56,6 +56,8 @@ class SpeechUnitBuilder:
                     final_sentences.append(ep_clean)
 
         return final_sentences if final_sentences else ([text.strip()] if text.strip() else [])
+
+
 
     def build_from_paragraphs(self, paragraphs: List[Any], chapter_id: str = "chapter_001", start_order: int = 1) -> List[SpeechUnit]:
         """
@@ -134,12 +136,15 @@ class TextChunker:
     兼容原有 Chapter -> Section -> Paragraph -> Chunk 流水线，
     并原生支持书声 v2.0 的 SpeechUnit -> Chunk 1:1 极简映射模型。
     """
-    def __init__(self, max_chars: int = 1000, speech_unit_max_chars: Optional[int] = None, speech_unit_max_sentences: int = 2):
+    def __init__(self, max_chars: int = 1000, speech_unit_max_chars: Optional[int] = None, speech_unit_max_sentences: int = 1):
         self.max_chars = max_chars
         self.speech_unit_builder = SpeechUnitBuilder(
-            max_chars=speech_unit_max_chars if speech_unit_max_chars is not None else 120,
-            max_sentences=speech_unit_max_sentences
+            max_chars=speech_unit_max_chars if speech_unit_max_chars is not None else 70,
+            max_sentences=speech_unit_max_sentences,
+            min_chars=8
         )
+
+
         self.zh_sentence_end_re = self.speech_unit_builder.zh_sentence_end_re
         self.en_sentence_end_re = self.speech_unit_builder.en_sentence_end_re
 
