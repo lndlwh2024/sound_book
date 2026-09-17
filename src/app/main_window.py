@@ -12,7 +12,7 @@ import ctypes
 import platform
 import subprocess
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Union
 
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
@@ -20,14 +20,16 @@ from PySide6.QtWidgets import (
     QProgressBar, QFileDialog, QMessageBox, QGroupBox, QScrollArea,
     QFrame, QTextEdit, QTabWidget, QDialog
 )
-from PySide6.QtCore import Qt, QSize, QTimer, Signal, QObject
-from PySide6.QtGui import QPixmap, QFont, QIcon
+from PySide6.QtCore import Qt, QSize, QTimer, Signal, QObject, QPointF
+from PySide6.QtGui import QPixmap, QFont, QIcon, QPainter, QColor, QPolygonF
+from PySide6.QtWidgets import QStyle, QProxyStyle
 
 from .task_bridge import TaskManagerBridge
 from ..video.video_composer import VideoComposer
 from ..audio.audio_mixer import AudioMixer
 from ..utils.config import config
 from ..utils.path_utils import sanitize_filename
+from ..utils.model_manager import ModelManager
 
 logger = logging.getLogger(__name__)
 
@@ -167,6 +169,49 @@ class AzureConfigDialog(QDialog):
             self.accept()
 
 
+class SpinBoxArrowStyle(QProxyStyle):
+    """
+    自定义 QSpinBox 箭头绘制样式。
+    【为什么这样设计】
+    Qt QSS 引擎对 CSS border-trick 三角形支持不一致，部分 Qt 版本/系统渲染为方块。
+    使用 QProxyStyle + QPainter 直接绘制三角形多边形，跨平台兼容性最佳，无需外部图片资源。
+    """
+    def drawPrimitive(self, element, option, painter, widget=None):
+        if element in (QStyle.PE_IndicatorArrowUp, QStyle.PE_IndicatorArrowDown,
+                       QStyle.PE_IndicatorSpinUp, QStyle.PE_IndicatorSpinDown):
+            painter.save()
+            painter.setRenderHint(QPainter.Antialiasing, True)
+            # 悬浮时高亮，否则使用柔和灰色
+            if option.state & QStyle.State_MouseOver:
+                painter.setBrush(QColor("#FFFFFF"))
+            else:
+                painter.setBrush(QColor("#CCCCCC"))
+            painter.setPen(Qt.NoPen)
+
+            rect = option.rect
+            cx = rect.center().x()
+            cy = rect.center().y()
+            half_w = 4.0  # 三角形半宽
+            half_h = 3.0  # 三角形半高
+
+            if element in (QStyle.PE_IndicatorArrowUp, QStyle.PE_IndicatorSpinUp):
+                triangle = QPolygonF([
+                    QPointF(cx, cy - half_h),
+                    QPointF(cx - half_w, cy + half_h),
+                    QPointF(cx + half_w, cy + half_h),
+                ])
+            else:
+                triangle = QPolygonF([
+                    QPointF(cx, cy + half_h),
+                    QPointF(cx - half_w, cy - half_h),
+                    QPointF(cx + half_w, cy - half_h),
+                ])
+            painter.drawPolygon(triangle)
+            painter.restore()
+            return
+        super().drawPrimitive(element, option, painter, widget)
+
+
 class ResourceMonitorBar(QFrame):
     """
     硬件负载实时监控条。
@@ -199,14 +244,16 @@ class ResourceMonitorBar(QFrame):
 
         self.lbl_cpu = QLabel("CPU: --%")
         self.lbl_mem = QLabel("内存: --/-- GB (--%)")
+        self.lbl_cuda_status = QLabel("CUDA: --")
+        self.lbl_gpu_load = QLabel("GPU负载: --%")
         self.lbl_gpu_mem = QLabel("显存: --/-- MB (--%)")
-        self.lbl_cuda = QLabel("CUDA算力: --%")
         self.lbl_temp = QLabel("温度: --°C")
 
         layout.addWidget(self.lbl_cpu)
         layout.addWidget(self.lbl_mem)
+        layout.addWidget(self.lbl_cuda_status)
+        layout.addWidget(self.lbl_gpu_load)
         layout.addWidget(self.lbl_gpu_mem)
-        layout.addWidget(self.lbl_cuda)
         layout.addWidget(self.lbl_temp)
         layout.addStretch()
 
@@ -264,7 +311,7 @@ class ResourceMonitorBar(QFrame):
         except Exception:
             pass
 
-        # 3. GPU 显存与 CUDA
+        # 3. GPU 显存、负载与 CUDA 状态
         try:
             res = subprocess.run(
                 ["nvidia-smi", "--query-gpu=utilization.gpu,memory.total,memory.used,temperature.gpu", "--format=csv,noheader,nounits"],
@@ -279,11 +326,24 @@ class ResourceMonitorBar(QFrame):
                     temp = int(parts[3])
                     mem_pct = (mem_used / max(1, mem_total)) * 100
                     g_color = "#FF6B6B" if mem_pct > 85 else ("#FFD93D" if mem_pct > 65 else "#70DB93")
-                    c_color = "#4DA6FF" if gpu_util > 0 else "#888888"
+                    # GPU负载：nvidia-smi utilization.gpu 是综合时间占空比（包含3D+Compute）
+                    load_color = "#FF6B6B" if gpu_util > 80 else ("#FFD93D" if gpu_util > 30 else "#70DB93")
+                    self.lbl_gpu_load.setText(f'GPU负载: <span style="color:{load_color}; font-weight:bold;">{gpu_util}%</span>')
                     self.lbl_gpu_mem.setText(f'显存: <span style="color:{g_color}; font-weight:bold;">{mem_used}/{mem_total}MB ({mem_pct:.0f}%)</span>')
-                    self.lbl_cuda.setText(f'CUDA算力: <span style="color:{c_color}; font-weight:bold;">{gpu_util}%</span>')
                     t_color = "#FF6B6B" if temp > 75 else "#70DB93"
                     self.lbl_temp.setText(f'温度: <span style="color:{t_color};">{temp}°C</span>')
+
+            # CUDA 状态：通过检测是否有 CUDA 计算进程来判断（而非 utilization.gpu 综合值）
+            cuda_res = subprocess.run(
+                ["nvidia-smi", "--query-compute-apps=pid", "--format=csv,noheader"],
+                capture_output=True, text=True, timeout=1, creationflags=0x08000000
+            )
+            if cuda_res.returncode == 0:
+                cuda_procs = [l.strip() for l in cuda_res.stdout.strip().splitlines() if l.strip()]
+                if cuda_procs:
+                    self.lbl_cuda_status.setText(f'CUDA: <span style="color:#00E676; font-weight:bold;">活跃 ({len(cuda_procs)}进程)</span>')
+                else:
+                    self.lbl_cuda_status.setText('CUDA: <span style="color:#888888;">空闲</span>')
         except Exception:
             pass
 
@@ -409,6 +469,9 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("书声 (ShuSheng) v2.0 - 自动化有声视频生产工具")
         self.resize(1280, 880)
         self.setMinimumSize(1100, 760)
+        # 应用自定义箭头绘制样式，确保 QSpinBox 箭头在所有 Qt 版本下正确渲染三角形
+        self._arrow_style = SpinBoxArrowStyle()
+        self.setStyle(self._arrow_style)
 
         # 计时器与动画
         self._elapsed_seconds = 0
@@ -429,6 +492,8 @@ class MainWindow(QMainWindow):
         self._init_ui()
         self._connect_signals()
         self._refresh_hardware_diag()
+        self._refresh_visual_preview()
+        self._on_voice_profile_changed()
 
     def _init_ui(self) -> None:
         """初始化全局深色科技主题界面布局"""
@@ -487,12 +552,10 @@ class MainWindow(QMainWindow):
             QSpinBox::up-button:hover, QDoubleSpinBox::up-button:hover {
                 background-color: #38384E;
             }
+            /* 箭头三角形由 SpinBoxArrowStyle (QProxyStyle) 在 Python 层用 QPainter 绘制 */
             QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {
-                width: 0;
-                height: 0;
-                border-left: 4px solid transparent;
-                border-right: 4px solid transparent;
-                border-bottom: 5px solid #CCCCCC;
+                width: 8px;
+                height: 6px;
             }
             QSpinBox::down-button, QDoubleSpinBox::down-button {
                 subcontrol-origin: border;
@@ -507,11 +570,8 @@ class MainWindow(QMainWindow):
                 background-color: #38384E;
             }
             QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {
-                width: 0;
-                height: 0;
-                border-left: 4px solid transparent;
-                border-right: 4px solid transparent;
-                border-top: 5px solid #CCCCCC;
+                width: 8px;
+                height: 6px;
             }
             /* 多 Sheet 标签页样式 */
             QTabWidget::pane {
@@ -683,6 +743,8 @@ class MainWindow(QMainWindow):
         self.btn_azure_config = QPushButton("🔑 凭据配置")
         self.btn_azure_config.setToolTip("配置/修改 Azure AI Speech 官方 API 密钥与区域")
         self.btn_azure_config.clicked.connect(self._on_azure_config)
+        # 初始化时仅在云端引擎被选中时显示凭据按钮，默认本地引擎无需凭据
+        self.btn_azure_config.setVisible("Azure" in self.cmb_tts_engine.currentText())
 
         self.cmb_voice_profile = QComboBox()
         self.cmb_voice_profile.addItems([
@@ -691,6 +753,7 @@ class MainWindow(QMainWindow):
             "D2 (男生播音 - 新闻纪录片)",
             "V1 (女声解说 - 知性温和)"
         ])
+        self.cmb_voice_profile.currentIndexChanged.connect(self._on_voice_profile_changed)
 
         # 大模型扩散推理步数面板
         self.spn_nfe_step = QSpinBox()
@@ -727,7 +790,7 @@ class MainWindow(QMainWindow):
 
         self.cmb_video_layout = QComboBox()
         self.cmb_video_layout.addItems(["竖屏 9:16 (1080x1920, 手机/短视频流)", "横屏 16:9 (1920x1080, 电脑/B站/宽屏)"])
-        self.cmb_video_layout.currentIndexChanged.connect(self._on_layout_changed)
+        self.cmb_video_layout.currentIndexChanged.connect(self._refresh_visual_preview)
 
         self.spn_target_duration = QSpinBox()
         self.spn_target_duration.setRange(5, 60)
@@ -749,17 +812,20 @@ class MainWindow(QMainWindow):
         ])
 
         self.txt_cover_path = QLineEdit()
-        self.txt_cover_path.setPlaceholderText("留空则自动生成纯音频或默认极简书影...")
+        self.txt_cover_path.setPlaceholderText("留空则使用默认极简书影...")
+        self.txt_cover_path.textChanged.connect(self._refresh_visual_preview)
         btn_browse_cover = QPushButton("选择封面...")
         btn_browse_cover.clicked.connect(self._on_browse_cover)
 
         self.txt_bgm_path = QLineEdit()
-        self.txt_bgm_path.setPlaceholderText("留空则使用内置精选舒缓背景音乐...")
+        self.txt_bgm_path.setPlaceholderText("留空则不添加背景音乐 (纯净人声)...")
+        self.txt_bgm_path.textChanged.connect(self._on_bgm_text_changed)
         btn_browse_bgm = QPushButton("选择音乐...")
         btn_browse_bgm.clicked.connect(self._on_browse_bgm)
 
         self.txt_main_title = QLineEdit()
         self.txt_main_title.setPlaceholderText("例如: 《巴菲特致股东的信》精选")
+        self.txt_main_title.textChanged.connect(self._refresh_visual_preview)
 
         m_layout.addWidget(QLabel("视频版式:"), 0, 0)
         m_layout.addWidget(self.cmb_video_layout, 0, 1, 1, 3)
@@ -788,26 +854,108 @@ class MainWindow(QMainWindow):
         return panel
 
     def _build_right_preview_panel(self) -> QWidget:
-        """构建右侧预览区 (封面预览 + 三Sheet多维面板)"""
+        """
+        构建右侧预览区 (封面+标题叠加 + 音频预览 + 三Sheet多维面板)
+        【为什么这样设计】
+        将预览区拆分为视觉预览和音频预览两部分：
+        - 视觉预览：实时显示封面图片，并在用户输入视频主标题后叠加标题文字效果
+        - 音频预览：分别展示背景音乐和朗读示例，各自独立音量控制，底部混合试听
+        """
         panel = QWidget()
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(10)
+        layout.setSpacing(8)
 
-        # 封面与排版即时预览框
-        grp_preview = QGroupBox("【封面排版与视觉预览 (Video Layout)】")
+        # ── 1. 封面排版与标题叠加预览 ──
+        grp_preview = QGroupBox("【封面与标题预览】")
         p_layout = QVBoxLayout(grp_preview)
 
         self.lbl_preview_image = QLabel()
         self.lbl_preview_image.setAlignment(Qt.AlignCenter)
-        self.lbl_preview_image.setMinimumSize(220, 260)
+        self.lbl_preview_image.setMinimumSize(220, 200)
         self.lbl_preview_image.setStyleSheet("border: 1px dashed #555566; background-color: #121216; border-radius: 6px;")
-        self.lbl_preview_image.setText("选择封面后自动生成排版预览\n(支持 Contain 居中与高斯模糊背景)")
+        self.lbl_preview_image.setText("选择封面后自动生成排版预览\n输入视频主标题后叠加标题效果")
         p_layout.addWidget(self.lbl_preview_image)
 
-        layout.addWidget(grp_preview, 5)
+        layout.addWidget(grp_preview, 3)
 
-        # 生产计划、硬件诊断与后台实时日志 (三 Sheet TabWidget)
+        # ── 2. 音频预览与混合试听区 ──
+        grp_audio = QGroupBox("【音频预览与混合试听】")
+        a_layout = QVBoxLayout(grp_audio)
+        a_layout.setSpacing(6)
+
+        # 背景音乐行
+        bgm_row = QHBoxLayout()
+        bgm_row.addWidget(QLabel("🎵 背景音乐:"))
+        self.lbl_bgm_name = QLabel("未选择")
+        self.lbl_bgm_name.setStyleSheet("color: #888888; font-size: 11px;")
+        bgm_row.addWidget(self.lbl_bgm_name, 1)
+        btn_select_bgm_preview = QPushButton("选择")
+        btn_select_bgm_preview.setFixedWidth(50)
+        btn_select_bgm_preview.clicked.connect(self._on_browse_bgm)
+        bgm_row.addWidget(btn_select_bgm_preview)
+        btn_clear_bgm = QPushButton("清除")
+        btn_clear_bgm.setFixedWidth(50)
+        btn_clear_bgm.clicked.connect(self._on_clear_bgm)
+        bgm_row.addWidget(btn_clear_bgm)
+        a_layout.addLayout(bgm_row)
+
+        # 背景音乐音量滑条
+        bgm_vol_row = QHBoxLayout()
+        bgm_vol_row.addWidget(QLabel("  🔊"))
+        self.sld_bgm_preview = QSlider(Qt.Horizontal)
+        self.sld_bgm_preview.setRange(0, 100)
+        self.sld_bgm_preview.setValue(30)
+        self.sld_bgm_preview.setToolTip("背景音乐音量")
+        bgm_vol_row.addWidget(self.sld_bgm_preview, 1)
+        self.lbl_bgm_vol_pct = QLabel("30%")
+        self.lbl_bgm_vol_pct.setFixedWidth(35)
+        self.sld_bgm_preview.valueChanged.connect(lambda v: self.lbl_bgm_vol_pct.setText(f"{v}%"))
+        bgm_vol_row.addWidget(self.lbl_bgm_vol_pct)
+        a_layout.addLayout(bgm_vol_row)
+
+        # 朗读示例行
+        narr_row = QHBoxLayout()
+        narr_row.addWidget(QLabel("🎙️ 朗读示例:"))
+        self.lbl_narr_name = QLabel("预置音色样本")
+        self.lbl_narr_name.setStyleSheet("color: #70DB93; font-size: 11px;")
+        narr_row.addWidget(self.lbl_narr_name, 1)
+        a_layout.addLayout(narr_row)
+
+        # 朗读示例音量滑条
+        narr_vol_row = QHBoxLayout()
+        narr_vol_row.addWidget(QLabel("  🔊"))
+        self.sld_narr_preview = QSlider(Qt.Horizontal)
+        self.sld_narr_preview.setRange(0, 100)
+        self.sld_narr_preview.setValue(100)
+        self.sld_narr_preview.setToolTip("朗读音量")
+        narr_vol_row.addWidget(self.sld_narr_preview, 1)
+        self.lbl_narr_vol_pct = QLabel("100%")
+        self.lbl_narr_vol_pct.setFixedWidth(35)
+        self.sld_narr_preview.valueChanged.connect(lambda v: self.lbl_narr_vol_pct.setText(f"{v}%"))
+        narr_vol_row.addWidget(self.lbl_narr_vol_pct)
+        a_layout.addLayout(narr_vol_row)
+
+        # 混合试听按钮
+        self.btn_mix_preview = QPushButton("▶ 混合试听")
+        self.btn_mix_preview.setStyleSheet("""
+            QPushButton {
+                background-color: #2A5F2A;
+                color: #FFFFFF;
+                font-weight: bold;
+                font-size: 13px;
+                padding: 8px;
+                border-radius: 6px;
+            }
+            QPushButton:hover { background-color: #367A36; }
+        """)
+        self.btn_mix_preview.setToolTip("播放时长 = min(BGM长度, 朗读长度)")
+        self.btn_mix_preview.clicked.connect(self._on_test_mix)
+        a_layout.addWidget(self.btn_mix_preview)
+
+        layout.addWidget(grp_audio, 2)
+
+        # ── 3. 生产计划、硬件诊断与后台实时日志 (三 Sheet TabWidget) ──
         grp_dashboard = QGroupBox("【生产计划全景、系统诊断与实时日志】")
         dash_layout = QVBoxLayout(grp_dashboard)
         dash_layout.setContentsMargins(6, 12, 6, 6)
@@ -1069,12 +1217,83 @@ class MainWindow(QMainWindow):
     # ---------------- 交互响应方法 ----------------
 
     def _on_engine_changed(self, idx: int):
-        """【新需求 9】当用户选择了微软云端 API 实现时，若未配置凭据则主动弹出配置框"""
+        """切换引擎时：云端引擎显示凭据按钮并检查配置，本地引擎检测模型可用性"""
         text = self.cmb_tts_engine.currentText()
-        if "Azure" in text:
+        is_cloud = "Azure" in text
+        # 仅 API 引擎需要凭据配置，本地推理引擎无需显示
+        self.btn_azure_config.setVisible(is_cloud)
+        if is_cloud:
             curr_key = os.environ.get("AZURE_SPEECH_KEY") or config.get("tts.azure.key") or config.get("tts.azure.api_key")
             if not curr_key:
                 self._on_azure_config()
+        else:
+            # 本地引擎：检测模型是否已下载部署
+            self._check_local_model_availability(text)
+
+    def _check_local_model_availability(self, engine_text: str):
+        """
+        检测本地TTS模型是否已下载。
+        【为什么这样设计】
+        用户首次选择本地引擎时，模型可能尚未下载（数百MB～数GB），
+        需要明确告知用户并在可见终端中执行下载，避免"静默失败"的黑盒体验。
+        """
+        try:
+            backend = "f5" if "F5" in engine_text else "kokoro"
+            project_root = Path(__file__).resolve().parent.parent.parent
+            model_dir = project_root / config.get(f"tts.{backend}.model_path", f"models/{backend}")
+
+            mgr = ModelManager()
+            if mgr.is_cached(backend, model_dir):
+                return  # 模型已就绪
+
+            # 模型未找到，提示用户下载
+            model_name = "F5-TTS 扩散模型" if backend == "f5" else "Kokoro 轻量模型"
+            repo_id = config.get(f"tts.{backend}.repo_id", "")
+            reply = QMessageBox.question(
+                self,
+                "本地模型未就绪",
+                f"您选择的 {model_name} 尚未下载部署。\n\n"
+                f"模型仓库: {repo_id}\n"
+                f"目标路径: {model_dir}\n\n"
+                f"是否立即打开终端窗口执行下载？\n"
+                f"（下载过程中请保持终端窗口开启，完成后手动关闭即可）",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes
+            )
+            if reply == QMessageBox.Yes:
+                self._launch_model_download(backend)
+        except Exception as e:
+            logger.warning(f"检测本地模型可用性失败: {e}")
+
+    def _launch_model_download(self, backend: str):
+        """在用户可见的 cmd 终端中执行模型下载，全程进度可观"""
+        try:
+            project_root = Path(__file__).resolve().parent.parent.parent
+            python_exe = project_root / "envs" / "main" / "Scripts" / "python.exe"
+            if not python_exe.exists():
+                python_exe = sys.executable
+
+            # 构建下载脚本命令，使用 ModelManager.ensure_model 走标准下载流程
+            download_script = (
+                f'import sys; sys.path.insert(0, r"{project_root}"); '
+                f'from src.utils.model_manager import ModelManager; '
+                f'print("=" * 60); print("开始下载 {backend.upper()} 模型..."); print("=" * 60); '
+                f'path = ModelManager().ensure_model("{backend}"); '
+                f'print(); print("=" * 60); print(f"下载完成! 模型路径: {{path}}"); print("=" * 60); '
+                f'input("\\n按回车键关闭此窗口...")'
+            )
+            # 使用 cmd.exe /k 保持终端可见，用户可观察完整下载进度
+            subprocess.Popen(
+                f'cmd.exe /c "{python_exe}" -c "{download_script}"',
+                creationflags=subprocess.CREATE_NEW_CONSOLE
+            )
+            QMessageBox.information(
+                self, "下载已启动",
+                "模型下载已在新终端窗口中启动。\n请等待下载完成后关闭终端窗口，然后重新选择引擎即可。"
+            )
+        except Exception as e:
+            logger.error(f"启动模型下载终端失败: {e}")
+            QMessageBox.critical(self, "错误", f"无法启动下载终端: {e}")
 
     def _on_azure_config(self):
         """【新需求 9】打开 Azure API 凭据配置模态框"""
@@ -1105,7 +1324,7 @@ class MainWindow(QMainWindow):
         if file_path:
             clean_path = file_path.strip()
             self.txt_cover_path.setText(clean_path)
-            self._update_preview_image(clean_path)
+            self._refresh_visual_preview()
 
     def _on_browse_bgm(self) -> None:
         file_path, _ = QFileDialog.getOpenFileName(self, "选择背景音乐", "", "Audio (*.mp3 *.wav *.m4a)")
@@ -1113,33 +1332,142 @@ class MainWindow(QMainWindow):
             clean_path = file_path.strip()
             self.txt_bgm_path.setText(clean_path)
 
-    def _on_layout_changed(self) -> None:
-        cover_path = self.txt_cover_path.text().strip()
-        if cover_path and os.path.exists(cover_path):
-            self._update_preview_image(cover_path)
+    def _on_bgm_text_changed(self, text: str) -> None:
+        """背景音乐路径变动时同步更新标签"""
+        clean_text = text.strip()
+        if hasattr(self, 'lbl_bgm_name'):
+            if clean_text:
+                self.lbl_bgm_name.setText(Path(clean_text).name)
+                self.lbl_bgm_name.setStyleSheet("color: #70DB93; font-size: 11px;")
+            else:
+                self.lbl_bgm_name.setText("未选择")
+                self.lbl_bgm_name.setStyleSheet("color: #888888; font-size: 11px;")
 
-    def _update_preview_image(self, cover_path: str) -> None:
+    def _on_clear_bgm(self) -> None:
+        """清除当前选择的背景音乐"""
+        self.txt_bgm_path.clear()
+
+    def _on_voice_profile_changed(self, idx: int = 0) -> None:
+        """音色预设切换时联动更新朗读示例标签"""
+        if not hasattr(self, 'lbl_narr_name') or not hasattr(self, 'cmb_voice_profile'):
+            return
+        text = self.cmb_voice_profile.currentText()
+        code = text.split()[0] if text else "E1"
+        self.lbl_narr_name.setText(f"预置音色 ({code})")
+
+    def _refresh_visual_preview(self) -> None:
+        """
+        实时刷新封面与视频主标题叠加预览图。
+        【为什么这样设计】
+        满足用户需求：
+        1. 实时显示选中的封面图片（如有）；
+        2. 用户输入视频主标题后，立即在预览图上渲染标题叠加效果与位置；
+        3. 标题显示不依赖图片：在未选择图片时，基于选定的视频画幅比例（竖屏 9:16 或 横屏 16:9）
+           生成深色雅致画布，并在安全区居中展示主标题与示例副标题叠加效果。
+        使用 QPixmap 与 QPainter 本地矢量绘制，达到毫秒级所见即所得响应，杜绝调用外部 ffmpeg 引起的卡顿与黑框闪烁。
+        """
         try:
-            tmp_preview = Path("output/temp_gui_preview.jpg")
-            layout = "landscape_16_9" if "16:9" in self.cmb_video_layout.currentText() else "portrait_9_16"
-            composer = VideoComposer(layout_name=layout)
-            composer.render_preview_frame(
-                cover_path=cover_path,
-                main_title=self.txt_main_title.text().strip() or "主标题预览",
-                subtitle="第01集 · 章节副标题",
-                output_image_path=tmp_preview,
-                layout_name=layout
-            )
-            if tmp_preview.exists():
-                pix = QPixmap(str(tmp_preview.absolute()))
-                scaled_pix = pix.scaled(
-                    self.lbl_preview_image.size(),
-                    Qt.KeepAspectRatio,
-                    Qt.SmoothTransformation
-                )
-                self.lbl_preview_image.setPixmap(scaled_pix)
+            if not hasattr(self, 'lbl_preview_image') or not hasattr(self, 'cmb_video_layout'):
+                return
+
+            is_landscape = "16:9" in self.cmb_video_layout.currentText()
+            # 采用等比缩放的预览画布尺寸
+            if is_landscape:
+                canvas_w, canvas_h = 320, 180  # 16:9
+                title_font_size = 12
+                sub_font_size = 9
+                title_y_ratio = 0.15
+            else:
+                canvas_w, canvas_h = 180, 320  # 9:16
+                title_font_size = 12
+                sub_font_size = 9
+                title_y_ratio = 0.12
+
+            pixmap = QPixmap(canvas_w, canvas_h)
+            painter = QPainter(pixmap)
+            painter.setRenderHint(QPainter.Antialiasing, True)
+            painter.setRenderHint(QPainter.TextAntialiasing, True)
+            painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
+
+            # 1. 绘制底板或封面
+            cover_path = self.txt_cover_path.text().strip() if hasattr(self, 'txt_cover_path') else ""
+            has_cover = bool(cover_path and os.path.exists(cover_path))
+
+            if has_cover:
+                orig_pix = QPixmap(cover_path)
+                if not orig_pix.isNull():
+                    painter.fillRect(0, 0, canvas_w, canvas_h, QColor("#121218"))
+                    scaled_cover = orig_pix.scaled(
+                        int(canvas_w * 0.85), int(canvas_h * 0.65),
+                        Qt.KeepAspectRatio, Qt.SmoothTransformation
+                    )
+                    cx = (canvas_w - scaled_cover.width()) // 2
+                    cy = (canvas_h - scaled_cover.height()) // 2 + int(canvas_h * 0.08)
+                    painter.drawPixmap(cx, cy, scaled_cover)
+                else:
+                    has_cover = False
+
+            if not has_cover:
+                painter.fillRect(0, 0, canvas_w, canvas_h, QColor("#181822"))
+                painter.setPen(QColor("#333348"))
+                box_w, box_h = int(canvas_w * 0.8), int(canvas_h * 0.55)
+                bx = (canvas_w - box_w) // 2
+                by = (canvas_h - box_h) // 2 + int(canvas_h * 0.08)
+                painter.drawRoundedRect(bx, by, box_w, box_h, 6, 6)
+                painter.setFont(QFont("Microsoft YaHei", 9))
+                painter.setPen(QColor("#666680"))
+                painter.drawText(bx, by, box_w, box_h, Qt.AlignCenter, "（未选择封面图片）")
+
+            # 2. 绘制视频主标题与副标题叠加效果 (不依赖是否有图片)
+            main_title = self.txt_main_title.text().strip() if hasattr(self, 'txt_main_title') else ""
+            display_title = main_title if main_title else "《视频主标题（未设定）》"
+
+            # 标题背景半透明黑色安全区条带
+            bar_h = int(canvas_h * 0.20)
+            bar_y = int(canvas_h * title_y_ratio)
+            painter.fillRect(0, bar_y, canvas_w, bar_h, QColor(0, 0, 0, 160))
+
+            # 主标题文字
+            title_font = QFont("Microsoft YaHei", title_font_size, QFont.Bold)
+            painter.setFont(title_font)
+            painter.setPen(QColor("#FFFFFF") if main_title else QColor("#8888AA"))
+            painter.drawText(6, bar_y + 2, canvas_w - 12, int(bar_h * 0.55), Qt.AlignCenter | Qt.TextSingleLine, display_title)
+
+            # 副标题文字（示例）
+            sub_font = QFont("Microsoft YaHei", sub_font_size)
+            painter.setFont(sub_font)
+            painter.setPen(QColor("#BBBBCC"))
+            painter.drawText(6, bar_y + int(bar_h * 0.55), canvas_w - 12, int(bar_h * 0.4), Qt.AlignCenter | Qt.TextSingleLine, "第01集 · 正文精选")
+
+            painter.end()
+
+            # 显示在控件上
+            self.lbl_preview_image.setText("")
+            self.lbl_preview_image.setPixmap(pixmap)
         except Exception as e:
-            logger.warning(f"更新封面排版预览图失败: {e}")
+            logger.warning(f"实时刷新视觉预览图失败: {e}")
+
+    @staticmethod
+    def _get_audio_duration(path: Union[str, Path]) -> float:
+        """获取音频文件时长（秒），支持 wav 极速解析与 ffprobe 兜底"""
+        try:
+            p = Path(path)
+            if not p.exists():
+                return 0.0
+            if p.suffix.lower() == ".wav":
+                import wave
+                with wave.open(str(p), 'rb') as wf:
+                    return wf.getnframes() / float(wf.getframerate())
+            cmd = [
+                "ffprobe", "-v", "error", "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1", str(p.absolute())
+            ]
+            res = subprocess.run(cmd, capture_output=True, text=True, timeout=2, creationflags=0x08000000)
+            if res.returncode == 0 and res.stdout.strip():
+                return float(res.stdout.strip())
+        except Exception:
+            pass
+        return 15.0
 
     def _get_current_config(self) -> Dict[str, Any]:
         """获取当前界面的全部配置参数"""
@@ -1224,46 +1552,71 @@ class MainWindow(QMainWindow):
         self.bridge.request_pause()
 
     def _on_test_mix(self) -> None:
-        """15 秒混音试听真实发声落地"""
+        """
+        混合试听：使用右侧面板独立音量滑条值进行混音预览。
+        【为什么这样设计】
+        不再自动关联默认BGM，尊重用户选择。
+        音量使用预览面板的独立滑条，而非底部全局音量控制。
+        """
         try:
-            cfg = self._get_current_config()
             project_root = Path(__file__).resolve().parent.parent.parent
 
-            voice_sample = project_root / "models" / "f5_tts" / "presets" / "preset_male_e1_narrator.wav"
+            # 1. 动态匹配当前选中的音色预设样本
+            cur_voice = self.cmb_voice_profile.currentText() if hasattr(self, 'cmb_voice_profile') else "E1"
+            preset_file = "preset_male_e1_narrator.wav"
+            if "D1" in cur_voice:
+                preset_file = "preset_male_d1_elite.wav"
+            elif "D2" in cur_voice:
+                preset_file = "preset_male_d2_broadcast.wav"
+
+            voice_sample = project_root / "models" / "f5_tts" / "presets" / preset_file
+            if not voice_sample.exists():
+                voice_sample = project_root / "models" / "f5_tts" / "presets" / "preset_male_e1_narrator.wav"
             if not voice_sample.exists():
                 voice_sample = project_root / "outputtest" / "E1.wav"
 
-            bgm_path = cfg.get("bgm_path")
-            if not bgm_path or not os.path.exists(bgm_path):
-                default_bgm = project_root / "resources" / "bgm" / "preset_piano_gentle.mp3"
-                if default_bgm.exists():
-                    bgm_path = str(default_bgm.resolve())
-
             if not voice_sample.exists():
-                QMessageBox.warning(self, "试听提示", "未找到 E1 旁白参考音频资产，无法生成混音试听。")
+                QMessageBox.warning(self, "试听提示", "未找到对应的朗读参考音频资产，无法生成混音试听。")
                 return
+
+            # 2. 背景音乐：仅使用用户主动选择的BGM，不自动关联默认
+            bgm_path = self.txt_bgm_path.text().strip()
+            if bgm_path and not os.path.exists(bgm_path):
+                bgm_path = ""
 
             out_preview = (project_root / "output" / "temp_mix_preview.mp3").resolve()
             out_preview.parent.mkdir(parents=True, exist_ok=True)
 
+            # 3. 使用右侧预览面板的独立音量滑条值
+            voice_vol = self.sld_narr_preview.value() if hasattr(self, 'sld_narr_preview') else 100
+            bgm_vol = self.sld_bgm_preview.value() if hasattr(self, 'sld_bgm_preview') else 30
+
+            # 4. 计算试听播放时长 = min(BGM长度, 朗读长度)
+            voice_dur = self._get_audio_duration(voice_sample)
+            if bgm_path and Path(bgm_path).exists():
+                bgm_dur = self._get_audio_duration(bgm_path)
+                preview_sec = max(2.0, min(bgm_dur, voice_dur))
+            else:
+                preview_sec = max(2.0, voice_dur)
+
             mixer = AudioMixer(
-                voice_volume_percent=cfg["voice_volume_percent"],
-                bgm_volume_percent=cfg["bgm_volume_percent"]
+                voice_volume_percent=float(voice_vol),
+                bgm_volume_percent=float(bgm_vol)
             )
 
-            res = mixer.generate_preview_mix(
+            success = mixer.generate_preview_mix(
                 voice_path=voice_sample,
                 bgm_path=Path(bgm_path) if bgm_path else None,
                 output_path=out_preview,
-                preview_duration=15.0
+                preview_seconds=preview_sec
             )
 
-            if res.exists() and res.stat().st_size > 1000:
-                os.startfile(str(res.absolute()))
+            if success and out_preview.exists() and out_preview.stat().st_size > 1000:
+                os.startfile(str(out_preview.absolute()))
             else:
                 QMessageBox.warning(self, "试听提示", "生成混音试听文件异常。")
         except Exception as e:
-            logger.exception(f"15秒混音试听异常: {e}")
+            logger.exception(f"混音试听异常: {e}")
             QMessageBox.critical(self, "错误", f"混音试听失败: {e}")
 
     def _on_open_output(self) -> None:
@@ -1340,9 +1693,10 @@ class MainWindow(QMainWindow):
             ]
 
             for ep in getattr(plan, "episodes", []):
-                ep_chars = getattr(ep, "char_count", 0)
-                ep_mins = getattr(ep, "estimated_duration_mins", ep_chars / 300.0)
-                lines.append(f"• 第{ep.episode_order:02d}集 ({ep.subtitle}): {ep_chars}字 (约{ep_mins:.1f}分钟)")
+                # 兼容读取：EpisodePreview 实际字段为 total_chars，保留 char_count 作为降级
+                ep_chars = getattr(ep, "total_chars", getattr(ep, "char_count", 0))
+                ep_mins = getattr(ep, "estimated_duration_minutes", getattr(ep, "estimated_duration_mins", ep_chars / 300.0))
+                lines.append(f"• 第{ep.episode_order:02d}集 ({ep.subtitle}): {ep_chars:,}字 (约{ep_mins:.1f}分钟)")
 
             self.txt_plan_summary.setText("\n".join(lines))
         except Exception as e:

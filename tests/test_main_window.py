@@ -6,6 +6,7 @@ MainWindow 桌面主窗口专属单元测试
 import pytest
 import sys
 from PySide6.QtWidgets import QApplication
+from PySide6.QtCore import Qt
 from src.app.main_window import MainWindow
 
 
@@ -104,7 +105,8 @@ def test_main_window_tabs_and_monitoring(qapp):
     assert hasattr(window.resource_monitor_bar, "lbl_cpu")
     assert hasattr(window.resource_monitor_bar, "lbl_mem")
     assert hasattr(window.resource_monitor_bar, "lbl_gpu_mem")
-    assert hasattr(window.resource_monitor_bar, "lbl_cuda")
+    assert hasattr(window.resource_monitor_bar, "lbl_cuda_status")
+    assert hasattr(window.resource_monitor_bar, "lbl_gpu_load")
 
     # 6. 验证任务计时器与呼吸脉冲
     assert hasattr(window, "lbl_elapsed_time")
@@ -123,4 +125,81 @@ def test_azure_config_dialog(qapp):
     assert hasattr(dlg, "txt_region")
     assert hasattr(dlg, "btn_save")
     assert hasattr(dlg, "btn_delete")
+
+
+def test_main_window_v070_features(qapp, monkeypatch):
+    """测试 v0.7.0 重构功能：凭据按钮显隐、独立音量预览、标题叠加排版与生产计划字数修复"""
+    from src.core.episode_planner import EpisodePreview, BookProductionPlan
+
+    window = MainWindow()
+    # 屏蔽弹窗避免阻塞无头测试
+    monkeypatch.setattr(window, "_on_azure_config", lambda: None)
+    monkeypatch.setattr(window, "_check_local_model_availability", lambda text: None)
+
+    # 1. 验证凭据配置按钮动态显隐
+    # 默认本地 F5-TTS，凭据配置按钮应隐藏
+    assert window.btn_azure_config.isHidden()
+    # 切换至 Azure 引擎，凭据配置按钮应显示
+    idx_azure = window.cmb_tts_engine.findText("Azure", Qt.MatchContains)
+    assert idx_azure >= 0
+    window.cmb_tts_engine.setCurrentIndex(idx_azure)
+    assert not window.btn_azure_config.isHidden()
+    # 切换回本地 Kokoro 引擎，凭据配置按钮应再次隐藏
+    idx_kokoro = window.cmb_tts_engine.findText("Kokoro", Qt.MatchContains)
+    assert idx_kokoro >= 0
+    window.cmb_tts_engine.setCurrentIndex(idx_kokoro)
+    assert window.btn_azure_config.isHidden()
+
+    # 2. 验证右侧预览区重构组件
+    assert hasattr(window, "lbl_bgm_name")
+    assert hasattr(window, "sld_bgm_preview")
+    assert hasattr(window, "lbl_narr_name")
+    assert hasattr(window, "sld_narr_preview")
+    assert hasattr(window, "btn_mix_preview")
+    assert window.sld_bgm_preview.value() == 30
+    assert window.sld_narr_preview.value() == 100
+
+    # 3. 验证清除 BGM 功能
+    window.txt_bgm_path.setText("H:/fake_path/fake_bgm.mp3")
+    assert window.lbl_bgm_name.text() == "fake_bgm.mp3"
+    window._on_clear_bgm()
+    assert window.txt_bgm_path.text() == ""
+    assert window.lbl_bgm_name.text() == "未选择"
+
+    # 4. 验证视觉预览（无图片输入主标题时的叠加效果）
+    window.txt_cover_path.setText("")
+    window.txt_main_title.setText("《投资最重要的事》")
+    window._refresh_visual_preview()
+    assert not window.lbl_preview_image.pixmap().isNull()
+
+    # 5. 验证生产规划单集字数非0修复
+    mock_ep = EpisodePreview(
+        episode_order=1,
+        title="第01集",
+        subtitle="第一章 投资哲学",
+        chapter_ids=["chap_001"],
+        chapter_titles=["第一章"],
+        total_chars=15800,
+        estimated_duration_seconds=3160.0
+    )
+    mock_plan = BookProductionPlan(
+        book_title="测试书籍",
+        total_chapters=1,
+        total_chars=15800,
+        estimated_total_minutes=52.7,
+        target_duration_minutes=30.0,
+        total_episodes=1,
+        episodes=[mock_ep]
+    )
+    window._on_worker_plan_ready(mock_plan)
+    summary_text = window.txt_plan_summary.toPlainText()
+    assert ": 15,800字" in summary_text
+    assert ": 0字" not in summary_text
+    assert "约52.7分钟" in summary_text
+
+    # 6. 验证音色预设联动标签
+    idx_d1 = window.cmb_voice_profile.findText("D1", Qt.MatchContains)
+    if idx_d1 >= 0:
+        window.cmb_voice_profile.setCurrentIndex(idx_d1)
+        assert "D1" in window.lbl_narr_name.text()
 

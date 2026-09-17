@@ -32,6 +32,11 @@ class EpisodePreview:
     def estimated_duration_minutes(self) -> float:
         return round(self.estimated_duration_seconds / 60.0, 1)
 
+    @property
+    def char_count(self) -> int:
+        """兼容别名：避免调用方误用 char_count 而静默得到0"""
+        return self.total_chars
+
 
 @dataclass
 class BookProductionPlan:
