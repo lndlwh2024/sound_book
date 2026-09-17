@@ -150,24 +150,28 @@ def test_main_window_v070_features(qapp, monkeypatch):
     window.cmb_tts_engine.setCurrentIndex(idx_kokoro)
     assert window.btn_azure_config.isHidden()
 
-    # 2. 验证右侧预览区重构组件
-    assert hasattr(window, "lbl_bgm_name")
+    # 2. 验证右侧工作台重构组件与独立试听图标
+    assert hasattr(window, "btn_play_voice")
+    assert hasattr(window, "btn_play_bgm")
     assert hasattr(window, "sld_bgm_preview")
-    assert hasattr(window, "lbl_narr_name")
     assert hasattr(window, "sld_narr_preview")
     assert hasattr(window, "btn_mix_preview")
+    assert window.sld_bgm_preview.orientation() == Qt.Vertical
+    assert window.sld_narr_preview.orientation() == Qt.Vertical
     assert window.sld_bgm_preview.value() == 30
     assert window.sld_narr_preview.value() == 100
 
     # 3. 验证清除 BGM 功能
     window.txt_bgm_path.setText("H:/fake_path/fake_bgm.mp3")
-    assert window.lbl_bgm_name.text() == "fake_bgm.mp3"
     window._on_clear_bgm()
     assert window.txt_bgm_path.text() == ""
-    assert window.lbl_bgm_name.text() == "未选择"
 
-    # 4. 验证视觉预览（无图片输入主标题时的叠加效果）
+    # 4. 验证视觉预览：未输入标题时干净底板；输入标题后正常叠加
     window.txt_cover_path.setText("")
+    window.txt_main_title.setText("")
+    window._refresh_visual_preview()
+    assert not window.lbl_preview_image.pixmap().isNull()
+
     window.txt_main_title.setText("《投资最重要的事》")
     window._refresh_visual_preview()
     assert not window.lbl_preview_image.pixmap().isNull()
@@ -197,9 +201,9 @@ def test_main_window_v070_features(qapp, monkeypatch):
     assert ": 0字" not in summary_text
     assert "约52.7分钟" in summary_text
 
-    # 6. 验证音色预设联动标签
+    # 6. 验证音色预设联动与试听提示
     idx_d1 = window.cmb_voice_profile.findText("D1", Qt.MatchContains)
     if idx_d1 >= 0:
         window.cmb_voice_profile.setCurrentIndex(idx_d1)
-        assert "D1" in window.lbl_narr_name.text()
+        assert "D1" in window.btn_play_voice.toolTip()
 

@@ -173,10 +173,11 @@ class AudioMixer:
         fade_out_st = max(0.0, preview_seconds - 2.0)
 
         if not bgm_path or not Path(bgm_path).exists() or b_pct <= 0.0:
+            # 纯人声试听：直接调整电平输出，不追加强制末尾淡出衰减，保持原汁原味自然声学动态
             cmd = [
                 "ffmpeg", "-y",
                 "-i", str(voice_path.absolute()),
-                "-af", f"volume={voice_db}dB,apad,afade=t=out:st={fade_out_st:.2f}:d=2.0",
+                "-af", f"volume={voice_db}dB",
                 "-t", str(preview_seconds),
                 *codec_args,
                 str(output_path.absolute())

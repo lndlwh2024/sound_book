@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (
     QFrame, QTextEdit, QTabWidget, QDialog
 )
 from PySide6.QtCore import Qt, QSize, QTimer, Signal, QObject, QPointF
-from PySide6.QtGui import QPixmap, QFont, QIcon, QPainter, QColor, QPolygonF
+from PySide6.QtGui import QPixmap, QFont, QIcon, QPainter, QColor, QPolygonF, QFontMetrics
 from PySide6.QtWidgets import QStyle, QProxyStyle
 
 from .task_bridge import TaskManagerBridge
@@ -497,7 +497,13 @@ class MainWindow(QMainWindow):
 
     def _init_ui(self) -> None:
         """初始化全局深色科技主题界面布局"""
-        self.setStyleSheet("""
+        project_root = Path(__file__).resolve().parent.parent.parent
+        up_icon = str((project_root / "resources" / "icons" / "spin_up.png").resolve()).replace("\\", "/")
+        up_hov = str((project_root / "resources" / "icons" / "spin_up_hover.png").resolve()).replace("\\", "/")
+        dn_icon = str((project_root / "resources" / "icons" / "spin_down.png").resolve()).replace("\\", "/")
+        dn_hov = str((project_root / "resources" / "icons" / "spin_down_hover.png").resolve()).replace("\\", "/")
+
+        style_text = """
             QMainWindow {
                 background-color: #1E1E24;
             }
@@ -528,7 +534,7 @@ class MainWindow(QMainWindow):
             QLineEdit:focus, QComboBox:focus {
                 border: 1px solid #007ACC;
             }
-            /* 【关键修复 - 杜绝微调框上下箭头不可用】标准子控件定位与悬浮样式 */
+            /* 【关键修复 - 杜绝微调框上下箭头不可用】采用绝对路径高质量矢量图标渲染 */
             QSpinBox, QDoubleSpinBox {
                 background-color: #16161C;
                 border: 1px solid #444455;
@@ -552,10 +558,13 @@ class MainWindow(QMainWindow):
             QSpinBox::up-button:hover, QDoubleSpinBox::up-button:hover {
                 background-color: #38384E;
             }
-            /* 箭头三角形由 SpinBoxArrowStyle (QProxyStyle) 在 Python 层用 QPainter 绘制 */
             QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {
-                width: 8px;
+                image: url("@@UP_ICON@@");
+                width: 9px;
                 height: 6px;
+            }
+            QSpinBox::up-arrow:hover, QDoubleSpinBox::up-arrow:hover {
+                image: url("@@UP_HOV@@");
             }
             QSpinBox::down-button, QDoubleSpinBox::down-button {
                 subcontrol-origin: border;
@@ -570,8 +579,52 @@ class MainWindow(QMainWindow):
                 background-color: #38384E;
             }
             QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {
-                width: 8px;
+                image: url("@@DN_ICON@@");
+                width: 9px;
                 height: 6px;
+            }
+            QSpinBox::down-arrow:hover, QDoubleSpinBox::down-arrow:hover {
+                image: url("@@DN_HOV@@");
+            }
+            /* 竖向专业音量滑条样式 */
+            QSlider::groove:vertical {
+                background: #181822;
+                width: 6px;
+                border-radius: 3px;
+            }
+            QSlider::add-page:vertical {
+                background: #007ACC;
+                border-radius: 3px;
+            }
+            QSlider::sub-page:vertical {
+                background: #333346;
+                border-radius: 3px;
+            }
+            QSlider::handle:vertical {
+                background: #E0E0E8;
+                height: 14px;
+                margin: 0 -4px;
+                border-radius: 7px;
+            }
+            QSlider::handle:vertical:hover {
+                background: #00E676;
+            }
+            /* 独立试听圆形播放图标按钮 */
+            QPushButton.audio_play_btn {
+                background-color: #222230;
+                border: 1px solid #444460;
+                border-radius: 18px;
+                font-size: 15px;
+                min-width: 36px;
+                max-width: 36px;
+                min-height: 36px;
+                max-height: 36px;
+                padding: 0px;
+                color: #FFFFFF;
+            }
+            QPushButton.audio_play_btn:hover {
+                background-color: #323246;
+                border-color: #00E676;
             }
             /* 多 Sheet 标签页样式 */
             QTabWidget::pane {
@@ -667,7 +720,14 @@ class MainWindow(QMainWindow):
                 margin-bottom: -5px;
                 border-radius: 8px;
             }
-        """)
+        """
+        style_text = (
+            style_text.replace("@@UP_ICON@@", up_icon)
+            .replace("@@UP_HOV@@", up_hov)
+            .replace("@@DN_ICON@@", dn_icon)
+            .replace("@@DN_HOV@@", dn_hov)
+        )
+        self.setStyleSheet(style_text)
 
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
@@ -855,105 +915,115 @@ class MainWindow(QMainWindow):
 
     def _build_right_preview_panel(self) -> QWidget:
         """
-        构建右侧预览区 (封面+标题叠加 + 音频预览 + 三Sheet多维面板)
+        构建右侧预览区 (封面+标题居中，主音频/BGM竖向音量双翼布局，底部仅保留混音试听)
         【为什么这样设计】
-        将预览区拆分为视觉预览和音频预览两部分：
-        - 视觉预览：实时显示封面图片，并在用户输入视频主标题后叠加标题文字效果
-        - 音频预览：分别展示背景音乐和朗读示例，各自独立音量控制，底部混合试听
+        采纳用户专业建议：
+        - 左翼：🎙️ 主音频单独播放图标 + 竖立音量滑块 + 百分比读数；
+        - 中央：自适应封面与标题排版预览（未输入标题时不显示标题，输入后自适应叠加大字号文字，绝不裁切）；
+        - 右翼：🎵 背景音乐单独播放图标 + 竖立音量滑块 + 百分比读数；
+        - 底部：独占一行【▶ 混合试听】主控制按钮。
+        彻底消除横向滑块占用高度的问题，使右侧面板紧凑大方、专业直观。
         """
         panel = QWidget()
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
 
-        # ── 1. 封面排版与标题叠加预览 ──
-        grp_preview = QGroupBox("【封面与标题预览】")
-        p_layout = QVBoxLayout(grp_preview)
+        # ── 1. 封面排版与音频实时工作台 (大方框) ──
+        grp_workbench = QGroupBox("【封面排版与音频实时工作台】")
+        wb_main_layout = QVBoxLayout(grp_workbench)
+        wb_main_layout.setContentsMargins(8, 10, 8, 8)
+        wb_main_layout.setSpacing(8)
 
-        self.lbl_preview_image = QLabel()
-        self.lbl_preview_image.setAlignment(Qt.AlignCenter)
-        self.lbl_preview_image.setMinimumSize(220, 200)
-        self.lbl_preview_image.setStyleSheet("border: 1px dashed #555566; background-color: #121216; border-radius: 6px;")
-        self.lbl_preview_image.setText("选择封面后自动生成排版预览\n输入视频主标题后叠加标题效果")
-        p_layout.addWidget(self.lbl_preview_image)
+        # 上部：左翼控台 + 中央预览 + 右翼控台
+        stage_layout = QHBoxLayout()
+        stage_layout.setSpacing(6)
 
-        layout.addWidget(grp_preview, 3)
+        # [左翼] 主音频控制柱
+        col_voice = QVBoxLayout()
+        col_voice.setSpacing(4)
+        col_voice.setAlignment(Qt.AlignHCenter)
 
-        # ── 2. 音频预览与混合试听区 ──
-        grp_audio = QGroupBox("【音频预览与混合试听】")
-        a_layout = QVBoxLayout(grp_audio)
-        a_layout.setSpacing(6)
+        self.btn_play_voice = QPushButton("🎙️")
+        self.btn_play_voice.setProperty("class", "audio_play_btn")
+        self.btn_play_voice.setToolTip("点击单独试听纯人声干音 (无伴奏、无淡出)")
+        self.btn_play_voice.clicked.connect(self._on_play_voice_only)
+        col_voice.addWidget(self.btn_play_voice, 0, Qt.AlignHCenter)
 
-        # 背景音乐行
-        bgm_row = QHBoxLayout()
-        bgm_row.addWidget(QLabel("🎵 背景音乐:"))
-        self.lbl_bgm_name = QLabel("未选择")
-        self.lbl_bgm_name.setStyleSheet("color: #888888; font-size: 11px;")
-        bgm_row.addWidget(self.lbl_bgm_name, 1)
-        btn_select_bgm_preview = QPushButton("选择")
-        btn_select_bgm_preview.setFixedWidth(50)
-        btn_select_bgm_preview.clicked.connect(self._on_browse_bgm)
-        bgm_row.addWidget(btn_select_bgm_preview)
-        btn_clear_bgm = QPushButton("清除")
-        btn_clear_bgm.setFixedWidth(50)
-        btn_clear_bgm.clicked.connect(self._on_clear_bgm)
-        bgm_row.addWidget(btn_clear_bgm)
-        a_layout.addLayout(bgm_row)
+        lbl_v_tag = QLabel("主音频")
+        lbl_v_tag.setStyleSheet("font-size: 11px; color: #70DB93; font-weight: bold;")
+        col_voice.addWidget(lbl_v_tag, 0, Qt.AlignHCenter)
 
-        # 背景音乐音量滑条
-        bgm_vol_row = QHBoxLayout()
-        bgm_vol_row.addWidget(QLabel("  🔊"))
-        self.sld_bgm_preview = QSlider(Qt.Horizontal)
-        self.sld_bgm_preview.setRange(0, 100)
-        self.sld_bgm_preview.setValue(30)
-        self.sld_bgm_preview.setToolTip("背景音乐音量")
-        bgm_vol_row.addWidget(self.sld_bgm_preview, 1)
-        self.lbl_bgm_vol_pct = QLabel("30%")
-        self.lbl_bgm_vol_pct.setFixedWidth(35)
-        self.sld_bgm_preview.valueChanged.connect(lambda v: self.lbl_bgm_vol_pct.setText(f"{v}%"))
-        bgm_vol_row.addWidget(self.lbl_bgm_vol_pct)
-        a_layout.addLayout(bgm_vol_row)
-
-        # 朗读示例行
-        narr_row = QHBoxLayout()
-        narr_row.addWidget(QLabel("🎙️ 朗读示例:"))
-        self.lbl_narr_name = QLabel("预置音色样本")
-        self.lbl_narr_name.setStyleSheet("color: #70DB93; font-size: 11px;")
-        narr_row.addWidget(self.lbl_narr_name, 1)
-        a_layout.addLayout(narr_row)
-
-        # 朗读示例音量滑条
-        narr_vol_row = QHBoxLayout()
-        narr_vol_row.addWidget(QLabel("  🔊"))
-        self.sld_narr_preview = QSlider(Qt.Horizontal)
+        self.sld_narr_preview = QSlider(Qt.Vertical)
         self.sld_narr_preview.setRange(0, 100)
         self.sld_narr_preview.setValue(100)
-        self.sld_narr_preview.setToolTip("朗读音量")
-        narr_vol_row.addWidget(self.sld_narr_preview, 1)
-        self.lbl_narr_vol_pct = QLabel("100%")
-        self.lbl_narr_vol_pct.setFixedWidth(35)
-        self.sld_narr_preview.valueChanged.connect(lambda v: self.lbl_narr_vol_pct.setText(f"{v}%"))
-        narr_vol_row.addWidget(self.lbl_narr_vol_pct)
-        a_layout.addLayout(narr_vol_row)
+        self.sld_narr_preview.setMinimumHeight(120)
+        self.sld_narr_preview.setToolTip("主音频独立音量")
+        col_voice.addWidget(self.sld_narr_preview, 1, Qt.AlignHCenter)
 
-        # 混合试听按钮
-        self.btn_mix_preview = QPushButton("▶ 混合试听")
+        self.lbl_narr_vol_pct = QLabel("100%")
+        self.lbl_narr_vol_pct.setStyleSheet("font-size: 11px; color: #FFFFFF;")
+        self.sld_narr_preview.valueChanged.connect(lambda v: self.lbl_narr_vol_pct.setText(f"{v}%"))
+        col_voice.addWidget(self.lbl_narr_vol_pct, 0, Qt.AlignHCenter)
+
+        stage_layout.addLayout(col_voice, 0)
+
+        # [中央] 封面与标题排版预览
+        self.lbl_preview_image = QLabel()
+        self.lbl_preview_image.setAlignment(Qt.AlignCenter)
+        self.lbl_preview_image.setMinimumSize(220, 210)
+        self.lbl_preview_image.setStyleSheet("border: 1px dashed #555566; background-color: #121216; border-radius: 6px;")
+        stage_layout.addWidget(self.lbl_preview_image, 1)
+
+        # [右翼] 背景音乐控制柱
+        col_bgm = QVBoxLayout()
+        col_bgm.setSpacing(4)
+        col_bgm.setAlignment(Qt.AlignHCenter)
+
+        self.btn_play_bgm = QPushButton("🎵")
+        self.btn_play_bgm.setProperty("class", "audio_play_btn")
+        self.btn_play_bgm.setToolTip("点击单独试听背景音乐 (如有)")
+        self.btn_play_bgm.clicked.connect(self._on_play_bgm_only)
+        col_bgm.addWidget(self.btn_play_bgm, 0, Qt.AlignHCenter)
+
+        lbl_b_tag = QLabel("背景音")
+        lbl_b_tag.setStyleSheet("font-size: 11px; color: #4DA6FF; font-weight: bold;")
+        col_bgm.addWidget(lbl_b_tag, 0, Qt.AlignHCenter)
+
+        self.sld_bgm_preview = QSlider(Qt.Vertical)
+        self.sld_bgm_preview.setRange(0, 100)
+        self.sld_bgm_preview.setValue(30)
+        self.sld_bgm_preview.setMinimumHeight(120)
+        self.sld_bgm_preview.setToolTip("背景音乐独立音量")
+        col_bgm.addWidget(self.sld_bgm_preview, 1, Qt.AlignHCenter)
+
+        self.lbl_bgm_vol_pct = QLabel("30%")
+        self.lbl_bgm_vol_pct.setStyleSheet("font-size: 11px; color: #FFFFFF;")
+        self.sld_bgm_preview.valueChanged.connect(lambda v: self.lbl_bgm_vol_pct.setText(f"{v}%"))
+        col_bgm.addWidget(self.lbl_bgm_vol_pct, 0, Qt.AlignHCenter)
+
+        stage_layout.addLayout(col_bgm, 0)
+
+        wb_main_layout.addLayout(stage_layout)
+
+        # 下部：仅一行【混合试听】主控制按钮
+        self.btn_mix_preview = QPushButton("▶ 混合试听 (播放时长 = min(BGM, 朗读))")
         self.btn_mix_preview.setStyleSheet("""
             QPushButton {
-                background-color: #2A5F2A;
+                background-color: #235A23;
                 color: #FFFFFF;
                 font-weight: bold;
                 font-size: 13px;
-                padding: 8px;
-                border-radius: 6px;
+                padding: 7px;
+                border-radius: 5px;
             }
-            QPushButton:hover { background-color: #367A36; }
+            QPushButton:hover { background-color: #2F7A2F; }
+            QPushButton:pressed { background-color: #1A441A; }
         """)
-        self.btn_mix_preview.setToolTip("播放时长 = min(BGM长度, 朗读长度)")
         self.btn_mix_preview.clicked.connect(self._on_test_mix)
-        a_layout.addWidget(self.btn_mix_preview)
+        wb_main_layout.addWidget(self.btn_mix_preview)
 
-        layout.addWidget(grp_audio, 2)
+        layout.addWidget(grp_workbench, 4)
 
         # ── 3. 生产计划、硬件诊断与后台实时日志 (三 Sheet TabWidget) ──
         grp_dashboard = QGroupBox("【生产计划全景、系统诊断与实时日志】")
@@ -1333,27 +1403,70 @@ class MainWindow(QMainWindow):
             self.txt_bgm_path.setText(clean_path)
 
     def _on_bgm_text_changed(self, text: str) -> None:
-        """背景音乐路径变动时同步更新标签"""
+        """背景音乐路径变动时同步更新标签与试听图标状态"""
         clean_text = text.strip()
-        if hasattr(self, 'lbl_bgm_name'):
-            if clean_text:
-                self.lbl_bgm_name.setText(Path(clean_text).name)
-                self.lbl_bgm_name.setStyleSheet("color: #70DB93; font-size: 11px;")
+        has_bgm = bool(clean_text and os.path.exists(clean_text))
+        if hasattr(self, 'btn_play_bgm'):
+            if has_bgm:
+                self.btn_play_bgm.setStyleSheet("QPushButton { background-color: #1A3E26; border: 1px solid #00E676; color: #00E676; }")
+                self.btn_play_bgm.setToolTip(f"点击试听选中的背景音乐:\n{Path(clean_text).name}")
             else:
-                self.lbl_bgm_name.setText("未选择")
-                self.lbl_bgm_name.setStyleSheet("color: #888888; font-size: 11px;")
+                self.btn_play_bgm.setStyleSheet("")
+                self.btn_play_bgm.setToolTip("当前未选择背景音乐 (点击左侧'选择音乐'添加)")
 
     def _on_clear_bgm(self) -> None:
         """清除当前选择的背景音乐"""
         self.txt_bgm_path.clear()
 
     def _on_voice_profile_changed(self, idx: int = 0) -> None:
-        """音色预设切换时联动更新朗读示例标签"""
-        if not hasattr(self, 'lbl_narr_name') or not hasattr(self, 'cmb_voice_profile'):
-            return
-        text = self.cmb_voice_profile.currentText()
-        code = text.split()[0] if text else "E1"
-        self.lbl_narr_name.setText(f"预置音色 ({code})")
+        """音色预设切换时联动更新试听提示"""
+        if hasattr(self, 'btn_play_voice') and hasattr(self, 'cmb_voice_profile'):
+            self.btn_play_voice.setToolTip(f"点击单独试听主音频 ({self.cmb_voice_profile.currentText().split()[0]})")
+
+    def _on_play_voice_only(self) -> None:
+        """
+        单独试听纯人声干音资产 (不含任何伴奏、不含任何淡出衰减)
+        【为什么这样设计】
+        用户要求核验纯人声的发音质感与自然电平，直接调用原始参考文件播放，
+        杜绝任何混音污染和末尾自动降低音量。
+        """
+        try:
+            project_root = Path(__file__).resolve().parent.parent.parent
+            cur_voice = self.cmb_voice_profile.currentText() if hasattr(self, 'cmb_voice_profile') else "E1"
+            preset_file = "preset_male_e1_narrator.wav"
+            if "D1" in cur_voice:
+                preset_file = "preset_male_d1_elite.wav"
+            elif "D2" in cur_voice:
+                preset_file = "preset_male_d2_broadcast.wav"
+
+            voice_sample = project_root / "models" / "f5_tts" / "presets" / preset_file
+            if not voice_sample.exists():
+                voice_sample = project_root / "models" / "f5_tts" / "presets" / "preset_male_e1_narrator.wav"
+            if not voice_sample.exists():
+                voice_sample = project_root / "outputtest" / "E1.wav"
+
+            if not voice_sample.exists():
+                QMessageBox.warning(self, "试听提示", "未找到对应的纯人声参考音频资产。")
+                return
+
+            logger.info(f"单独试听纯人声原始文件: {voice_sample.resolve()}")
+            os.startfile(str(voice_sample.resolve()))
+        except Exception as e:
+            logger.exception(f"单独播放纯人声异常: {e}")
+            QMessageBox.critical(self, "错误", f"无法播放主音频: {e}")
+
+    def _on_play_bgm_only(self) -> None:
+        """单独试听用户选定的背景音乐"""
+        try:
+            bgm_path = self.txt_bgm_path.text().strip() if hasattr(self, 'txt_bgm_path') else ""
+            if not bgm_path or not os.path.exists(bgm_path):
+                QMessageBox.information(self, "提示", "当前尚未选择背景音乐。\n（留空则生成纯人声视频，若需伴奏请在左侧点击'选择音乐'）")
+                return
+            logger.info(f"单独试听背景音乐文件: {bgm_path}")
+            os.startfile(str(Path(bgm_path).resolve()))
+        except Exception as e:
+            logger.exception(f"单独播放背景音乐异常: {e}")
+            QMessageBox.critical(self, "错误", f"无法播放背景音乐: {e}")
 
     def _refresh_visual_preview(self) -> None:
         """
@@ -1361,10 +1474,9 @@ class MainWindow(QMainWindow):
         【为什么这样设计】
         满足用户需求：
         1. 实时显示选中的封面图片（如有）；
-        2. 用户输入视频主标题后，立即在预览图上渲染标题叠加效果与位置；
-        3. 标题显示不依赖图片：在未选择图片时，基于选定的视频画幅比例（竖屏 9:16 或 横屏 16:9）
-           生成深色雅致画布，并在安全区居中展示主标题与示例副标题叠加效果。
-        使用 QPixmap 与 QPainter 本地矢量绘制，达到毫秒级所见即所得响应，杜绝调用外部 ffmpeg 引起的卡顿与黑框闪烁。
+        2. 未输入主标题时：严格不显示任何标题与遮罩，保持干净整洁；
+        3. 输入主标题后：使用 QFontMetrics 动态测算高度与行高，在安全区居中叠加主标题与副标题，绝不裁切；
+        4. 标题显示不依赖图片：未选择图片时生成深色科技底板，标题依然优雅居中呈现。
         """
         try:
             if not hasattr(self, 'lbl_preview_image') or not hasattr(self, 'cmb_video_layout'):
@@ -1376,70 +1488,86 @@ class MainWindow(QMainWindow):
                 canvas_w, canvas_h = 320, 180  # 16:9
                 title_font_size = 12
                 sub_font_size = 9
-                title_y_ratio = 0.15
+                title_y_ratio = 0.16
             else:
                 canvas_w, canvas_h = 180, 320  # 9:16
-                title_font_size = 12
-                sub_font_size = 9
-                title_y_ratio = 0.12
+                title_font_size = 11
+                sub_font_size = 8
+                title_y_ratio = 0.16
 
             pixmap = QPixmap(canvas_w, canvas_h)
             painter = QPainter(pixmap)
-            painter.setRenderHint(QPainter.Antialiasing, True)
-            painter.setRenderHint(QPainter.TextAntialiasing, True)
-            painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
+            try:
+                painter.setRenderHint(QPainter.Antialiasing, True)
+                painter.setRenderHint(QPainter.TextAntialiasing, True)
+                painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
 
-            # 1. 绘制底板或封面
-            cover_path = self.txt_cover_path.text().strip() if hasattr(self, 'txt_cover_path') else ""
-            has_cover = bool(cover_path and os.path.exists(cover_path))
+                # 1. 绘制底板或封面
+                cover_path = self.txt_cover_path.text().strip() if hasattr(self, 'txt_cover_path') else ""
+                has_cover = bool(cover_path and os.path.exists(cover_path))
 
-            if has_cover:
-                orig_pix = QPixmap(cover_path)
-                if not orig_pix.isNull():
-                    painter.fillRect(0, 0, canvas_w, canvas_h, QColor("#121218"))
-                    scaled_cover = orig_pix.scaled(
-                        int(canvas_w * 0.85), int(canvas_h * 0.65),
-                        Qt.KeepAspectRatio, Qt.SmoothTransformation
-                    )
-                    cx = (canvas_w - scaled_cover.width()) // 2
-                    cy = (canvas_h - scaled_cover.height()) // 2 + int(canvas_h * 0.08)
-                    painter.drawPixmap(cx, cy, scaled_cover)
-                else:
-                    has_cover = False
+                if has_cover:
+                    orig_pix = QPixmap(cover_path)
+                    if not orig_pix.isNull():
+                        painter.fillRect(0, 0, canvas_w, canvas_h, QColor("#121218"))
+                        scaled_cover = orig_pix.scaled(
+                            int(canvas_w * 0.85), int(canvas_h * 0.65),
+                            Qt.KeepAspectRatio, Qt.SmoothTransformation
+                        )
+                        cx = (canvas_w - scaled_cover.width()) // 2
+                        cy = (canvas_h - scaled_cover.height()) // 2 + int(canvas_h * 0.08)
+                        painter.drawPixmap(cx, cy, scaled_cover)
+                    else:
+                        has_cover = False
 
-            if not has_cover:
-                painter.fillRect(0, 0, canvas_w, canvas_h, QColor("#181822"))
-                painter.setPen(QColor("#333348"))
-                box_w, box_h = int(canvas_w * 0.8), int(canvas_h * 0.55)
-                bx = (canvas_w - box_w) // 2
-                by = (canvas_h - box_h) // 2 + int(canvas_h * 0.08)
-                painter.drawRoundedRect(bx, by, box_w, box_h, 6, 6)
-                painter.setFont(QFont("Microsoft YaHei", 9))
-                painter.setPen(QColor("#666680"))
-                painter.drawText(bx, by, box_w, box_h, Qt.AlignCenter, "（未选择封面图片）")
+                if not has_cover:
+                    painter.fillRect(0, 0, canvas_w, canvas_h, QColor("#181822"))
+                    painter.setPen(QColor("#333348"))
+                    box_w, box_h = int(canvas_w * 0.8), int(canvas_h * 0.55)
+                    bx = (canvas_w - box_w) // 2
+                    by = (canvas_h - box_h) // 2 + int(canvas_h * 0.08)
+                    painter.drawRoundedRect(bx, by, box_w, box_h, 6, 6)
+                    painter.setFont(QFont("Microsoft YaHei", 9))
+                    painter.setPen(QColor("#666680"))
+                    painter.drawText(bx, by, box_w, box_h, Qt.AlignCenter, "（未选择封面图片）")
 
-            # 2. 绘制视频主标题与副标题叠加效果 (不依赖是否有图片)
-            main_title = self.txt_main_title.text().strip() if hasattr(self, 'txt_main_title') else ""
-            display_title = main_title if main_title else "《视频主标题（未设定）》"
+                # 2. 绘制视频主标题与副标题叠加效果 (仅在用户真正输入了主标题时才渲染，未输入则保持干净画面)
+                main_title = self.txt_main_title.text().strip() if hasattr(self, 'txt_main_title') else ""
 
-            # 标题背景半透明黑色安全区条带
-            bar_h = int(canvas_h * 0.20)
-            bar_y = int(canvas_h * title_y_ratio)
-            painter.fillRect(0, bar_y, canvas_w, bar_h, QColor(0, 0, 0, 160))
+                if main_title:
+                    # 动态计算字体高度，彻底防止顶部截断与溢出
+                    title_font = QFont("Microsoft YaHei", title_font_size, QFont.Bold)
+                    painter.setFont(title_font)
+                    fm_title = painter.fontMetrics()
+                    h_title = fm_title.height()
 
-            # 主标题文字
-            title_font = QFont("Microsoft YaHei", title_font_size, QFont.Bold)
-            painter.setFont(title_font)
-            painter.setPen(QColor("#FFFFFF") if main_title else QColor("#8888AA"))
-            painter.drawText(6, bar_y + 2, canvas_w - 12, int(bar_h * 0.55), Qt.AlignCenter | Qt.TextSingleLine, display_title)
+                    sub_font = QFont("Microsoft YaHei", sub_font_size)
+                    painter.setFont(sub_font)
+                    fm_sub = painter.fontMetrics()
+                    h_sub = fm_sub.height()
 
-            # 副标题文字（示例）
-            sub_font = QFont("Microsoft YaHei", sub_font_size)
-            painter.setFont(sub_font)
-            painter.setPen(QColor("#BBBBCC"))
-            painter.drawText(6, bar_y + int(bar_h * 0.55), canvas_w - 12, int(bar_h * 0.4), Qt.AlignCenter | Qt.TextSingleLine, "第01集 · 正文精选")
+                    pad_v = 6
+                    bar_h = h_title + h_sub + pad_v * 2 + 4
+                    bar_y = int(canvas_h * title_y_ratio)
 
-            painter.end()
+                    # 标题背景半透明黑色遮罩条
+                    painter.setPen(Qt.NoPen)
+                    painter.setBrush(QColor(0, 0, 0, 168))
+                    painter.drawRoundedRect(4, bar_y, canvas_w - 8, bar_h, 4, 4)
+
+                    # 主标题文字 (若过长自动优雅省略，不溢出裁切)
+                    painter.setFont(title_font)
+                    elided_title = fm_title.elidedText(main_title, Qt.ElideRight, canvas_w - 16)
+                    painter.setPen(QColor("#FFFFFF"))
+                    painter.drawText(8, bar_y + pad_v, canvas_w - 16, h_title, Qt.AlignCenter | Qt.TextSingleLine, elided_title)
+
+                    # 副标题文字 (示例)
+                    painter.setFont(sub_font)
+                    painter.setPen(QColor("#CCCCCC"))
+                    painter.drawText(8, bar_y + pad_v + h_title + 3, canvas_w - 16, h_sub, Qt.AlignCenter | Qt.TextSingleLine, "第01集 · 正文精选")
+            finally:
+                if painter.isActive():
+                    painter.end()
 
             # 显示在控件上
             self.lbl_preview_image.setText("")
