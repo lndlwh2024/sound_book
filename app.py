@@ -9,6 +9,11 @@ import argparse
 import logging
 from pathlib import Path
 
+# 确保项目根目录绝对路径置于 sys.path 顶层，不论终端从任意工作目录调用均可稳定导入
+_project_root = str(Path(__file__).resolve().parent)
+if _project_root not in sys.path:
+    sys.path.insert(0, _project_root)
+
 from src.utils.config import config
 from src.utils.logging_config import setup_logger
 from src.audio.ffmpeg_utils import check_ffmpeg
