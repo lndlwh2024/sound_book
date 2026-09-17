@@ -1,6 +1,7 @@
 import json
 import logging
 import subprocess
+import threading
 import time
 from pathlib import Path
 from typing import Dict, Any, Optional
@@ -30,6 +31,7 @@ class F5Backend(TTSBackend):
         self._timeout = self._config.get("worker_timeout_seconds", 300)
         self._cpu_fallback = self._config.get("cpu_fallback", True)
         self._process: Optional[subprocess.Popen] = None
+        self._stderr_thread: Optional[threading.Thread] = None
         self._cached_model_path: Optional[Path] = None
         
     @property
@@ -68,7 +70,25 @@ class F5Backend(TTSBackend):
                 bufsize=1
             )
 
-            
+            # 【关键修复 - 杜绝管道缓冲区死锁】：
+            # F5-TTS 和 tqdm 进度条产生大量 stderr 输出。Windows 管道缓冲区仅 4KB~64KB，
+            # 若父进程不消费 stderr，子进程在连续合成几句后将因管道满载被内核永久挂起 (Win32 WriteFile 阻塞)，
+            # 造成 CUDA 算力归零且主进程死等 stdout 的双向死锁。此处启动守护线程实时排空并转储 debug 日志。
+            def _drain_stderr(proc):
+                try:
+                    if proc and proc.stderr:
+                        for line in iter(proc.stderr.readline, ''):
+                            if not line:
+                                break
+                            clean_l = line.strip()
+                            if clean_l:
+                                logger.debug(f"[F5-Worker-stderr] {clean_l}")
+                except Exception:
+                    pass
+
+            self._stderr_thread = threading.Thread(target=_drain_stderr, args=(self._process,), daemon=True)
+            self._stderr_thread.start()
+
             # 读取启动阶段就绪握手信号，跳过第三方库警告
             while True:
                 ready_line = self._process.stdout.readline()
@@ -110,6 +130,7 @@ class F5Backend(TTSBackend):
             logger.warning(f"关闭 F5 worker 进程时异常: {e}")
         finally:
             self._process = None
+            self._stderr_thread = None
 
     def _send_payload(self, payload: dict) -> TTSResult:
         """发送 JSON 请求并读取回复"""

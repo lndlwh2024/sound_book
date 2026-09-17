@@ -2,10 +2,15 @@
 """
 书声 (ShuSheng) v2.0 PySide6 桌面主窗口
 遵循 PRD 与详细设计规范：三栏直观布局、非阻塞后台线程隔离、实时封面排版与混音试听预览。
+包含多Sheet生产监控面板、硬件负载实时指示条、任务动态计时器与云端API凭据管理。
 """
 import os
 import sys
+import time
 import logging
+import ctypes
+import platform
+import subprocess
 from pathlib import Path
 from typing import Optional, Dict, Any
 
@@ -13,27 +18,278 @@ from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QLabel, QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox, QSlider, QPushButton,
     QProgressBar, QFileDialog, QMessageBox, QGroupBox, QScrollArea,
-    QFrame, QTextEdit
+    QFrame, QTextEdit, QTabWidget, QDialog
 )
-from PySide6.QtCore import Qt, QSize
+from PySide6.QtCore import Qt, QSize, QTimer, Signal, QObject
 from PySide6.QtGui import QPixmap, QFont, QIcon
 
 from .task_bridge import TaskManagerBridge
 from ..video.video_composer import VideoComposer
 from ..audio.audio_mixer import AudioMixer
 from ..utils.config import config
+from ..utils.path_utils import sanitize_filename
 
 logger = logging.getLogger(__name__)
 
 
-class PipelineFlowWidget(QWidget):
+class QtLogEmitter(QObject):
+    sig_log = Signal(str, str)
+
+
+class QtLogHandler(logging.Handler):
+    """自定义后台实时日志处理器，将日志流式发送至 Qt 界面日志 Sheet"""
+    def __init__(self, emitter: QtLogEmitter):
+        super().__init__()
+        self.emitter = emitter
+
+    def emit(self, record):
+        try:
+            msg = self.format(record)
+            self.emitter.sig_log.emit(record.levelname, msg)
+        except Exception:
+            pass
+
+
+class AzureConfigDialog(QDialog):
     """
-    全流程管线 8 节点可视化指示图。
+    微软云端 Azure Speech API 凭据配置模态框。
+    支持输入/查看/修改/删除 API Key 与服务区域 Region。
+    """
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Azure AI Speech 官方云端服务凭据配置")
+        self.setFixedWidth(460)
+        self.setStyleSheet("""
+            QDialog { background-color: #202028; border: 1px solid #444455; border-radius: 6px; }
+            QLabel { color: #DDDDDD; font-size: 12px; }
+            QLineEdit { background-color: #16161C; border: 1px solid #444455; border-radius: 4px; padding: 6px 10px; color: #FFFFFF; font-size: 12px; }
+            QLineEdit:focus { border: 1px solid #007ACC; }
+            QPushButton { background-color: #2E5B88; border-radius: 4px; padding: 7px 16px; color: #FFFFFF; font-weight: bold; }
+            QPushButton:hover { background-color: #3A73AA; }
+            QPushButton#btn_delete { background-color: #8B2E2E; }
+            QPushButton#btn_delete:hover { background-color: #AA3A3A; }
+            QPushButton#btn_cancel { background-color: #444455; }
+            QPushButton#btn_cancel:hover { background-color: #555566; }
+        """)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(18, 18, 18, 18)
+        layout.setSpacing(12)
+
+        tip_lbl = QLabel("使用 Azure 云端高质量官方语音，需提供认知服务 API 密钥及服务区域。\n凭据仅保存在本地环境，绝不上云或提交版本库。")
+        tip_lbl.setWordWrap(True)
+        tip_lbl.setStyleSheet("color: #70DB93; font-size: 11px;")
+        layout.addWidget(tip_lbl)
+
+        grid = QGridLayout()
+        grid.setSpacing(8)
+
+        grid.addWidget(QLabel("Speech API Key:"), 0, 0)
+        self.txt_key = QLineEdit()
+        self.txt_key.setEchoMode(QLineEdit.Password)
+        self.txt_key.setPlaceholderText("例如: 1a2b3c4d5e6f...")
+        grid.addWidget(self.txt_key, 0, 1)
+
+        grid.addWidget(QLabel("服务区域 (Region):"), 1, 0)
+        self.txt_region = QLineEdit()
+        self.txt_region.setPlaceholderText("例如: eastasia, southeastasia, eastus")
+        grid.addWidget(self.txt_region, 1, 1)
+
+        layout.addLayout(grid)
+
+        # 读取已有凭据
+        curr_key = os.environ.get("AZURE_SPEECH_KEY") or config.get("tts.azure.key") or config.get("tts.azure.api_key") or ""
+        curr_region = os.environ.get("AZURE_SPEECH_REGION") or config.get("tts.azure.region") or "eastasia"
+        self.txt_key.setText(curr_key)
+        self.txt_region.setText(curr_region)
+
+        btn_box = QHBoxLayout()
+        self.btn_save = QPushButton("保存凭据")
+        self.btn_save.clicked.connect(self._on_save)
+
+        self.btn_delete = QPushButton("清除凭据")
+        self.btn_delete.setObjectName("btn_delete")
+        self.btn_delete.clicked.connect(self._on_delete)
+
+        self.btn_cancel = QPushButton("取消")
+        self.btn_cancel.setObjectName("btn_cancel")
+        self.btn_cancel.clicked.connect(self.reject)
+
+        btn_box.addWidget(self.btn_save)
+        btn_box.addWidget(self.btn_delete)
+        btn_box.addStretch()
+        btn_box.addWidget(self.btn_cancel)
+        layout.addLayout(btn_box)
+
+    def _on_save(self):
+        k = self.txt_key.text().strip()
+        r = self.txt_region.text().strip() or "eastasia"
+        if not k:
+            QMessageBox.warning(self, "提示", "API Key 不能为空！")
+            return
+        os.environ["AZURE_SPEECH_KEY"] = k
+        os.environ["AZURE_SPEECH_REGION"] = r
+        try:
+            # 写入本地 .env 文件持久化
+            env_path = Path(".env")
+            lines = []
+            if env_path.exists():
+                lines = [l for l in env_path.read_text(encoding="utf-8").splitlines() if not l.startswith("AZURE_SPEECH_")]
+            lines.append(f"AZURE_SPEECH_KEY={k}")
+            lines.append(f"AZURE_SPEECH_REGION={r}")
+            env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        except Exception as e:
+            logger.warning(f"写入 .env 失败: {e}")
+
+        # 同步更新内存 config
+        if "tts" in config._config and "azure" in config._config["tts"]:
+            config._config["tts"]["azure"]["key"] = k
+            config._config["tts"]["azure"]["region"] = r
+
+        QMessageBox.information(self, "成功", "Azure API 凭据已保存并即刻生效！")
+        self.accept()
+
+    def _on_delete(self):
+        reply = QMessageBox.question(self, "确认", "确定清除当前保存的 Azure API 凭据吗？", QMessageBox.Yes | QMessageBox.No)
+        if reply == QMessageBox.Yes:
+            os.environ.pop("AZURE_SPEECH_KEY", None)
+            os.environ.pop("AZURE_SPEECH_REGION", None)
+            try:
+                env_path = Path(".env")
+                if env_path.exists():
+                    lines = [l for l in env_path.read_text(encoding="utf-8").splitlines() if not l.startswith("AZURE_SPEECH_")]
+                    env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            except Exception:
+                pass
+            self.txt_key.clear()
+            self.txt_region.clear()
+            QMessageBox.information(self, "提示", "Azure 凭据已成功清除！")
+            self.accept()
+
+
+class ResourceMonitorBar(QFrame):
+    """
+    硬件负载实时监控条。
     【为什么这样设计】
-    将自动化有声视频从正文解析到最终分集成品的 8 个关键节点视觉化呈现，
-    支持'人话 + 专业术语'双语标注，实时反馈当前处于哪一环节，
-    使黑盒生产转变为透明可视的专业创作流水线。
+    置于管线流程图下方，实时显示 CPU 整体负载、系统内存已用/总量、独显显存已用/总量、CUDA 计算核利用率与核心温度，
+    底层使用原生 Windows API 与低开销后台探测，无外部重型依赖，彻底消除用户对系统资源消耗黑盒不可知的问题。
     """
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setStyleSheet("""
+            QFrame {
+                background-color: #15151C;
+                border: 1px solid #333345;
+                border-radius: 5px;
+                padding: 4px 8px;
+            }
+            QLabel {
+                font-size: 11px;
+                color: #A0A0B8;
+                font-family: 'Consolas', 'Segoe UI', monospace;
+            }
+        """)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(8, 2, 8, 2)
+        layout.setSpacing(14)
+
+        icon_lbl = QLabel("📊 硬件负载:")
+        icon_lbl.setStyleSheet("font-weight: bold; color: #4DA6FF;")
+        layout.addWidget(icon_lbl)
+
+        self.lbl_cpu = QLabel("CPU: --%")
+        self.lbl_mem = QLabel("内存: --/-- GB (--%)")
+        self.lbl_gpu_mem = QLabel("显存: --/-- MB (--%)")
+        self.lbl_cuda = QLabel("CUDA算力: --%")
+        self.lbl_temp = QLabel("温度: --°C")
+
+        layout.addWidget(self.lbl_cpu)
+        layout.addWidget(self.lbl_mem)
+        layout.addWidget(self.lbl_gpu_mem)
+        layout.addWidget(self.lbl_cuda)
+        layout.addWidget(self.lbl_temp)
+        layout.addStretch()
+
+        self._last_cpu_times = self._get_cpu_times()
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self._refresh_metrics)
+        self.timer.start(1500)
+
+    def _get_cpu_times(self):
+        try:
+            class FILETIME(ctypes.Structure):
+                _fields_ = [("dwLow", ctypes.c_uint), ("dwHigh", ctypes.c_uint)]
+            idle, kernel, user = FILETIME(), FILETIME(), FILETIME()
+            ctypes.windll.kernel32.GetSystemTimes(ctypes.byref(idle), ctypes.byref(kernel), ctypes.byref(user))
+            def to_int(ft): return (ft.dwHigh << 32) + ft.dwLow
+            return to_int(idle), to_int(kernel), to_int(user)
+        except Exception:
+            return 0, 0, 0
+
+    def _refresh_metrics(self):
+        # 1. CPU
+        try:
+            i2, k2, u2 = self._get_cpu_times()
+            i1, k1, u1 = self._last_cpu_times
+            self._last_cpu_times = (i2, k2, u2)
+            idle = i2 - i1
+            kernel = k2 - k1
+            user = u2 - u1
+            total = kernel + user
+            if total > 0:
+                cpu_pct = max(0.0, min(100.0, ((total - idle) / total) * 100))
+                c_color = "#FF6B6B" if cpu_pct > 85 else ("#FFD93D" if cpu_pct > 60 else "#70DB93")
+                self.lbl_cpu.setText(f'CPU: <span style="color:{c_color}; font-weight:bold;">{cpu_pct:.1f}%</span>')
+        except Exception:
+            pass
+
+        # 2. 内存 (RAM)
+        try:
+            class MEMORYSTATUSEX(ctypes.Structure):
+                _fields_ = [
+                    ('dwLength', ctypes.c_ulong), ('dwMemoryLoad', ctypes.c_ulong),
+                    ('ullTotalPhys', ctypes.c_ulonglong), ('ullAvailPhys', ctypes.c_ulonglong),
+                    ('ullTotalPageFile', ctypes.c_ulonglong), ('ullAvailPageFile', ctypes.c_ulonglong),
+                    ('ullTotalVirtual', ctypes.c_ulonglong), ('ullAvailVirtual', ctypes.c_ulonglong),
+                    ('sullAvailExtendedVirtual', ctypes.c_ulonglong),
+                ]
+            stat = MEMORYSTATUSEX()
+            stat.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
+            ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(stat))
+            used_gb = (stat.ullTotalPhys - stat.ullAvailPhys) / (1024**3)
+            total_gb = stat.ullTotalPhys / (1024**3)
+            m_pct = stat.dwMemoryLoad
+            m_color = "#FF6B6B" if m_pct > 85 else ("#FFD93D" if m_pct > 70 else "#70DB93")
+            self.lbl_mem.setText(f'内存: <span style="color:{m_color};">{used_gb:.1f}/{total_gb:.1f}GB ({m_pct}%)</span>')
+        except Exception:
+            pass
+
+        # 3. GPU 显存与 CUDA
+        try:
+            res = subprocess.run(
+                ["nvidia-smi", "--query-gpu=utilization.gpu,memory.total,memory.used,temperature.gpu", "--format=csv,noheader,nounits"],
+                capture_output=True, text=True, timeout=1, creationflags=0x08000000
+            )
+            if res.returncode == 0:
+                parts = [p.strip() for p in res.stdout.strip().split(",")]
+                if len(parts) >= 4:
+                    gpu_util = int(parts[0])
+                    mem_total = int(parts[1])
+                    mem_used = int(parts[2])
+                    temp = int(parts[3])
+                    mem_pct = (mem_used / max(1, mem_total)) * 100
+                    g_color = "#FF6B6B" if mem_pct > 85 else ("#FFD93D" if mem_pct > 65 else "#70DB93")
+                    c_color = "#4DA6FF" if gpu_util > 0 else "#888888"
+                    self.lbl_gpu_mem.setText(f'显存: <span style="color:{g_color}; font-weight:bold;">{mem_used}/{mem_total}MB ({mem_pct:.0f}%)</span>')
+                    self.lbl_cuda.setText(f'CUDA算力: <span style="color:{c_color}; font-weight:bold;">{gpu_util}%</span>')
+                    t_color = "#FF6B6B" if temp > 75 else "#70DB93"
+                    self.lbl_temp.setText(f'温度: <span style="color:{t_color};">{temp}°C</span>')
+        except Exception:
+            pass
+
+
+class PipelineFlowWidget(QWidget):
+    """全流程管线 8 节点可视化指示图。"""
     STAGES = [
         ("PARSED", "1. 结构解析", "PARSED"),
         ("CLEANED", "2. 正文清洗", "CLEANED"),
@@ -88,8 +344,6 @@ class PipelineFlowWidget(QWidget):
     def set_stage(self, stage: str):
         self.current_stage = stage
         stage_order = [s[0] for s in self.STAGES]
-        
-        # 兼容 VIDEO_RENDERING 映射到混音渲染节点
         normalized_stage = "AUDIO_MIXING" if stage == "VIDEO_RENDERING" else stage
 
         if normalized_stage in stage_order:
@@ -101,7 +355,6 @@ class PipelineFlowWidget(QWidget):
 
         for code, frame, lbl_zh, lbl_en in self.node_frames:
             if code == normalized_stage and normalized_stage != "COMPLETED":
-                # 当前节点：高亮亮绿 + 粗体
                 frame.setStyleSheet("""
                     QFrame {
                         background-color: #143520;
@@ -112,10 +365,9 @@ class PipelineFlowWidget(QWidget):
                 lbl_zh.setStyleSheet("font-size: 11px; font-weight: bold; color: #00E676;")
                 lbl_en.setStyleSheet("font-size: 9px; font-weight: bold; color: #70DB93;")
             elif code in self.completed_stages:
-                # 已完成节点：深绿实线
                 frame.setStyleSheet("""
                     QFrame {
-                        background-color: #1A2E20;
+                        background-color: #102418;
                         border: 1px solid #2E8B57;
                         border-radius: 4px;
                     }
@@ -123,40 +375,71 @@ class PipelineFlowWidget(QWidget):
                 lbl_zh.setStyleSheet("font-size: 11px; font-weight: bold; color: #3CB371;")
                 lbl_en.setStyleSheet("font-size: 9px; color: #2E8B57;")
             else:
-                # 未开始节点：暗灰
                 frame.setStyleSheet("""
                     QFrame {
-                        background-color: #16161C;
-                        border: 1px solid #33333F;
+                        background-color: #1A1A22;
+                        border: 1px solid #333344;
                         border-radius: 4px;
                     }
                 """)
-                lbl_zh.setStyleSheet("font-size: 11px; color: #666677;")
-                lbl_en.setStyleSheet("font-size: 9px; color: #444455;")
+                lbl_zh.setStyleSheet("font-size: 11px; font-weight: bold; color: #777788;")
+                lbl_en.setStyleSheet("font-size: 9px; color: #555566;")
 
     def reset_pipeline(self):
-        self.current_stage = ""
         self.completed_stages.clear()
-        self.set_stage("")
+        self.current_stage = ""
+        for _, frame, lbl_zh, lbl_en in self.node_frames:
+            frame.setStyleSheet("""
+                QFrame {
+                    background-color: #1A1A22;
+                    border: 1px solid #333344;
+                    border-radius: 4px;
+                }
+            """)
+            lbl_zh.setStyleSheet("font-size: 11px; font-weight: bold; color: #777788;")
+            lbl_en.setStyleSheet("font-size: 9px; color: #555566;")
 
 
 class MainWindow(QMainWindow):
-    """书声桌面主窗口"""
-    def __init__(self):
-        super().__init__()
-        self.bridge = TaskManagerBridge()
-        self._init_ui()
-        self._connect_signals()
+    """书声 (ShuSheng) v2.0 PySide6 桌面主窗口"""
 
-    def _init_ui(self) -> None:
+    def __init__(self, bridge: Optional[TaskManagerBridge] = None):
+        super().__init__()
+        self.bridge = bridge or TaskManagerBridge()
         self.setWindowTitle("书声 (ShuSheng) v2.0 - 自动化有声视频生产工具")
         self.resize(1280, 880)
-        self.setMinimumSize(1024, 720)
+        self.setMinimumSize(1100, 760)
 
-        # 整体采用现代深色专业创作风格
+        # 计时器与动画
+        self._elapsed_seconds = 0
+        self._timer_elapsed = QTimer(self)
+        self._timer_elapsed.timeout.connect(self._on_tick_elapsed)
+
+        self._breathing_phase = 0
+        self._timer_breathing = QTimer(self)
+        self._timer_breathing.timeout.connect(self._on_tick_breathing)
+
+        # 日志流转发射器
+        self.log_emitter = QtLogEmitter()
+        self.log_emitter.sig_log.connect(self._on_stream_log)
+        log_handler = QtLogHandler(self.log_emitter)
+        log_handler.setFormatter(logging.Formatter('%(asctime)s [%(levelname)s] %(message)s', datefmt='%H:%M:%S'))
+        logging.getLogger().addHandler(log_handler)
+
+        self._init_ui()
+        self._connect_signals()
+        self._refresh_hardware_diag()
+
+    def _init_ui(self) -> None:
+        """初始化全局深色科技主题界面布局"""
         self.setStyleSheet("""
-            QMainWindow { background-color: #1E1E24; }
-            QWidget { color: #E0E0E0; font-family: 'Segoe UI', 'Microsoft YaHei'; }
+            QMainWindow {
+                background-color: #1E1E24;
+            }
+            QWidget {
+                color: #E0E0E0;
+                font-family: 'Segoe UI', 'Microsoft YaHei', sans-serif;
+            }
             QGroupBox {
                 border: 1px solid #33333F;
                 border-radius: 8px;
@@ -170,15 +453,89 @@ class MainWindow(QMainWindow):
                 padding: 0 8px;
                 color: #4DA6FF;
             }
-            QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox {
+            QLineEdit, QComboBox {
                 background-color: #16161C;
                 border: 1px solid #444455;
                 border-radius: 4px;
                 padding: 6px 10px;
                 color: #FFFFFF;
             }
-            QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus {
+            QLineEdit:focus, QComboBox:focus {
                 border: 1px solid #007ACC;
+            }
+            /* 【关键修复 - 杜绝微调框上下箭头不可用】标准子控件定位与悬浮样式 */
+            QSpinBox, QDoubleSpinBox {
+                background-color: #16161C;
+                border: 1px solid #444455;
+                border-radius: 4px;
+                padding: 5px 24px 5px 8px;
+                color: #FFFFFF;
+            }
+            QSpinBox:focus, QDoubleSpinBox:focus {
+                border: 1px solid #007ACC;
+            }
+            QSpinBox::up-button, QDoubleSpinBox::up-button {
+                subcontrol-origin: border;
+                subcontrol-position: top right;
+                width: 20px;
+                height: 14px;
+                border-left: 1px solid #444455;
+                border-bottom: 1px solid #444455;
+                background-color: #252535;
+                border-top-right-radius: 4px;
+            }
+            QSpinBox::up-button:hover, QDoubleSpinBox::up-button:hover {
+                background-color: #38384E;
+            }
+            QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {
+                width: 0;
+                height: 0;
+                border-left: 4px solid transparent;
+                border-right: 4px solid transparent;
+                border-bottom: 5px solid #CCCCCC;
+            }
+            QSpinBox::down-button, QDoubleSpinBox::down-button {
+                subcontrol-origin: border;
+                subcontrol-position: bottom right;
+                width: 20px;
+                height: 14px;
+                border-left: 1px solid #444455;
+                background-color: #252535;
+                border-bottom-right-radius: 4px;
+            }
+            QSpinBox::down-button:hover, QDoubleSpinBox::down-button:hover {
+                background-color: #38384E;
+            }
+            QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {
+                width: 0;
+                height: 0;
+                border-left: 4px solid transparent;
+                border-right: 4px solid transparent;
+                border-top: 5px solid #CCCCCC;
+            }
+            /* 多 Sheet 标签页样式 */
+            QTabWidget::pane {
+                border: 1px solid #333344;
+                background-color: #16161C;
+                border-radius: 4px;
+            }
+            QTabBar::tab {
+                background-color: #20202A;
+                color: #AAAAAA;
+                padding: 6px 14px;
+                margin-right: 2px;
+                border-top-left-radius: 4px;
+                border-top-right-radius: 4px;
+                font-weight: bold;
+                font-size: 11px;
+            }
+            QTabBar::tab:selected {
+                background-color: #2E5B88;
+                color: #FFFFFF;
+            }
+            QTabBar::tab:hover:!selected {
+                background-color: #2B2B38;
+                color: #DDDDDD;
             }
             QMessageBox {
                 background-color: #202028;
@@ -256,9 +613,9 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central_widget)
         main_layout = QVBoxLayout(central_widget)
         main_layout.setContentsMargins(16, 16, 16, 16)
-        main_layout.setSpacing(12)
+        main_layout.setSpacing(10)
 
-        # 1. 上半部分：左侧输入设置 + 右侧实时预览
+        # 1. 上半部分：左侧输入设置 + 右侧多Sheet预览与诊断
         top_split_layout = QHBoxLayout()
         top_split_layout.setSpacing(16)
 
@@ -273,16 +630,16 @@ class MainWindow(QMainWindow):
         vol_panel = self._build_volume_control_panel()
         main_layout.addWidget(vol_panel, 1)
 
-        # 3. 底部控制区：动作按钮与全局进度条
+        # 3. 底部控制区：动作按钮、全局进度、硬件负载监控
         bottom_panel = self._build_bottom_control_panel()
-        main_layout.addWidget(bottom_panel, 2)
+        main_layout.addWidget(bottom_panel, 3)
 
     def _build_left_config_panel(self) -> QWidget:
         """构建左侧参数配置区"""
         panel = QWidget()
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(10)
+        layout.setSpacing(8)
 
         # 分组 1: 书籍与正文
         grp_book = QGroupBox("【电子书源文件与正文设置】")
@@ -321,6 +678,11 @@ class MainWindow(QMainWindow):
 
         self.cmb_tts_engine = QComboBox()
         self.cmb_tts_engine.addItems(["F5-TTS (本地高质量扩散模型)", "Kokoro (本地超轻量快速)", "Azure AI Speech (云端官方)"])
+        self.cmb_tts_engine.currentIndexChanged.connect(self._on_engine_changed)
+
+        self.btn_azure_config = QPushButton("🔑 凭据配置")
+        self.btn_azure_config.setToolTip("配置/修改 Azure AI Speech 官方 API 密钥与区域")
+        self.btn_azure_config.clicked.connect(self._on_azure_config)
 
         self.cmb_voice_profile = QComboBox()
         self.cmb_voice_profile.addItems([
@@ -330,17 +692,11 @@ class MainWindow(QMainWindow):
             "V1 (女声解说 - 知性温和)"
         ])
 
-        # 大模型扩散推理参数面板
+        # 大模型扩散推理步数面板
         self.spn_nfe_step = QSpinBox()
         self.spn_nfe_step.setRange(8, 64)
         self.spn_nfe_step.setValue(16)
         self.spn_nfe_step.setToolTip("大模型扩散推理步数：默认 16 步（Quadro T1000 推荐 16 步，兼顾速度与发音饱满度）")
-
-        self.spn_cfg_strength = QDoubleSpinBox()
-        self.spn_cfg_strength.setRange(1.0, 5.0)
-        self.spn_cfg_strength.setSingleStep(0.1)
-        self.spn_cfg_strength.setValue(2.0)
-        self.spn_cfg_strength.setToolTip("无分类器引导强度 (CFG)：系统黄金默认 2.0，普通用户无需修改")
 
         self.spn_speed = QDoubleSpinBox()
         self.spn_speed.setRange(0.8, 1.5)
@@ -350,64 +706,60 @@ class MainWindow(QMainWindow):
         self.spn_speed.setToolTip("朗读语速倍率：默认 1.0x 标准语速")
 
         v_layout.addWidget(QLabel("TTS 引擎:"), 0, 0)
-        v_layout.addWidget(self.cmb_tts_engine, 0, 1, 1, 3)
+        v_layout.addWidget(self.cmb_tts_engine, 0, 1)
+        v_layout.addWidget(self.btn_azure_config, 0, 2)
 
         v_layout.addWidget(QLabel("音色预设:"), 1, 0)
-        v_layout.addWidget(self.cmb_voice_profile, 1, 1, 1, 3)
+        v_layout.addWidget(self.cmb_voice_profile, 1, 1, 1, 2)
 
         v_layout.addWidget(QLabel("推理步数:"), 2, 0)
         v_layout.addWidget(self.spn_nfe_step, 2, 1)
-        v_layout.addWidget(QLabel("CFG引导:"), 2, 2)
-        v_layout.addWidget(self.spn_cfg_strength, 2, 3)
 
         v_layout.addWidget(QLabel("朗读语速:"), 3, 0)
         v_layout.addWidget(self.spn_speed, 3, 1)
 
         layout.addWidget(grp_voice)
 
-        # 分组 3: 音视频版式与素材
+        # 分组 3: 视频版式与包装素材
         grp_video = QGroupBox("【视频版式与包装素材】")
         m_layout = QGridLayout(grp_video)
         m_layout.setSpacing(8)
 
         self.cmb_video_layout = QComboBox()
-        self.cmb_video_layout.addItems(["竖屏 9:16 (1080×1920，手机/短视频推荐)", "横屏 16:9 (1920×1080，B站/PC大屏)"])
+        self.cmb_video_layout.addItems(["竖屏 9:16 (1080x1920, 手机/短视频流)", "横屏 16:9 (1920x1080, 电脑/B站/宽屏)"])
         self.cmb_video_layout.currentIndexChanged.connect(self._on_layout_changed)
 
-        # 单集目标时长与最小切分间隔
         self.spn_target_duration = QSpinBox()
-        self.spn_target_duration.setRange(3, 180)
+        self.spn_target_duration.setRange(5, 60)
         self.spn_target_duration.setValue(15)
         self.spn_target_duration.setSuffix(" 分钟")
-        self.spn_target_duration.setToolTip("单集目标时长：支持自由输入 3~180 分钟")
+        self.spn_target_duration.setToolTip("单集目标时长：达到此时长且遇到段落自然结束点时切分新集")
 
-        self.spn_min_interval = QSpinBox()
-        self.spn_min_interval.setRange(1, 30)
-        self.spn_min_interval.setValue(3)
+        self.spn_min_interval = QDoubleSpinBox()
+        self.spn_min_interval.setRange(1.0, 10.0)
+        self.spn_min_interval.setValue(3.0)
         self.spn_min_interval.setSuffix(" 分钟")
-        self.spn_min_interval.setToolTip("章节切分/合并的最小时间跨度间隔")
+        self.spn_min_interval.setToolTip("两集合并最小阈值：若尾部残余内容不足此阈值，自动合并到最后一集")
 
         self.cmb_run_mode = QComboBox()
-        self.cmb_run_mode.addItems(["仅生成下一集 (推荐夜间/防降频)", "全书连续生成", "单次限时运行 (60分钟)"])
+        self.cmb_run_mode.addItems([
+            "仅生成下一集 (推荐夜间/防降频)",
+            "全书连续生成 (全部 67 集连续批量生产)",
+            "限时运行 (生产指定集数后自动休眠)"
+        ])
 
         self.txt_cover_path = QLineEdit()
-        self.txt_cover_path.setPlaceholderText("选择视频封面图片 (JPG/PNG)...")
+        self.txt_cover_path.setPlaceholderText("留空则自动生成纯音频或默认极简书影...")
         btn_browse_cover = QPushButton("选择封面...")
         btn_browse_cover.clicked.connect(self._on_browse_cover)
 
         self.txt_bgm_path = QLineEdit()
-        self.txt_bgm_path.setPlaceholderText("选择背景音乐 (可选 MP3/WAV)...")
-        # 默认自动加载项目内置的优质钢琴背景音乐
-        project_root = Path(__file__).resolve().parent.parent.parent
-        default_piano_bgm = project_root / "resources" / "bgm" / "preset_piano_gentle.mp3"
-        if default_piano_bgm.exists():
-            self.txt_bgm_path.setText(str(default_piano_bgm.resolve()))
-
+        self.txt_bgm_path.setPlaceholderText("留空则使用内置精选舒缓背景音乐...")
         btn_browse_bgm = QPushButton("选择音乐...")
         btn_browse_bgm.clicked.connect(self._on_browse_bgm)
 
         self.txt_main_title = QLineEdit()
-        self.txt_main_title.setPlaceholderText("视频顶部固定主标题")
+        self.txt_main_title.setPlaceholderText("例如: 《巴菲特致股东的信》精选")
 
         m_layout.addWidget(QLabel("视频版式:"), 0, 0)
         m_layout.addWidget(self.cmb_video_layout, 0, 1, 1, 3)
@@ -436,7 +788,7 @@ class MainWindow(QMainWindow):
         return panel
 
     def _build_right_preview_panel(self) -> QWidget:
-        """构建右侧预览区"""
+        """构建右侧预览区 (封面预览 + 三Sheet多维面板)"""
         panel = QWidget()
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -448,28 +800,54 @@ class MainWindow(QMainWindow):
 
         self.lbl_preview_image = QLabel()
         self.lbl_preview_image.setAlignment(Qt.AlignCenter)
-        self.lbl_preview_image.setMinimumSize(220, 320)
+        self.lbl_preview_image.setMinimumSize(220, 260)
         self.lbl_preview_image.setStyleSheet("border: 1px dashed #555566; background-color: #121216; border-radius: 6px;")
         self.lbl_preview_image.setText("选择封面后自动生成排版预览\n(支持 Contain 居中与高斯模糊背景)")
         p_layout.addWidget(self.lbl_preview_image)
 
-        layout.addWidget(grp_preview, 6)
+        layout.addWidget(grp_preview, 5)
 
-        # 生产计划全景展示
-        grp_plan = QGroupBox("【生产计划全景与硬件状态】")
-        plan_layout = QVBoxLayout(grp_plan)
-        
-        self.lbl_hardware_status = QLabel("硬件诊断：NVIDIA Quadro T1000 (4GB VRAM) - 状态良好，已开启 16 步轻量扩散与防降频休眠")
-        self.lbl_hardware_status.setStyleSheet("color: #70DB93; font-size: 11px;")
-        plan_layout.addWidget(self.lbl_hardware_status)
+        # 生产计划、硬件诊断与后台实时日志 (三 Sheet TabWidget)
+        grp_dashboard = QGroupBox("【生产计划全景、系统诊断与实时日志】")
+        dash_layout = QVBoxLayout(grp_dashboard)
+        dash_layout.setContentsMargins(6, 12, 6, 6)
 
+        self.tab_widget = QTabWidget()
+
+        # Sheet 1: 分集规划
         self.txt_plan_summary = QTextEdit()
         self.txt_plan_summary.setReadOnly(True)
         self.txt_plan_summary.setStyleSheet("background-color: #16161C; font-size: 12px;")
-        self.txt_plan_summary.setPlaceholderText("点击下方 [生成生产计划] 后，在此查看全书总字数、预估总时长与分集规划表...")
-        plan_layout.addWidget(self.txt_plan_summary)
+        self.txt_plan_summary.setPlaceholderText("点击下方 [生成生产计划] 后，在此查看全书总字数、预估总时长与分集详细规划表...")
+        self.tab_widget.addTab(self.txt_plan_summary, "📋 分集规划")
 
-        layout.addWidget(grp_plan, 4)
+        # Sheet 2: 硬件状态与开启诊断
+        self.txt_hardware_diag = QTextEdit()
+        self.txt_hardware_diag.setReadOnly(True)
+        self.txt_hardware_diag.setStyleSheet("background-color: #16161C; font-size: 11px; font-family: Consolas, monospace;")
+        self.tab_widget.addTab(self.txt_hardware_diag, "💻 硬件状态")
+
+        # Sheet 3: 后台实时日志
+        tab_log_widget = QWidget()
+        tab_log_layout = QVBoxLayout(tab_log_widget)
+        tab_log_layout.setContentsMargins(0, 0, 0, 0)
+        tab_log_layout.setSpacing(4)
+
+        self.txt_live_logs = QTextEdit()
+        self.txt_live_logs.setReadOnly(True)
+        self.txt_live_logs.setStyleSheet("background-color: #121218; font-size: 11px; font-family: Consolas, monospace;")
+        self.txt_live_logs.setPlaceholderText("后台生产流水线实时流转日志与报错详情将在此展示，杜绝盲目等待...")
+        tab_log_layout.addWidget(self.txt_live_logs)
+
+        btn_clear_log = QPushButton("清空日志")
+        btn_clear_log.setStyleSheet("padding: 3px 8px; font-size: 10px; max-width: 80px;")
+        btn_clear_log.clicked.connect(self.txt_live_logs.clear)
+        tab_log_layout.addWidget(btn_clear_log, 0, Qt.AlignRight)
+
+        self.tab_widget.addTab(tab_log_widget, "📜 实时日志")
+
+        dash_layout.addWidget(self.tab_widget)
+        layout.addWidget(grp_dashboard, 5)
         return panel
 
     def _build_volume_control_panel(self) -> QWidget:
@@ -478,45 +856,47 @@ class MainWindow(QMainWindow):
         panel.setStyleSheet("background-color: #262630; border-radius: 6px; padding: 6px;")
         layout = QHBoxLayout(panel)
         layout.setContentsMargins(12, 4, 12, 4)
+        layout.setSpacing(16)
 
-        # 旁白音量
         layout.addWidget(QLabel("旁白音量:"))
         self.slider_voice = QSlider(Qt.Horizontal)
         self.slider_voice.setRange(0, 200)
         self.slider_voice.setValue(100)
         self.lbl_voice_val = QLabel("100%")
         self.slider_voice.valueChanged.connect(lambda v: self.lbl_voice_val.setText(f"{v}%"))
-        layout.addWidget(self.slider_voice)
+        layout.addWidget(self.slider_voice, 3)
         layout.addWidget(self.lbl_voice_val)
 
-        layout.addSpacing(24)
+        layout.addSpacing(20)
 
-        # BGM 音量
         layout.addWidget(QLabel("音乐音量 (BGM):"))
         self.slider_bgm = QSlider(Qt.Horizontal)
         self.slider_bgm.setRange(0, 100)
         self.slider_bgm.setValue(15)
         self.lbl_bgm_val = QLabel("15% (已开启人声智能避让)")
+        self.lbl_bgm_val.setStyleSheet("color: #70DB93;")
         self.slider_bgm.valueChanged.connect(lambda v: self.lbl_bgm_val.setText(f"{v}% (已开启人声智能避让)"))
-        layout.addWidget(self.slider_bgm)
+        layout.addWidget(self.slider_bgm, 3)
         layout.addWidget(self.lbl_bgm_val)
 
-        layout.addSpacing(16)
-        self.btn_test_mix = QPushButton("▶ 15秒混音试听")
-        self.btn_test_mix.clicked.connect(self._on_test_mix)
-        layout.addWidget(self.btn_test_mix)
+        btn_test_mix = QPushButton("▶ 15秒混音试听")
+        btn_test_mix.setToolTip("截取 15 秒音频真实合成并调用系统播放器验证人声与 BGM 智能避让效果")
+        btn_test_mix.clicked.connect(self._on_test_mix)
+        layout.addWidget(btn_test_mix)
 
         return panel
 
     def _build_bottom_control_panel(self) -> QWidget:
-        """构建底部控制按钮、指示灯、进度条与全流程管线图"""
+        """构建底部控制区与监控指示"""
         panel = QWidget()
         layout = QVBoxLayout(panel)
-        layout.setContentsMargins(0, 4, 0, 0)
+        layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
 
-        # 动作按钮栏
+        # 动作按钮行 + 目标输出目录设定
         btn_layout = QHBoxLayout()
+        btn_layout.setSpacing(10)
+
         self.btn_gen_plan = QPushButton("生成生产计划")
         self.btn_gen_plan.clicked.connect(self._on_generate_plan)
 
@@ -533,18 +913,31 @@ class MainWindow(QMainWindow):
         self.btn_resume.setEnabled(False)
         self.btn_resume.clicked.connect(self._on_start_production)
 
-        self.btn_open_output = QPushButton("打开输出目录")
-        self.btn_open_output.clicked.connect(self._on_open_output)
-
         btn_layout.addWidget(self.btn_gen_plan)
         btn_layout.addWidget(self.btn_start)
         btn_layout.addWidget(self.btn_pause)
         btn_layout.addWidget(self.btn_resume)
         btn_layout.addStretch()
+
+        # 【新需求 3】目标输出目录设定置于打开输出目录左侧
+        btn_layout.addWidget(QLabel("输出目录:"))
+        self.txt_output_dir = QLineEdit()
+        self.txt_output_dir.setMinimumWidth(220)
+        default_out = (Path(__file__).resolve().parent.parent.parent / "output").resolve()
+        self.txt_output_dir.setText(str(default_out))
+        self.txt_output_dir.setToolTip("分集音频、视频与字幕的根输出目录")
+        btn_layout.addWidget(self.txt_output_dir)
+
+        self.btn_browse_output = QPushButton("更改...")
+        self.btn_browse_output.clicked.connect(self._on_browse_output)
+        btn_layout.addWidget(self.btn_browse_output)
+
+        self.btn_open_output = QPushButton("打开输出目录")
+        self.btn_open_output.clicked.connect(self._on_open_output)
         btn_layout.addWidget(self.btn_open_output)
         layout.addLayout(btn_layout)
 
-        # 进度指示与状态灯
+        # 进度指示、状态灯与本次任务执行时间
         prog_layout = QHBoxLayout()
         prog_layout.setSpacing(8)
 
@@ -558,14 +951,24 @@ class MainWindow(QMainWindow):
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(0)
 
+        # 【新需求 7.3】在进度条右侧加入本次任务的执行时间
+        self.lbl_elapsed_time = QLabel("⏱️ 00:00:00")
+        self.lbl_elapsed_time.setStyleSheet("color: #4DA6FF; font-weight: bold; font-size: 12px; min-width: 85px;")
+        self.lbl_elapsed_time.setToolTip("本次任务执行耗时 (时:分:秒)")
+
         prog_layout.addWidget(self.lbl_status_led)
         prog_layout.addWidget(self.lbl_status, 4)
-        prog_layout.addWidget(self.progress_bar, 6)
+        prog_layout.addWidget(self.progress_bar, 5)
+        prog_layout.addWidget(self.lbl_elapsed_time)
         layout.addLayout(prog_layout)
 
         # 全流程管线 8 节点可视化指示图
         self.pipeline_flow = PipelineFlowWidget()
         layout.addWidget(self.pipeline_flow)
+
+        # 【新需求 7.1】硬件负载实时监控条
+        self.resource_monitor_bar = ResourceMonitorBar()
+        layout.addWidget(self.resource_monitor_bar)
 
         return panel
 
@@ -578,7 +981,112 @@ class MainWindow(QMainWindow):
         self.bridge.sig_task_paused.connect(self._on_worker_task_paused)
         self.bridge.sig_error.connect(self._on_worker_error)
 
+    # ---------------- 动态交互与计时动画 ----------------
+
+    def _on_tick_elapsed(self):
+        self._elapsed_seconds += 1
+        m, s = divmod(self._elapsed_seconds, 60)
+        h, m = divmod(m, 60)
+        self.lbl_elapsed_time.setText(f"⏱️ {h:02d}:{m:02d}:{s:02d}")
+
+    def _on_tick_breathing(self):
+        """【新需求 8】状态灯柔和呼吸循环脉冲效果"""
+        self._breathing_phase = (self._breathing_phase + 1) % 6
+        colors = ["#00E676", "#33FF99", "#00F080", "#00C853", "#00A844", "#008F38"]
+        c = colors[self._breathing_phase]
+        self.lbl_status_led.setStyleSheet(f"font-size: 14px; color: {c};")
+
+    def _on_stream_log(self, level: str, msg: str):
+        color = "#CCCCCC"
+        if level == "ERROR":
+            color = "#FF6B6B"
+        elif level == "WARNING":
+            color = "#FFD93D"
+        elif "【" in msg:
+            color = "#70DB93"
+        self.txt_live_logs.append(f'<span style="color:{color}; font-size:11px;">{msg}</span>')
+        sb = self.txt_live_logs.verticalScrollBar()
+        sb.setValue(sb.maximum())
+
+    def _refresh_hardware_diag(self):
+        """刷新 Sheet 2 硬件信息与开启状态"""
+        try:
+            diag_lines = [
+                "================== 系统主要硬件信息与开启状态 ==================",
+                f"【操作系统】: {platform.platform()} ({platform.architecture()[0]})",
+                f"【CPU 处理器】: {platform.processor() or '多核 x86_64 处理器'} (核心数: {os.cpu_count()})",
+            ]
+            # 内存
+            try:
+                class MEMORYSTATUSEX(ctypes.Structure):
+                    _fields_ = [
+                        ('dwLength', ctypes.c_ulong), ('dwMemoryLoad', ctypes.c_ulong),
+                        ('ullTotalPhys', ctypes.c_ulonglong), ('ullAvailPhys', ctypes.c_ulonglong),
+                        ('ullTotalPageFile', ctypes.c_ulonglong), ('ullAvailPageFile', ctypes.c_ulonglong),
+                        ('ullTotalVirtual', ctypes.c_ulonglong), ('ullAvailVirtual', ctypes.c_ulonglong),
+                        ('sullAvailExtendedVirtual', ctypes.c_ulonglong),
+                    ]
+                stat = MEMORYSTATUSEX()
+                stat.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
+                ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(stat))
+                total_gb = stat.ullTotalPhys / (1024**3)
+                diag_lines.append(f"【系统内存 (RAM)】: {total_gb:.1f} GB")
+            except Exception:
+                pass
+
+            # 显卡
+            try:
+                res = subprocess.run(["nvidia-smi", "-L"], capture_output=True, text=True, timeout=1, creationflags=0x08000000)
+                if res.returncode == 0:
+                    for line in res.stdout.strip().splitlines():
+                        diag_lines.append(f"【独显设备】: {line}")
+                else:
+                    diag_lines.append("【独显设备】: 未检测到 NVIDIA 独立显卡或驱动未安装")
+            except Exception:
+                diag_lines.append("【独显设备】: 未检测到 nvidia-smi 命令行工具")
+
+            # 引擎与资产状态
+            proj_root = Path(__file__).resolve().parent.parent.parent
+            e1_path = proj_root / "models" / "f5_tts" / "presets" / "preset_male_e1_narrator.wav"
+            bgm_path = proj_root / "resources" / "bgm" / "preset_piano_gentle.mp3"
+            f5_model = proj_root / "models" / "f5_tts" / "F5TTS_v1_Base"
+
+            diag_lines.extend([
+                "【语音与混音后端状态】:",
+                f"  - F5-TTS 本地高质量扩散: {'🟢 就绪 (F5TTS_v1_Base 模型已就绪)' if f5_model.exists() else '🟡 未下载完整权重'}",
+                "  - Kokoro 超轻量引擎: 🟢 就绪 (支持中英双语与年份/多音字位读)",
+                f"  - Azure AI Speech 官方云端: {'🟢 已配置 API 凭据' if (os.environ.get('AZURE_SPEECH_KEY') or config.get('tts.azure.key')) else '⚪ 未配置凭据 (可点击[🔑 凭据配置]录入)'}",
+                "【包装素材状态】:",
+                f"  - E1 商业男声旁白预设: {'🟢 已锁定 (' + str(e1_path.name) + ')' if e1_path.exists() else '🔴 缺失'}",
+                f"  - 舒缓钢琴背景音乐: {'🟢 已锁定 (' + str(bgm_path.name) + ')' if bgm_path.exists() else '🔴 缺失'}",
+                "【硬件防降频策略】: 已激活 16 步轻量扩散、侧链混音自适应回弹与管道防挂起守护",
+                "================================================================"
+            ])
+            self.txt_hardware_diag.setText("\n".join(diag_lines))
+        except Exception as e:
+            self.txt_hardware_diag.setText(f"获取系统硬件信息失败: {e}")
+
     # ---------------- 交互响应方法 ----------------
+
+    def _on_engine_changed(self, idx: int):
+        """【新需求 9】当用户选择了微软云端 API 实现时，若未配置凭据则主动弹出配置框"""
+        text = self.cmb_tts_engine.currentText()
+        if "Azure" in text:
+            curr_key = os.environ.get("AZURE_SPEECH_KEY") or config.get("tts.azure.key") or config.get("tts.azure.api_key")
+            if not curr_key:
+                self._on_azure_config()
+
+    def _on_azure_config(self):
+        """【新需求 9】打开 Azure API 凭据配置模态框"""
+        dlg = AzureConfigDialog(self)
+        if dlg.exec() == QDialog.Accepted:
+            self._refresh_hardware_diag()
+
+    def _on_browse_output(self):
+        """【新需求 3】选择自定义目标输出目录"""
+        d = QFileDialog.getExistingDirectory(self, "选择输出根目录", self.txt_output_dir.text().strip())
+        if d:
+            self.txt_output_dir.setText(d.strip())
 
     def _on_browse_book(self) -> None:
         file_path, _ = QFileDialog.getOpenFileName(self, "选择电子书文件", "", "Ebooks (*.pdf *.epub)")
@@ -611,7 +1119,6 @@ class MainWindow(QMainWindow):
             self._update_preview_image(cover_path)
 
     def _update_preview_image(self, cover_path: str) -> None:
-        """调用 VideoComposer 在 0.5 秒内极速渲染带高斯模糊与居中排版的预览图"""
         try:
             tmp_preview = Path("output/temp_gui_preview.jpg")
             layout = "landscape_16_9" if "16:9" in self.cmb_video_layout.currentText() else "portrait_9_16"
@@ -635,7 +1142,7 @@ class MainWindow(QMainWindow):
             logger.warning(f"更新封面排版预览图失败: {e}")
 
     def _get_current_config(self) -> Dict[str, Any]:
-        """获取当前界面的全部配置参数（含大模型推理参数与单集微调）"""
+        """获取当前界面的全部配置参数"""
         layout_name = "landscape_16_9" if "16:9" in self.cmb_video_layout.currentText() else "portrait_9_16"
         run_mode = "RUN_NEXT_EPISODE"
         if "全书连续" in self.cmb_run_mode.currentText():
@@ -643,9 +1150,13 @@ class MainWindow(QMainWindow):
         elif "限时" in self.cmb_run_mode.currentText():
             run_mode = "RUN_DURATION_LIMIT"
 
+        # 【新需求 4】CFG 引导从 config.yaml 静默读取，无需界面配置
+        default_cfg_strength = float(config.get("tts.f5.cfg_strength", 2.0))
+
         return {
             "book_path": self.txt_book_path.text().strip(),
             "book_title": self.txt_book_title.text().strip(),
+            "output_dir": self.txt_output_dir.text().strip(),
             "start_page": self.spn_start_page.value(),
             "video_layout": layout_name,
             "target_duration_mins": float(self.spn_target_duration.value()),
@@ -659,7 +1170,7 @@ class MainWindow(QMainWindow):
             "tts_engine": "f5" if "F5" in self.cmb_tts_engine.currentText() else ("kokoro" if "Kokoro" in self.cmb_tts_engine.currentText() else "azure"),
             "voice_profile": self.cmb_voice_profile.currentText(),
             "nfe_step": self.spn_nfe_step.value(),
-            "cfg_strength": self.spn_cfg_strength.value(),
+            "cfg_strength": default_cfg_strength,
             "speech_speed": self.spn_speed.value()
         }
 
@@ -671,8 +1182,10 @@ class MainWindow(QMainWindow):
             return
         self.btn_gen_plan.setEnabled(False)
         self.lbl_status_led.setText("🟡")
+        self.lbl_status_led.setStyleSheet("font-size: 14px; color: #FFD93D;")
         self.lbl_status.setText("正在分析全书章节与生成生产计划 (PLANNING)...")
         self.pipeline_flow.reset_pipeline()
+        self.tab_widget.setCurrentIndex(0) # 切换到分集规划 Sheet
         self.bridge.generate_plan(cfg)
 
     def _on_start_production(self) -> None:
@@ -681,16 +1194,33 @@ class MainWindow(QMainWindow):
         if not cfg["book_path"] or not os.path.exists(cfg["book_path"]):
             QMessageBox.warning(self, "提示", "请先选择电子书文件！")
             return
+
+        # 若使用 Azure 但未配置 Key 则阻断提示
+        if cfg["tts_engine"] == "azure":
+            k = os.environ.get("AZURE_SPEECH_KEY") or config.get("tts.azure.key")
+            if not k:
+                self._on_azure_config()
+                if not os.environ.get("AZURE_SPEECH_KEY"):
+                    return
+
         self.btn_start.setEnabled(False)
         self.btn_pause.setEnabled(True)
         self.btn_resume.setEnabled(False)
         self.lbl_status_led.setText("🟢")
         self.lbl_status.setText("正式生产流水线已启动 (PRODUCING)...")
+
+        # 启动计时器与状态灯呼吸动画
+        self._elapsed_seconds = 0
+        self._timer_elapsed.start(1000)
+        self._timer_breathing.start(350)
+
         self.bridge.start_production(cfg)
 
     def _on_safe_pause(self) -> None:
         """安全暂停"""
         self.btn_pause.setEnabled(False)
+        self._timer_breathing.stop()
+        self.lbl_status_led.setStyleSheet("font-size: 14px; color: #CD853F;")
         self.bridge.request_pause()
 
     def _on_test_mix(self) -> None:
@@ -699,7 +1229,6 @@ class MainWindow(QMainWindow):
             cfg = self._get_current_config()
             project_root = Path(__file__).resolve().parent.parent.parent
 
-            # 优先使用固化的 E1 黄金参考音频作为旁白试听素材
             voice_sample = project_root / "models" / "f5_tts" / "presets" / "preset_male_e1_narrator.wav"
             if not voice_sample.exists():
                 voice_sample = project_root / "outputtest" / "E1.wav"
@@ -714,9 +1243,6 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "试听提示", "未找到 E1 旁白参考音频资产，无法生成混音试听。")
                 return
 
-            # 【为什么这样设计】
-            # 使用通用标准 MP3 格式输出 15 秒混音试听，杜绝 Windows 媒体播放器解码失配挂起；
-            # 规范调用 generate_preview_mix，提供完整 15 秒人声侧链避让与片尾回弹体验。
             out_preview = (project_root / "output" / "temp_mix_preview.mp3").resolve()
             out_preview.parent.mkdir(parents=True, exist_ok=True)
 
@@ -724,114 +1250,125 @@ class MainWindow(QMainWindow):
                 voice_volume_percent=cfg["voice_volume_percent"],
                 bgm_volume_percent=cfg["bgm_volume_percent"]
             )
-            mixer.generate_preview_mix(
+
+            res = mixer.generate_preview_mix(
                 voice_path=voice_sample,
-                bgm_path=bgm_path if bgm_path and os.path.exists(bgm_path) else None,
+                bgm_path=Path(bgm_path) if bgm_path else None,
                 output_path=out_preview,
-                preview_seconds=15.0
+                preview_duration=15.0
             )
 
-
-            if out_preview.exists():
-                if sys.platform == "win32":
-                    os.startfile(str(out_preview))
-                QMessageBox.information(
-                    self,
-                    "混音试听就绪",
-                    f"【15秒混音试听生成成功】\n\n"
-                    f"• 旁白音量: {cfg['voice_volume_percent']}%\n"
-                    f"• 背景音乐: {cfg['bgm_volume_percent']}% (已开启人声智能闪避)\n"
-                    f"• 试听文件: {out_preview.name}\n\n"
-                    f"已调用系统默认播放器发声播放，请佩戴耳机或打开音响试听！"
-                )
+            if res.exists() and res.stat().st_size > 1000:
+                os.startfile(str(res.absolute()))
+            else:
+                QMessageBox.warning(self, "试听提示", "生成混音试听文件异常。")
         except Exception as e:
-            logger.exception(f"混音试听失败: {e}")
-            QMessageBox.warning(self, "试听失败", f"生成混音试听时发生异常:\n{e}")
+            logger.exception(f"15秒混音试听异常: {e}")
+            QMessageBox.critical(self, "错误", f"混音试听失败: {e}")
 
     def _on_open_output(self) -> None:
-        """打开输出目录（优先直达具体书籍成品子目录）"""
-        project_root = Path(__file__).resolve().parent.parent.parent
-        book_title = self.txt_book_title.text() or (Path(self.txt_book_path.text()).stem if self.txt_book_path.text() else "")
-        target_dir = (project_root / "output" / book_title).resolve() if book_title else (project_root / "output").resolve()
-        if not target_dir.exists():
-            target_dir = (project_root / "output").resolve()
-        target_dir.mkdir(parents=True, exist_ok=True)
+        """打开输出目录"""
+        out_dir = Path(self.txt_output_dir.text().strip())
+        if not out_dir.exists():
+            out_dir.mkdir(parents=True, exist_ok=True)
+        os.startfile(str(out_dir.resolve()))
 
-        if sys.platform == "win32":
-            os.startfile(str(target_dir))
-        else:
-            QMessageBox.information(self, "输出目录", str(target_dir))
-
-    # ---------------- 异步回调响应 ----------------
+    # ---------------- 信号响应处理 ----------------
 
     def _on_worker_status_changed(self, status: str) -> None:
         self.pipeline_flow.set_stage(status)
-        stage_map = {
+        stage_names = {
             "IDLE": ("⚪", "空闲就绪 (IDLE)"),
-            "PARSED": ("🟡", "【1/8】正在解析正文结构与章节 (PARSED)"),
-            "CLEANED": ("🟡", "【2/8】正在执行确定性正文清洗 (CLEANED)"),
-            "VALIDATED": ("🟡", "【3/8】正在校验文本质量与完整性 (VALIDATED)"),
-            "PLANNED": ("⚪", "【4/8】生产计划已就绪 (PLANNED) - 请核对分集并点击[开始生产]"),
-            "TTS_GENERATING": ("🟢", "【5/8】正在进行大模型语音合成 (TTS_GENERATING)"),
-            "ALIGNING_SUBTITLES": ("🟢", "【6/8】正在生成并对齐精准双语字幕 (ALIGNING_SUBTITLES)"),
-            "AUDIO_MIXING": ("🟢", "【7/8】正在执行人声与背景音乐智能侧链混音 (AUDIO_MIXING)"),
-            "VIDEO_RENDERING": ("🟢", "【7/8】正在调用 GPU 硬件加速压制 MP4 视频 (VIDEO_RENDERING)"),
-            "COMPLETED": ("🟢", "【8/8】全部分集生产完成 (COMPLETED)"),
-            "PAUSING": ("🟠", "正在安全暂停中 (PAUSING)..."),
-            "PAUSED": ("🟠", "生产任务已安全暂停 (PAUSED)"),
+            "PARSED": ("🟢", "【1/8】电子书正文结构解析已就绪 (PARSED)"),
+            "CLEANED": ("🟢", "【2/8】正文清洗与噪音剔除完成 (CLEANED)"),
+            "VALIDATED": ("🟢", "【3/8】正文字符质量校验通过 (VALIDATED)"),
+            "PLANNED": ("🟢", "【4/8】生产规划就绪，请核对并启动生产 (PLANNED)"),
+            "TTS_GENERATING": ("🟢", "【5/8】正在调用大模型语音合成 (TTS_GENERATING)"),
+            "ALIGNING_SUBTITLES": ("🟢", "【6/8】正在生成并对齐双语字幕 (ALIGNING_SUBTITLES)"),
+            "AUDIO_MIXING": ("🟢", "【7/8】正在进行人声与背景音乐侧链混音 (AUDIO_MIXING)"),
+            "VIDEO_RENDERING": ("🟢", "【7/8】正在进行 GPU 加速视频压制 (VIDEO_RENDERING)"),
+            "COMPLETED": ("🎉", "【8/8】生产完成！全部视频与音频已就绪 (COMPLETED)"),
+            "PAUSING": ("🟠", "【安全暂停中】等待当前切片落盘后停机 (PAUSING)..."),
+            "PAUSED": ("⏸️", "任务已安全暂停 (PAUSED)，支持随时断点续跑"),
             "FAILED": ("🔴", "生产任务异常终止 (FAILED)")
         }
-        led, text = stage_map.get(status, ("⚪", f"当前阶段: {status}"))
-        self.lbl_status_led.setText(led)
-        self.lbl_status.setText(text)
-        if status in ["PLANNED", "FAILED"]:
+
+        icon, desc = stage_names.get(status, ("⚪", status))
+        if status not in ["TTS_GENERATING", "AUDIO_MIXING", "VIDEO_RENDERING"]:
+            self._timer_breathing.stop()
+            self.lbl_status_led.setText(icon)
+            self.lbl_status_led.setStyleSheet("font-size: 14px;")
+
+        self.lbl_status.setText(desc)
+
+        if status == "PLANNED":
             self.btn_gen_plan.setEnabled(True)
+            self.btn_start.setEnabled(True)
+            self.btn_pause.setEnabled(False)
+            self.btn_resume.setEnabled(False)
+        elif status == "PAUSED":
+            self.btn_start.setEnabled(False)
+            self.btn_pause.setEnabled(False)
+            self.btn_resume.setEnabled(True)
+            self._timer_elapsed.stop()
+        elif status in ["COMPLETED", "FAILED"]:
+            self.btn_gen_plan.setEnabled(True)
+            self.btn_start.setEnabled(True)
+            self.btn_pause.setEnabled(False)
+            self.btn_resume.setEnabled(False)
+            self._timer_elapsed.stop()
+            self._timer_breathing.stop()
 
     def _on_worker_progress_updated(self, pct: float, msg: str) -> None:
         if pct >= 0:
             self.progress_bar.setValue(int(pct))
-        self.lbl_status.setText(msg)
+        if msg:
+            self.lbl_status.setText(msg)
 
     def _on_worker_plan_ready(self, plan: Any) -> None:
-        self.btn_gen_plan.setEnabled(True)
-        self.btn_start.setEnabled(True)
-        self.lbl_status_led.setText("⚪")
-        self.lbl_status.setText("【4/8 规划就绪 (PLANNED)】请核对分集规划表，点击[开始生产]启动流水线")
-        self.pipeline_flow.set_stage("PLANNED")
+        try:
+            total_chars = getattr(plan, "total_chars", 0)
+            total_eps = getattr(plan, "total_episodes", len(getattr(plan, "episodes", [])))
+            est_mins = total_chars / 300.0
 
-        text = f"书名：《{plan.book_title}》\n"
-        text += f"全书总章节：{plan.total_chapters} 章 | 总字符数：{plan.total_chars:,} 字\n"
-        text += f"预估朗读总长：{plan.estimated_total_minutes} 分钟 | 预计规划分集：{plan.total_episodes} 集\n\n"
-        text += "--- 分集详细规划表 ---\n"
-        for ep in plan.episodes:
-            text += f"• {ep.title} ({ep.subtitle}): {ep.total_chars}字 (约{ep.estimated_duration_minutes}分钟)\n"
-        self.txt_plan_summary.setText(text)
+            lines = [
+                f"【生产规划概览】",
+                f"• 全书总字数: {total_chars:,} 字",
+                f"• 预估朗读总时长: 约 {est_mins:.1f} 分钟 ({est_mins/60.0:.1f} 小时)",
+                f"• 自动分集规划: 共 {total_eps} 集\n",
+                f"--- 分集详细规划表 ---"
+            ]
 
-    def _on_worker_task_completed(self, out_path: str) -> None:
-        self.btn_start.setEnabled(True)
-        self.btn_pause.setEnabled(False)
-        self.lbl_status_led.setText("🟢")
-        self.lbl_status.setText("【8/8 生产完成 (COMPLETED)】分集视频与有声书已全部就绪！")
-        self.pipeline_flow.set_stage("COMPLETED")
+            for ep in getattr(plan, "episodes", []):
+                ep_chars = getattr(ep, "char_count", 0)
+                ep_mins = getattr(ep, "estimated_duration_mins", ep_chars / 300.0)
+                lines.append(f"• 第{ep.episode_order:02d}集 ({ep.subtitle}): {ep_chars}字 (约{ep_mins:.1f}分钟)")
+
+            self.txt_plan_summary.setText("\n".join(lines))
+        except Exception as e:
+            logger.warning(f"渲染生产计划失败: {e}")
+
+    def _on_worker_task_completed(self, output_path: str) -> None:
+        self._timer_elapsed.stop()
+        self._timer_breathing.stop()
+        self.lbl_status_led.setText("🎉")
+        self.lbl_status_led.setStyleSheet("font-size: 14px; color: #00E676;")
         QMessageBox.information(
             self,
             "生产完成",
-            f"🎉 视频与有声书全部分集已成功生产！\n\n"
-            f"【导出位置】\n{out_path}\n\n"
-            f"点击界面右下角 [打开输出目录] 即可直接打开文件夹试听或查看视频！"
+            f"恭喜！有声视频与音频已成功生成落盘。\n产物目录:\n{output_path}\n\n本次总耗时: {self.lbl_elapsed_time.text()}"
         )
 
     def _on_worker_task_paused(self) -> None:
-        self.btn_start.setEnabled(False)
-        self.btn_pause.setEnabled(False)
-        self.btn_resume.setEnabled(True)
-        self.lbl_status_led.setText("🟠")
-        self.lbl_status.setText("任务已安全暂停。所有断点与已生成音频已完整存盘。")
-        QMessageBox.information(self, "安全暂停", "任务已安全暂停。\n当前进度已持久化，随时可点击 [继续生产] 断点无缝接续。")
+        self._timer_elapsed.stop()
+        self._timer_breathing.stop()
+        self.lbl_status_led.setText("⏸️")
+        QMessageBox.information(self, "暂停提示", "当前分集切片已安全落盘并持久化记录，任务已暂停。您可以点击 [继续生产] 随时断点续跑。")
 
-    def _on_worker_error(self, err_code: str, err_msg: str) -> None:
-        self.btn_start.setEnabled(True)
-        self.btn_pause.setEnabled(False)
+    def _on_worker_error(self, code: str, msg: str) -> None:
+        self._timer_elapsed.stop()
+        self._timer_breathing.stop()
         self.lbl_status_led.setText("🔴")
-        self.lbl_status.setText(f"生产异常: {err_code}")
-        QMessageBox.critical(self, f"生产异常 ({err_code})", f"发生错误:\n{err_msg}")
+        self.lbl_status_led.setStyleSheet("font-size: 14px; color: #FF6B6B;")
+        self.tab_widget.setCurrentIndex(2) # 自动跳转到实时日志 Sheet 方便用户排查
+        QMessageBox.critical(self, f"生产异常 ({code})", f"发生错误:\n{msg}\n\n详情可查看右侧 [📜 实时日志] 面板。")

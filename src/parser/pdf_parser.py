@@ -20,6 +20,14 @@ class PDFParser(BookParser):
     
     def __init__(self):
         self.chapter_detector = ChapterDetector()
+        # 【为什么这样设计】
+        # 部分扫描或非标 PDF 存在轻微流语法损坏，MuPDF 底层 C 库会自动修复但默认向终端打印警告，
+        # 显式关闭底层警告显示，杜绝终端报错假象，保持交互与日志清爽。
+        if hasattr(fitz, "TOOLS") and hasattr(fitz.TOOLS, "mupdf_display_errors"):
+            try:
+                fitz.TOOLS.mupdf_display_errors(False)
+            except Exception:
+                pass
         
     def extract_metadata(self, file_path: Path) -> BookMetadata:
         try:

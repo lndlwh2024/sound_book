@@ -156,9 +156,14 @@ class ProductionWorker(QThread):
         cfg_strength = float(cfg.get("cfg_strength", 2.0))
         speech_speed = float(cfg.get("speech_speed", 1.0))
 
-        # 彻底锁定绝对物理路径，杜绝随当前终端工作目录漂移
+        # 彻底锁定绝对物理路径，支持自定义目标输出根目录
         project_root = Path(__file__).resolve().parent.parent.parent
-        output_base = (project_root / "output" / book_title).resolve()
+        custom_out = cfg.get("output_dir")
+        if custom_out and Path(custom_out).exists():
+            base_parent = Path(custom_out).resolve()
+        else:
+            base_parent = (project_root / "output").resolve()
+        output_base = (base_parent / book_title).resolve()
         output_base.mkdir(parents=True, exist_ok=True)
 
         raw_book_id = cfg.get("book_id", f"book_{abs(hash(book_path.name)) % 1000000:06d}")
@@ -264,9 +269,10 @@ class ProductionWorker(QThread):
                             break
                         u_wav = (ep_units_dir / f"unit_{idx:04d}.wav").resolve()
                         if not u_wav.exists():
+                            clean_preview = u.text[:16].replace('\n', ' ')
                             self.sig_progress_updated.emit(
                                 20.0 + ((idx + 1) / max(1, total_u)) * 45.0,
-                                f"【5/8 语音合成 (TTS_GENERATING)】第 {ep_order:02d} 集: [{idx+1}/{total_u}] {u.text[:14]}..."
+                                f"【5/8 语音合成】第 {ep_order:02d} 集 · 正在朗读第 {idx+1}/{total_u} 句 | 原文：\"{clean_preview}...\""
                             )
                             res = tts_backend.synthesize(
                                 text=u.text,
