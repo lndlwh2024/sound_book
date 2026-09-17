@@ -232,14 +232,15 @@ class ProductionWorker(QThread):
 
             # 为该分集创建对应产物路径
             # 【为什么这样设计】
-            # MP4 视频画面已内嵌专业大字烧录硬字幕。若在 MP4 同级目录输出同名 Episode_01.srt，
-            # PotPlayer 等主流播放器会自动强制加载外挂小字，导致“大字叠小字”双重重叠。
-            # 因此将外挂字幕移至 subtitles/ 子目录及 .transcript.srt，彻底杜绝播放器冲突。
+            # MP4 视频画面已内嵌专业醒目大字烧录硬字幕（62px 粗体白字 + 浓黑描边）。
+            # 若在 MP4 同级目录输出任何 Episode_*.srt 或 *.transcript.srt，
+            # PotPlayer、VLC 等主流播放器会自动模糊匹配加载外挂字幕，导致画面出现双重字幕重叠。
+            # 因此将所有外挂字幕统一规整移入 subtitles/ 专属子目录，保证根目录视频播放纯净整洁。
             ep_audio_path = book_dir / f"episode_{ep_order:02d}_mixed.m4a"
             subtitles_dir = output_base / "subtitles"
             subtitles_dir.mkdir(parents=True, exist_ok=True)
             ep_srt_path = subtitles_dir / f"Episode_{ep_order:02d}.srt"
-            ep_srt_transcript_path = output_base / f"Episode_{ep_order:02d}.transcript.srt"
+            ep_srt_transcript_path = subtitles_dir / f"Episode_{ep_order:02d}.transcript.srt"
             ep_ass_path = book_dir / f"episode_{ep_order:02d}.ass"
             ep_mp4_path = output_base / f"Episode_{ep_order:02d}.mp4"
 

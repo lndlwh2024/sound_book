@@ -258,9 +258,28 @@ class ResourceMonitorBar(QFrame):
         layout.addStretch()
 
         self._last_cpu_times = self._get_cpu_times()
+        self._pdh_query = None
+        self._pdh_counter = None
+        self._init_pdh()
+
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._refresh_metrics)
         self.timer.start(1500)
+
+    def _init_pdh(self):
+        """初始化 Windows 原生 PDH 性能计数器以精准对齐任务管理器 CPU 负载"""
+        try:
+            pdh = ctypes.windll.pdh
+            h_query = ctypes.c_void_p()
+            h_counter = ctypes.c_void_p()
+            if pdh.PdhOpenQueryW(None, 0, ctypes.byref(h_query)) == 0:
+                # 采样与任务管理器 1:1 对应的处理器效用率计数器 (考虑现代 CPU 睿频)
+                if pdh.PdhAddEnglishCounterW(h_query, "\\Processor Information(_Total)\\% Processor Utility", 0, ctypes.byref(h_counter)) == 0:
+                    pdh.PdhCollectQueryData(h_query)
+                    self._pdh_query = h_query
+                    self._pdh_counter = h_counter
+        except Exception as e:
+            logger.debug(f"PDH 初始化失败，将自动降级回退到 GetSystemTimes: {e}")
 
     def _get_cpu_times(self):
         try:
@@ -274,21 +293,37 @@ class ResourceMonitorBar(QFrame):
             return 0, 0, 0
 
     def _refresh_metrics(self):
-        # 1. CPU
-        try:
-            i2, k2, u2 = self._get_cpu_times()
-            i1, k1, u1 = self._last_cpu_times
-            self._last_cpu_times = (i2, k2, u2)
-            idle = i2 - i1
-            kernel = k2 - k1
-            user = u2 - u1
-            total = kernel + user
-            if total > 0:
-                cpu_pct = max(0.0, min(100.0, ((total - idle) / total) * 100))
-                c_color = "#FF6B6B" if cpu_pct > 85 else ("#FFD93D" if cpu_pct > 60 else "#70DB93")
-                self.lbl_cpu.setText(f'CPU: <span style="color:{c_color}; font-weight:bold;">{cpu_pct:.1f}%</span>')
-        except Exception:
-            pass
+        # 1. CPU (优先使用 PDH 采集与任务管理器 100% 一致的 Processor Utility)
+        cpu_pct = None
+        if self._pdh_query and self._pdh_counter:
+            try:
+                pdh = ctypes.windll.pdh
+                class PDH_FMT_COUNTERVALUE(ctypes.Structure):
+                    _fields_ = [('CStatus', ctypes.c_uint), ('doubleValue', ctypes.c_double)]
+                if pdh.PdhCollectQueryData(self._pdh_query) == 0:
+                    val = PDH_FMT_COUNTERVALUE()
+                    if pdh.PdhGetFormattedCounterValue(self._pdh_counter, 0x00000200, None, ctypes.byref(val)) == 0:
+                        if val.CStatus == 0:
+                            cpu_pct = max(0.0, min(100.0, val.doubleValue))
+            except Exception:
+                pass
+
+        if cpu_pct is None:
+            try:
+                i2, k2, u2 = self._get_cpu_times()
+                i1, k1, u1 = self._last_cpu_times
+                self._last_cpu_times = (i2, k2, u2)
+                idle = i2 - i1
+                kernel = k2 - k1
+                user = u2 - u1
+                total = kernel + user
+                if total > 0:
+                    cpu_pct = max(0.0, min(100.0, ((total - idle) / total) * 100))
+            except Exception:
+                cpu_pct = 0.0
+
+        c_color = "#FF6B6B" if cpu_pct > 85 else ("#FFD93D" if cpu_pct > 60 else "#70DB93")
+        self.lbl_cpu.setText(f'CPU: <span style="color:{c_color}; font-weight:bold;">{cpu_pct:.1f}%</span>')
 
         # 2. 内存 (RAM)
         try:
@@ -482,12 +517,17 @@ class MainWindow(QMainWindow):
         self._timer_breathing = QTimer(self)
         self._timer_breathing.timeout.connect(self._on_tick_breathing)
 
-        # 日志流转发射器
+        # 日志流转发射器：解除默认 WARNING 拦截，全量捕获后台流水线与各模块实时日志
         self.log_emitter = QtLogEmitter()
         self.log_emitter.sig_log.connect(self._on_stream_log)
         log_handler = QtLogHandler(self.log_emitter)
         log_handler.setFormatter(logging.Formatter('%(asctime)s [%(levelname)s] %(message)s', datefmt='%H:%M:%S'))
-        logging.getLogger().addHandler(log_handler)
+        root_logger = logging.getLogger()
+        root_logger.setLevel(logging.INFO)
+        root_logger.addHandler(log_handler)
+        agent_logger = logging.getLogger("BookAgent")
+        agent_logger.setLevel(logging.INFO)
+        agent_logger.addHandler(log_handler)
 
         self._init_ui()
         self._connect_signals()
@@ -548,8 +588,8 @@ class MainWindow(QMainWindow):
             QSpinBox::up-button, QDoubleSpinBox::up-button {
                 subcontrol-origin: border;
                 subcontrol-position: top right;
-                width: 20px;
-                height: 14px;
+                width: 24px;
+                height: 16px;
                 border-left: 1px solid #444455;
                 border-bottom: 1px solid #444455;
                 background-color: #252535;
@@ -560,8 +600,8 @@ class MainWindow(QMainWindow):
             }
             QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {
                 image: url("@@UP_ICON@@");
-                width: 9px;
-                height: 6px;
+                width: 14px;
+                height: 10px;
             }
             QSpinBox::up-arrow:hover, QDoubleSpinBox::up-arrow:hover {
                 image: url("@@UP_HOV@@");
@@ -569,8 +609,8 @@ class MainWindow(QMainWindow):
             QSpinBox::down-button, QDoubleSpinBox::down-button {
                 subcontrol-origin: border;
                 subcontrol-position: bottom right;
-                width: 20px;
-                height: 14px;
+                width: 24px;
+                height: 16px;
                 border-left: 1px solid #444455;
                 background-color: #252535;
                 border-bottom-right-radius: 4px;
@@ -580,8 +620,8 @@ class MainWindow(QMainWindow):
             }
             QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {
                 image: url("@@DN_ICON@@");
-                width: 9px;
-                height: 6px;
+                width: 14px;
+                height: 10px;
             }
             QSpinBox::down-arrow:hover, QDoubleSpinBox::down-arrow:hover {
                 image: url("@@DN_HOV@@");
@@ -609,22 +649,49 @@ class MainWindow(QMainWindow):
             QSlider::handle:vertical:hover {
                 background: #00E676;
             }
-            /* 独立试听圆形播放图标按钮 */
+            /* 独立试听圆形播放图标按钮 (圆框内右三角形 ▶) */
             QPushButton.audio_play_btn {
-                background-color: #222230;
-                border: 1px solid #444460;
-                border-radius: 18px;
-                font-size: 15px;
-                min-width: 36px;
-                max-width: 36px;
-                min-height: 36px;
-                max-height: 36px;
+                background-color: #20202C;
+                border: 1.5px solid #444458;
+                border-radius: 17px;
+                font-size: 13px;
+                min-width: 34px;
+                max-width: 34px;
+                min-height: 34px;
+                max-height: 34px;
                 padding: 0px;
+                color: #888899;
+            }
+            QPushButton.audio_play_btn:hover:enabled {
+                background-color: #2A2A3C;
+                border-color: #00E676;
                 color: #FFFFFF;
             }
-            QPushButton.audio_play_btn:hover {
-                background-color: #323246;
-                border-color: #00E676;
+            QPushButton.audio_play_btn:pressed:enabled {
+                background-color: #161622;
+            }
+            QPushButton.audio_play_btn:disabled {
+                background-color: #17171E;
+                border: 1.5px solid #2E2E38;
+                color: #4A4A58;
+            }
+            QPushButton#btn_play_voice {
+                border-color: #2E8B57;
+                color: #00E676;
+            }
+            QPushButton#btn_play_voice:hover {
+                background-color: #1E3A28;
+                border-color: #33FF99;
+                color: #FFFFFF;
+            }
+            QPushButton#btn_play_bgm:enabled {
+                border-color: #2E5B88;
+                color: #4DA6FF;
+            }
+            QPushButton#btn_play_bgm:enabled:hover {
+                background-color: #1E2D40;
+                border-color: #70B8FF;
+                color: #FFFFFF;
             }
             /* 多 Sheet 标签页样式 */
             QTabWidget::pane {
@@ -746,11 +813,7 @@ class MainWindow(QMainWindow):
         top_split_layout.addWidget(right_panel, 5)
         main_layout.addLayout(top_split_layout, 8)
 
-        # 2. 中间部分：独立音量控制与闪避指示
-        vol_panel = self._build_volume_control_panel()
-        main_layout.addWidget(vol_panel, 1)
-
-        # 3. 底部控制区：动作按钮、全局进度、硬件负载监控
+        # 2. 底部控制区：动作按钮、全局进度、硬件负载监控
         bottom_panel = self._build_bottom_control_panel()
         main_layout.addWidget(bottom_panel, 3)
 
@@ -944,11 +1007,10 @@ class MainWindow(QMainWindow):
         col_voice.setSpacing(4)
         col_voice.setAlignment(Qt.AlignHCenter)
 
-        self.btn_play_voice = QPushButton("🎙️")
-        self.btn_play_voice.setProperty("class", "audio_play_btn")
-        self.btn_play_voice.setToolTip("点击单独试听纯人声干音 (无伴奏、无淡出)")
-        self.btn_play_voice.clicked.connect(self._on_play_voice_only)
-        col_voice.addWidget(self.btn_play_voice, 0, Qt.AlignHCenter)
+        # [左翼] 主音频控制柱：顶部标签 -> 中间滑块与读数 -> 底部圆形播放按钮
+        col_voice = QVBoxLayout()
+        col_voice.setSpacing(5)
+        col_voice.setAlignment(Qt.AlignHCenter)
 
         lbl_v_tag = QLabel("主音频")
         lbl_v_tag.setStyleSheet("font-size: 11px; color: #70DB93; font-weight: bold;")
@@ -962,9 +1024,16 @@ class MainWindow(QMainWindow):
         col_voice.addWidget(self.sld_narr_preview, 1, Qt.AlignHCenter)
 
         self.lbl_narr_vol_pct = QLabel("100%")
-        self.lbl_narr_vol_pct.setStyleSheet("font-size: 11px; color: #FFFFFF;")
+        self.lbl_narr_vol_pct.setStyleSheet("font-size: 11px; color: #E0E0E0;")
         self.sld_narr_preview.valueChanged.connect(lambda v: self.lbl_narr_vol_pct.setText(f"{v}%"))
         col_voice.addWidget(self.lbl_narr_vol_pct, 0, Qt.AlignHCenter)
+
+        self.btn_play_voice = QPushButton("▶")
+        self.btn_play_voice.setObjectName("btn_play_voice")
+        self.btn_play_voice.setProperty("class", "audio_play_btn")
+        self.btn_play_voice.setToolTip("点击单独试听纯人声干音")
+        self.btn_play_voice.clicked.connect(self._on_play_voice_only)
+        col_voice.addWidget(self.btn_play_voice, 0, Qt.AlignHCenter)
 
         stage_layout.addLayout(col_voice, 0)
 
@@ -975,16 +1044,10 @@ class MainWindow(QMainWindow):
         self.lbl_preview_image.setStyleSheet("border: 1px dashed #555566; background-color: #121216; border-radius: 6px;")
         stage_layout.addWidget(self.lbl_preview_image, 1)
 
-        # [右翼] 背景音乐控制柱
+        # [右翼] 背景音乐控制柱：顶部标签 -> 中间滑块与读数 -> 底部圆形播放按钮
         col_bgm = QVBoxLayout()
-        col_bgm.setSpacing(4)
+        col_bgm.setSpacing(5)
         col_bgm.setAlignment(Qt.AlignHCenter)
-
-        self.btn_play_bgm = QPushButton("🎵")
-        self.btn_play_bgm.setProperty("class", "audio_play_btn")
-        self.btn_play_bgm.setToolTip("点击单独试听背景音乐 (如有)")
-        self.btn_play_bgm.clicked.connect(self._on_play_bgm_only)
-        col_bgm.addWidget(self.btn_play_bgm, 0, Qt.AlignHCenter)
 
         lbl_b_tag = QLabel("背景音")
         lbl_b_tag.setStyleSheet("font-size: 11px; color: #4DA6FF; font-weight: bold;")
@@ -998,9 +1061,17 @@ class MainWindow(QMainWindow):
         col_bgm.addWidget(self.sld_bgm_preview, 1, Qt.AlignHCenter)
 
         self.lbl_bgm_vol_pct = QLabel("30%")
-        self.lbl_bgm_vol_pct.setStyleSheet("font-size: 11px; color: #FFFFFF;")
+        self.lbl_bgm_vol_pct.setStyleSheet("font-size: 11px; color: #E0E0E0;")
         self.sld_bgm_preview.valueChanged.connect(lambda v: self.lbl_bgm_vol_pct.setText(f"{v}%"))
         col_bgm.addWidget(self.lbl_bgm_vol_pct, 0, Qt.AlignHCenter)
+
+        self.btn_play_bgm = QPushButton("▶")
+        self.btn_play_bgm.setObjectName("btn_play_bgm")
+        self.btn_play_bgm.setProperty("class", "audio_play_btn")
+        self.btn_play_bgm.setEnabled(False)
+        self.btn_play_bgm.setToolTip("当前未选择背景音乐 (点击左侧'选择音乐'添加)")
+        self.btn_play_bgm.clicked.connect(self._on_play_bgm_only)
+        col_bgm.addWidget(self.btn_play_bgm, 0, Qt.AlignHCenter)
 
         stage_layout.addLayout(col_bgm, 0)
 
@@ -1068,41 +1139,6 @@ class MainWindow(QMainWindow):
         layout.addWidget(grp_dashboard, 5)
         return panel
 
-    def _build_volume_control_panel(self) -> QWidget:
-        """构建独立音量与自动闪避控制条"""
-        panel = QFrame()
-        panel.setStyleSheet("background-color: #262630; border-radius: 6px; padding: 6px;")
-        layout = QHBoxLayout(panel)
-        layout.setContentsMargins(12, 4, 12, 4)
-        layout.setSpacing(16)
-
-        layout.addWidget(QLabel("旁白音量:"))
-        self.slider_voice = QSlider(Qt.Horizontal)
-        self.slider_voice.setRange(0, 200)
-        self.slider_voice.setValue(100)
-        self.lbl_voice_val = QLabel("100%")
-        self.slider_voice.valueChanged.connect(lambda v: self.lbl_voice_val.setText(f"{v}%"))
-        layout.addWidget(self.slider_voice, 3)
-        layout.addWidget(self.lbl_voice_val)
-
-        layout.addSpacing(20)
-
-        layout.addWidget(QLabel("音乐音量 (BGM):"))
-        self.slider_bgm = QSlider(Qt.Horizontal)
-        self.slider_bgm.setRange(0, 100)
-        self.slider_bgm.setValue(15)
-        self.lbl_bgm_val = QLabel("15% (已开启人声智能避让)")
-        self.lbl_bgm_val.setStyleSheet("color: #70DB93;")
-        self.slider_bgm.valueChanged.connect(lambda v: self.lbl_bgm_val.setText(f"{v}% (已开启人声智能避让)"))
-        layout.addWidget(self.slider_bgm, 3)
-        layout.addWidget(self.lbl_bgm_val)
-
-        btn_test_mix = QPushButton("▶ 15秒混音试听")
-        btn_test_mix.setToolTip("截取 15 秒音频真实合成并调用系统播放器验证人声与 BGM 智能避让效果")
-        btn_test_mix.clicked.connect(self._on_test_mix)
-        layout.addWidget(btn_test_mix)
-
-        return panel
 
     def _build_bottom_control_panel(self) -> QWidget:
         """构建底部控制区与监控指示"""
@@ -1159,8 +1195,8 @@ class MainWindow(QMainWindow):
         prog_layout = QHBoxLayout()
         prog_layout.setSpacing(8)
 
-        self.lbl_status_led = QLabel("⚪")
-        self.lbl_status_led.setStyleSheet("font-size: 14px;")
+        self.lbl_status_led = QLabel("●")
+        self.lbl_status_led.setStyleSheet("font-size: 16px; color: #555568; font-weight: bold;")
 
         self.lbl_status = QLabel("空闲就绪 (IDLE)")
         self.lbl_status.setStyleSheet("color: #CCCCCC; font-size: 12px; font-weight: bold;")
@@ -1208,11 +1244,12 @@ class MainWindow(QMainWindow):
         self.lbl_elapsed_time.setText(f"⏱️ {h:02d}:{m:02d}:{s:02d}")
 
     def _on_tick_breathing(self):
-        """【新需求 8】状态灯柔和呼吸循环脉冲效果"""
-        self._breathing_phase = (self._breathing_phase + 1) % 6
-        colors = ["#00E676", "#33FF99", "#00F080", "#00C853", "#00A844", "#008F38"]
+        """【动效】状态灯柔和呼吸循环脉冲效果（单色实心圆字符实现高精度 RGBA 发光）"""
+        self._breathing_phase = (self._breathing_phase + 1) % 8
+        colors = ["#33FF99", "#00F080", "#00E676", "#00C853", "#00A844", "#008F38", "#00A844", "#00C853"]
         c = colors[self._breathing_phase]
-        self.lbl_status_led.setStyleSheet(f"font-size: 14px; color: {c};")
+        self.lbl_status_led.setText("●")
+        self.lbl_status_led.setStyleSheet(f"font-size: 16px; color: {c}; font-weight: bold;")
 
     def _on_stream_log(self, level: str, msg: str):
         color = "#CCCCCC"
@@ -1621,8 +1658,8 @@ class MainWindow(QMainWindow):
             "cover_path": self.txt_cover_path.text().strip(),
             "bgm_path": self.txt_bgm_path.text().strip(),
             "main_title": self.txt_main_title.text().strip(),
-            "voice_volume_percent": float(self.slider_voice.value()),
-            "bgm_volume_percent": float(self.slider_bgm.value()),
+            "voice_volume_percent": float(self.sld_narr_preview.value()),
+            "bgm_volume_percent": float(self.sld_bgm_preview.value()),
             "tts_engine": "f5" if "F5" in self.cmb_tts_engine.currentText() else ("kokoro" if "Kokoro" in self.cmb_tts_engine.currentText() else "azure"),
             "voice_profile": self.cmb_voice_profile.currentText(),
             "nfe_step": self.spn_nfe_step.value(),
@@ -1637,8 +1674,8 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "提示", "请先选择有效的电子书文件！")
             return
         self.btn_gen_plan.setEnabled(False)
-        self.lbl_status_led.setText("🟡")
-        self.lbl_status_led.setStyleSheet("font-size: 14px; color: #FFD93D;")
+        self.lbl_status_led.setText("●")
+        self.lbl_status_led.setStyleSheet("font-size: 16px; color: #FFD93D; font-weight: bold;")
         self.lbl_status.setText("正在分析全书章节与生成生产计划 (PLANNING)...")
         self.pipeline_flow.reset_pipeline()
         self.tab_widget.setCurrentIndex(0) # 切换到分集规划 Sheet
@@ -1662,7 +1699,8 @@ class MainWindow(QMainWindow):
         self.btn_start.setEnabled(False)
         self.btn_pause.setEnabled(True)
         self.btn_resume.setEnabled(False)
-        self.lbl_status_led.setText("🟢")
+        self.lbl_status_led.setText("●")
+        self.lbl_status_led.setStyleSheet("font-size: 16px; color: #33FF99; font-weight: bold;")
         self.lbl_status.setText("正式生产流水线已启动 (PRODUCING)...")
 
         # 启动计时器与状态灯呼吸动画
@@ -1676,7 +1714,8 @@ class MainWindow(QMainWindow):
         """安全暂停"""
         self.btn_pause.setEnabled(False)
         self._timer_breathing.stop()
-        self.lbl_status_led.setStyleSheet("font-size: 14px; color: #CD853F;")
+        self.lbl_status_led.setText("●")
+        self.lbl_status_led.setStyleSheet("font-size: 16px; color: #CD853F; font-weight: bold;")
         self.bridge.request_pause()
 
     def _on_test_mix(self) -> None:
@@ -1833,8 +1872,8 @@ class MainWindow(QMainWindow):
     def _on_worker_task_completed(self, output_path: str) -> None:
         self._timer_elapsed.stop()
         self._timer_breathing.stop()
-        self.lbl_status_led.setText("🎉")
-        self.lbl_status_led.setStyleSheet("font-size: 14px; color: #00E676;")
+        self.lbl_status_led.setText("●")
+        self.lbl_status_led.setStyleSheet("font-size: 16px; color: #00E676; font-weight: bold;")
         QMessageBox.information(
             self,
             "生产完成",
@@ -1844,13 +1883,14 @@ class MainWindow(QMainWindow):
     def _on_worker_task_paused(self) -> None:
         self._timer_elapsed.stop()
         self._timer_breathing.stop()
-        self.lbl_status_led.setText("⏸️")
+        self.lbl_status_led.setText("●")
+        self.lbl_status_led.setStyleSheet("font-size: 16px; color: #CD853F; font-weight: bold;")
         QMessageBox.information(self, "暂停提示", "当前分集切片已安全落盘并持久化记录，任务已暂停。您可以点击 [继续生产] 随时断点续跑。")
 
     def _on_worker_error(self, code: str, msg: str) -> None:
         self._timer_elapsed.stop()
         self._timer_breathing.stop()
-        self.lbl_status_led.setText("🔴")
-        self.lbl_status_led.setStyleSheet("font-size: 14px; color: #FF6B6B;")
+        self.lbl_status_led.setText("●")
+        self.lbl_status_led.setStyleSheet("font-size: 16px; color: #FF6B6B; font-weight: bold;")
         self.tab_widget.setCurrentIndex(2) # 自动跳转到实时日志 Sheet 方便用户排查
         QMessageBox.critical(self, f"生产异常 ({code})", f"发生错误:\n{msg}\n\n详情可查看右侧 [📜 实时日志] 面板。")

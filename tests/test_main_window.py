@@ -28,11 +28,11 @@ def test_main_window_initial_state(qapp):
     assert window.width() >= 1024
     assert window.height() >= 720
 
-    # 2. 默认音量与滑块
-    assert window.slider_voice.value() == 100
-    assert window.slider_bgm.value() == 15
-    assert "100%" in window.lbl_voice_val.text()
-    assert "15%" in window.lbl_bgm_val.text()
+    # 2. 默认音量与滑块（右上角两翼工作台）
+    assert window.sld_narr_preview.value() == 100
+    assert window.sld_bgm_preview.value() == 30
+    assert "100%" in window.lbl_narr_vol_pct.text()
+    assert "30%" in window.lbl_bgm_vol_pct.text()
 
     # 3. 默认版式与运行模式
     assert "9:16" in window.cmb_video_layout.currentText()
@@ -63,7 +63,7 @@ def test_main_window_get_current_config(qapp):
     assert cfg["speech_speed"] == 1.0
     assert cfg["run_mode"] == "RUN_NEXT_EPISODE"
     assert cfg["voice_volume_percent"] == 100.0
-    assert cfg["bgm_volume_percent"] == 15.0
+    assert cfg["bgm_volume_percent"] == 30.0
     assert "output_dir" in cfg
     assert len(cfg["output_dir"]) > 0
 
@@ -155,16 +155,18 @@ def test_main_window_v070_features(qapp, monkeypatch):
     assert hasattr(window, "btn_play_bgm")
     assert hasattr(window, "sld_bgm_preview")
     assert hasattr(window, "sld_narr_preview")
-    assert hasattr(window, "btn_mix_preview")
-    assert window.sld_bgm_preview.orientation() == Qt.Vertical
-    assert window.sld_narr_preview.orientation() == Qt.Vertical
-    assert window.sld_bgm_preview.value() == 30
-    assert window.sld_narr_preview.value() == 100
+    assert window.btn_play_voice.text() == "▶"
+    assert window.btn_play_bgm.text() == "▶"
+    assert not window.btn_play_bgm.isEnabled()  # 初始未选 BGM，置灰禁用
+    assert window.btn_play_voice.isEnabled()   # 主音频常驻可用
+    assert not hasattr(window, "slider_voice")  # 旧横向音量条已彻底移除
+    assert window.lbl_status_led.text() == "●"  # 状态灯使用单色实心圆字符
 
-    # 3. 验证清除 BGM 功能
+    # 3. 验证清除 BGM 功能与置灰联动
     window.txt_bgm_path.setText("H:/fake_path/fake_bgm.mp3")
     window._on_clear_bgm()
     assert window.txt_bgm_path.text() == ""
+    assert not window.btn_play_bgm.isEnabled()
 
     # 4. 验证视觉预览：未输入标题时干净底板；输入标题后正常叠加
     window.txt_cover_path.setText("")

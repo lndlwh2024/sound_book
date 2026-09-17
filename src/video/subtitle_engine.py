@@ -235,15 +235,19 @@ class NativeTTSSubtitleEngine(SubtitleAligner):
 
         if layout == "landscape_16_9":
             res_x, res_y = 1920, 1080
-            margin_v = 130  # 横屏黄金底部边距
+            margin_v = 110  # 横屏黄金底部边距
             margin_lr = 160
-            actual_font_size = 40 if font_size == 38 else font_size
+            actual_font_size = 48 if font_size == 38 else font_size
         else:
-            # 默认竖屏 9:16
+            # 默认竖屏 9:16：升级为专业短视频爆款醒目大字字幕（字号 62px，底部边距 135px）
+            # 【为什么这样设计】
+            # 解决原 42px 字幕过小且位置贴近封面中间的问题，
+            # 采用 62px 粗体白字 + 3.5px 浓黑抗锯齿描边，放置在屏幕最底部黄金阅读区，
+            # 彻底取代微缩小字幕，使手机端观看体验大气、舒适、一目了然。
             res_x, res_y = 1080, 1920
-            margin_v = 300  # 竖屏黄金视线焦点区（封面下方安全区）
+            margin_v = 135
             margin_lr = 60
-            actual_font_size = 42 if font_size == 38 else font_size
+            actual_font_size = 62 if font_size == 38 else font_size
 
         # 构建 ASS 模板：纯白粗体、加粗黑色描边、自然字间距与底部居中对齐
         ass_header = f"""[Script Info]
@@ -254,7 +258,7 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,{font_name},{actual_font_size},&H00FFFFFF,&H000000FF,&H00000000,&H80000000,1,0,0,0,100,100,1,0,1,3,2,2,{margin_lr},{margin_lr},{margin_v},1
+Style: Default,{font_name},{actual_font_size},&H00FFFFFF,&H000000FF,&H00000000,&H80000000,1,0,0,0,100,100,1,0,1,3.5,2,2,{margin_lr},{margin_lr},{margin_v},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text

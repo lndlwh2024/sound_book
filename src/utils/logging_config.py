@@ -60,7 +60,7 @@ def setup_logger(book_id: Optional[str] = None) -> logging.Logger:
     console_handler.addFilter(sensitive_filter)
     logger.addHandler(console_handler)
     
-    # 文件持久化信道（区分全局池和个体工作区）
+    # 文件持久化信道（区分全局池和个体工作区，限制最多保留最近 2 次日志，第 3 次覆盖第 1 次）
     base_dir = Path(config.get("workspace.root", "."))
     if book_id:
         log_dir = base_dir / "books" / book_id / "logs"
@@ -70,7 +70,19 @@ def setup_logger(book_id: Optional[str] = None) -> logging.Logger:
     log_dir.mkdir(parents=True, exist_ok=True)
     log_file = log_dir / "agent.log"
     
-    file_handler = logging.FileHandler(log_file, encoding="utf-8")
+    from logging.handlers import RotatingFileHandler
+    file_handler = RotatingFileHandler(
+        log_file,
+        maxBytes=10 * 1024 * 1024,
+        backupCount=1,
+        encoding="utf-8"
+    )
+    # 若上次已有日志，自动归档为 .1，本次开启新日志，确保仅留最近 2 份
+    if log_file.exists() and log_file.stat().st_size > 0:
+        try:
+            file_handler.doRollover()
+        except Exception:
+            pass
     file_handler.setFormatter(formatter)
     file_handler.addFilter(sensitive_filter)
     logger.addHandler(file_handler)
