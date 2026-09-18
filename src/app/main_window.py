@@ -930,16 +930,17 @@ class MainWindow(QMainWindow):
         self.cmb_video_layout.currentIndexChanged.connect(self._refresh_visual_preview)
 
         self.spn_target_duration = QSpinBox()
-        self.spn_target_duration.setRange(5, 60)
+        self.spn_target_duration.setRange(1, 120)
         self.spn_target_duration.setValue(15)
         self.spn_target_duration.setSuffix(" 分钟")
-        self.spn_target_duration.setToolTip("单集目标时长：达到此时长且遇到段落自然结束点时切分新集")
+        self.spn_target_duration.setToolTip("单集目标时长：支持 1~120 分钟自由设定，满足短视频（1分钟切片）或长篇听书（15~30分钟）")
 
         self.spn_min_interval = QDoubleSpinBox()
-        self.spn_min_interval.setRange(1.0, 10.0)
+        self.spn_min_interval.setRange(0.5, 10.0)
+        self.spn_min_interval.setSingleStep(0.5)
         self.spn_min_interval.setValue(3.0)
         self.spn_min_interval.setSuffix(" 分钟")
-        self.spn_min_interval.setToolTip("两集合并最小阈值：若尾部残余内容不足此阈值，自动合并到最后一集")
+        self.spn_min_interval.setToolTip("两集合并最小阈值：若尾部残余内容不足此阈值，自动合并到最后一集（支持 0.5~10 分钟）")
 
         self.cmb_run_mode = QComboBox()
         self.cmb_run_mode.addItems([
@@ -1172,15 +1173,47 @@ class MainWindow(QMainWindow):
 
 
     def _build_bottom_control_panel(self) -> QWidget:
-        """构建底部控制区与监控指示"""
+        """
+        构建底部控制区与监控指示（4 层一体化空间重构）。
+        【为什么这样设计】
+        根据用户最新界面批注（红箭头与红字标注）：
+        1. [第 1 层] 输出目录行整块移至顶部独立成行，不再挤在操作按钮右侧；
+        2. [第 2 层] 状态指示（呼吸灯与状态文字）移至【继续生产】按钮右侧同行展示，动作与状态强关联；
+        3. [第 3 层] 8 步全流程管线指示图贯穿展开；
+        4. [第 4 层] 硬件负载实时监控条与全局进度条横向左右并列，彻底填补右下角空白，空间利用率达到极致。
+        """
         panel = QWidget()
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
 
-        # 动作按钮行 + 目标输出目录设定
-        btn_layout = QHBoxLayout()
-        btn_layout.setSpacing(10)
+        # ── 第 1 层：目标输出根目录设定（横跨上方整行） ──
+        out_layout = QHBoxLayout()
+        out_layout.setSpacing(8)
+
+        lbl_out = QLabel("输出目录:")
+        lbl_out.setStyleSheet("font-weight: bold; color: #CCCCCC; font-size: 12px;")
+        out_layout.addWidget(lbl_out)
+
+        self.txt_output_dir = QLineEdit()
+        default_out = (Path(__file__).resolve().parent.parent.parent / "output").resolve()
+        self.txt_output_dir.setText(str(default_out))
+        self.txt_output_dir.setToolTip("分集音频、视频与字幕的根输出目录")
+        out_layout.addWidget(self.txt_output_dir, 1)
+
+        self.btn_browse_output = QPushButton("更改...")
+        self.btn_browse_output.clicked.connect(self._on_browse_output)
+        out_layout.addWidget(self.btn_browse_output)
+
+        self.btn_open_output = QPushButton("打开输出目录")
+        self.btn_open_output.clicked.connect(self._on_open_output)
+        out_layout.addWidget(self.btn_open_output)
+
+        layout.addLayout(out_layout)
+
+        # ── 第 2 层：核心动作按钮组 + 任务状态反馈（同行并列） ──
+        act_layout = QHBoxLayout()
+        act_layout.setSpacing(10)
 
         self.btn_gen_plan = QPushButton("生成生产计划")
         self.btn_gen_plan.clicked.connect(self._on_generate_plan)
@@ -1195,65 +1228,76 @@ class MainWindow(QMainWindow):
         self.btn_pause.clicked.connect(self._on_safe_pause)
 
         self.btn_resume = QPushButton("继续生产")
+        self.btn_resume.setObjectName("btn_resume")
         self.btn_resume.setEnabled(False)
         self.btn_resume.clicked.connect(self._on_start_production)
 
-        btn_layout.addWidget(self.btn_gen_plan)
-        btn_layout.addWidget(self.btn_start)
-        btn_layout.addWidget(self.btn_pause)
-        btn_layout.addWidget(self.btn_resume)
-        btn_layout.addStretch()
+        act_layout.addWidget(self.btn_gen_plan)
+        act_layout.addWidget(self.btn_start)
+        act_layout.addWidget(self.btn_pause)
+        act_layout.addWidget(self.btn_resume)
 
-        # 【新需求 3】目标输出目录设定置于打开输出目录左侧
-        btn_layout.addWidget(QLabel("输出目录:"))
-        self.txt_output_dir = QLineEdit()
-        self.txt_output_dir.setMinimumWidth(220)
-        default_out = (Path(__file__).resolve().parent.parent.parent / "output").resolve()
-        self.txt_output_dir.setText(str(default_out))
-        self.txt_output_dir.setToolTip("分集音频、视频与字幕的根输出目录")
-        btn_layout.addWidget(self.txt_output_dir)
-
-        self.btn_browse_output = QPushButton("更改...")
-        self.btn_browse_output.clicked.connect(self._on_browse_output)
-        btn_layout.addWidget(self.btn_browse_output)
-
-        self.btn_open_output = QPushButton("打开输出目录")
-        self.btn_open_output.clicked.connect(self._on_open_output)
-        btn_layout.addWidget(self.btn_open_output)
-        layout.addLayout(btn_layout)
-
-        # 进度指示、状态灯与本次任务执行时间
-        prog_layout = QHBoxLayout()
-        prog_layout.setSpacing(8)
-
+        # 状态指示灯与文字移至操作按钮右侧
+        act_layout.addSpacing(14)
         self.lbl_status_led = QLabel("●")
         self.lbl_status_led.setStyleSheet("font-size: 16px; color: #555568; font-weight: bold;")
 
         self.lbl_status = QLabel("空闲就绪 (IDLE)")
         self.lbl_status.setStyleSheet("color: #CCCCCC; font-size: 12px; font-weight: bold;")
 
+        act_layout.addWidget(self.lbl_status_led)
+        act_layout.addWidget(self.lbl_status)
+        act_layout.addStretch()
+
+        layout.addLayout(act_layout)
+
+        # ── 第 3 层：全流程管线 8 节点可视化指示图 ──
+        self.pipeline_flow = PipelineFlowWidget()
+        layout.addWidget(self.pipeline_flow)
+
+        # ── 第 4 层：硬件负载实时监控条 与 全局任务进度条（左右同行并列） ──
+        bottom_monitor_layout = QHBoxLayout()
+        bottom_monitor_layout.setSpacing(12)
+
+        # 左侧：硬件监控条
+        self.resource_monitor_bar = ResourceMonitorBar()
+        bottom_monitor_layout.addWidget(self.resource_monitor_bar, 6)
+
+        # 右侧：进度条与本次任务执行耗时指示（水平并列）
+        prog_widget = QWidget()
+        prog_layout = QHBoxLayout(prog_widget)
+        prog_layout.setContentsMargins(0, 0, 0, 0)
+        prog_layout.setSpacing(8)
+
         self.progress_bar = QProgressBar()
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(0)
+        self.progress_bar.setTextVisible(True)
+        self.progress_bar.setStyleSheet("""
+            QProgressBar {
+                background-color: #15151C;
+                border: 1px solid #333345;
+                border-radius: 4px;
+                text-align: center;
+                color: #FFFFFF;
+                font-weight: bold;
+                height: 24px;
+            }
+            QProgressBar::chunk {
+                background-color: #007ACC;
+                border-radius: 3px;
+            }
+        """)
 
-        # 【新需求 7.3】在进度条右侧加入本次任务的执行时间
         self.lbl_elapsed_time = QLabel("⏱️ 00:00:00")
         self.lbl_elapsed_time.setStyleSheet("color: #4DA6FF; font-weight: bold; font-size: 12px; min-width: 85px;")
         self.lbl_elapsed_time.setToolTip("本次任务执行耗时 (时:分:秒)")
 
-        prog_layout.addWidget(self.lbl_status_led)
-        prog_layout.addWidget(self.lbl_status, 4)
-        prog_layout.addWidget(self.progress_bar, 5)
-        prog_layout.addWidget(self.lbl_elapsed_time)
-        layout.addLayout(prog_layout)
+        prog_layout.addWidget(self.progress_bar, 1)
+        prog_layout.addWidget(self.lbl_elapsed_time, 0)
 
-        # 全流程管线 8 节点可视化指示图
-        self.pipeline_flow = PipelineFlowWidget()
-        layout.addWidget(self.pipeline_flow)
-
-        # 【新需求 7.1】硬件负载实时监控条
-        self.resource_monitor_bar = ResourceMonitorBar()
-        layout.addWidget(self.resource_monitor_bar)
+        bottom_monitor_layout.addWidget(prog_widget, 4)
+        layout.addLayout(bottom_monitor_layout)
 
         return panel
 
@@ -1471,10 +1515,17 @@ class MainWindow(QMainWindow):
             self.txt_bgm_path.setText(clean_path)
 
     def _on_bgm_text_changed(self, text: str) -> None:
-        """背景音乐路径变动时同步更新标签与试听图标状态"""
+        """
+        背景音乐路径变动时同步更新试听图标可用性与样式。
+        【为什么这样设计】
+        解决用户反馈“单独播放背景音频不可用”的根因：
+        初始时 btn_play_bgm 被设为 disabled，必须在此处显式调用 setEnabled(has_bgm) 激活点击事件，
+        并联动切换彩色高亮形态与灰色不可点击形态。
+        """
         clean_text = text.strip()
         has_bgm = bool(clean_text and os.path.exists(clean_text))
         if hasattr(self, 'btn_play_bgm'):
+            self.btn_play_bgm.setEnabled(has_bgm)
             if has_bgm:
                 self.btn_play_bgm.setStyleSheet("QPushButton { background-color: #1A3E26; border: 1px solid #00E676; color: #00E676; }")
                 self.btn_play_bgm.setToolTip(f"点击试听选中的背景音乐:\n{Path(clean_text).name}")

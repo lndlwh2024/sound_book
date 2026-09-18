@@ -38,7 +38,8 @@ def test_main_window_initial_state(qapp):
     assert "9:16" in window.cmb_video_layout.currentText()
     assert "仅生成下一集" in window.cmb_run_mode.currentText()
     assert window.spn_target_duration.value() == 15
-    assert window.spn_min_interval.value() == 3
+    assert window.spn_target_duration.minimum() == 1  # 验证支持 1 分钟超细粒度
+    assert window.spn_min_interval.minimum() == 0.5   # 验证最小间隔下限已同步下调至 0.5 分钟
 
     # 4. 按钮初始可用状态
     assert window.btn_start.isEnabled() is True
@@ -50,6 +51,23 @@ def test_main_window_initial_state(qapp):
     assert "单层" in window.cmb_cover_mode.currentText()
     assert hasattr(window, "chk_skip_english")
     assert window.chk_skip_english.isChecked() is False
+
+    # 6. 背景音频单独试听按键激活联动测试
+    assert hasattr(window, "btn_play_bgm")
+    assert window.btn_play_bgm.isEnabled() is False  # 初始无背景音，处于不可用状态
+    # 模拟输入有效音频文件
+    import tempfile
+    with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp_bgm:
+        tmp_bgm_path = tmp_bgm.name
+    try:
+        window.txt_bgm_path.setText(tmp_bgm_path)
+        assert window.btn_play_bgm.isEnabled() is True  # 填充有效路径后，必须被激活为 True
+        window.txt_bgm_path.clear()
+        assert window.btn_play_bgm.isEnabled() is False # 清空后自动恢复不可用
+    finally:
+        import os
+        if os.path.exists(tmp_bgm_path):
+            os.remove(tmp_bgm_path)
 
 
 def test_main_window_get_current_config(qapp):
