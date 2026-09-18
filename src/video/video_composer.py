@@ -53,11 +53,14 @@ class VideoComposer:
         subtitle: str,
         output_mp4_path: Union[str, Path],
         ass_subtitles_path: Optional[Union[str, Path]] = None,
-        layout_name: Optional[str] = None
+        layout_name: Optional[str] = None,
+        cover_mode: str = "single"
     ) -> bool:
         """
         合成整集 MP4 视频。
         以音频音轨的真实长度为基准（-shortest）。
+        【为什么这样设计】
+        透传 cover_mode 参数至排版引擎，支持用户自由切换单层极简纯黑底板或双层毛玻璃全屏背景。
         """
         cover_path = Path(cover_path)
         audio_path = Path(audio_path)
@@ -78,7 +81,8 @@ class VideoComposer:
         filtergraph = self.layout_engine.build_visual_filtergraph(
             main_title=main_title,
             subtitle=subtitle,
-            ass_subtitles_path=clean_ass
+            ass_subtitles_path=clean_ass,
+            cover_mode=cover_mode
         )
 
         cmd = [
@@ -128,7 +132,8 @@ class VideoComposer:
         main_title: str,
         subtitle: str,
         output_image_path: Union[str, Path],
-        layout_name: Optional[str] = None
+        layout_name: Optional[str] = None,
+        cover_mode: str = "single"
     ) -> bool:
         """
         快速渲染单帧静态排版预览图 (JPG/PNG)，供 GUI 界面展示。
@@ -148,7 +153,8 @@ class VideoComposer:
         filtergraph = self.layout_engine.build_visual_filtergraph(
             main_title=main_title,
             subtitle=subtitle,
-            ass_subtitles_path=None
+            ass_subtitles_path=None,
+            cover_mode=cover_mode
         )
 
         cmd = [

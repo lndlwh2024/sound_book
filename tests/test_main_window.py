@@ -45,6 +45,12 @@ def test_main_window_initial_state(qapp):
     assert window.btn_pause.isEnabled() is False
     assert window.btn_resume.isEnabled() is False
 
+    # 5. 封面模式开关与跳过英文复选框初始状态
+    assert hasattr(window, "cmb_cover_mode")
+    assert "单层" in window.cmb_cover_mode.currentText()
+    assert hasattr(window, "chk_skip_english")
+    assert window.chk_skip_english.isChecked() is False
+
 
 def test_main_window_get_current_config(qapp):
     """测试窗口配置字典提取方法"""
@@ -64,8 +70,17 @@ def test_main_window_get_current_config(qapp):
     assert cfg["run_mode"] == "RUN_NEXT_EPISODE"
     assert cfg["voice_volume_percent"] == 100.0
     assert cfg["bgm_volume_percent"] == 30.0
+    assert cfg["cover_mode"] == "single"
+    assert cfg["skip_english"] is False
     assert "output_dir" in cfg
     assert len(cfg["output_dir"]) > 0
+
+    # 测试动态切换开关与复选框
+    window.chk_skip_english.setChecked(True)
+    window.cmb_cover_mode.setCurrentIndex(1) # 双层毛玻璃
+    cfg_updated = window._get_current_config()
+    assert cfg_updated["skip_english"] is True
+    assert cfg_updated["cover_mode"] == "dual"
 
 
 def test_main_window_tabs_and_monitoring(qapp):

@@ -59,11 +59,20 @@ class SpeechUnitBuilder:
 
 
 
-    def build_from_paragraphs(self, paragraphs: List[Any], chapter_id: str = "chapter_001", start_order: int = 1) -> List[SpeechUnit]:
+    def build_from_paragraphs(
+        self,
+        paragraphs: List[Any],
+        chapter_id: str = "chapter_001",
+        start_order: int = 1,
+        skip_english: bool = False
+    ) -> List[SpeechUnit]:
         """
         从段落列表聚合构建 SpeechUnit 清单。
         采用贪心聚合策略：在不超过 max_chars 且不超过 max_sentences 约束下，
         将相邻短句合并为一条 SpeechUnit。
+        【为什么这样设计】
+        当 skip_english 为 True 时，在分块层再次把关：自动滤除纯英文段落/句子，清洗英文括号注释，
+        确保送入大模型 TTS 的文本全部为高纯度中文，发音自然流畅。
         """
         units: List[SpeechUnit] = []
         current_unit_sentences: List[str] = []
@@ -75,8 +84,26 @@ class SpeechUnitBuilder:
             if not text:
                 continue
 
+            if skip_english:
+                # 过滤无中文的纯英文段落
+                has_chinese = any('\u4e00' <= ch <= '\u9fff' for ch in text)
+                has_alpha = any(ch.isalpha() for ch in text)
+                if not has_chinese and has_alpha:
+                    continue
+                # 清洗中文中的英文括号注释 (如 (workouts))
+                text = re.sub(r'[\(（]\s*[A-Za-z0-9\s,.\'\"-_/]+\s*[\)）]', '', text).strip()
+                if not text:
+                    continue
+
             sentences = self.split_into_sentences(text)
             for s in sentences:
+                if skip_english:
+                    # 过滤纯英文句子
+                    s_has_zh = any('\u4e00' <= ch <= '\u9fff' for ch in s)
+                    s_has_alpha = any(ch.isalpha() for ch in s)
+                    if not s_has_zh and s_has_alpha:
+                        continue
+
                 s_len = len(s)
                 
                 # 判定基础合并条件：句子数未超且字数在预算内
@@ -178,9 +205,9 @@ class TextChunker:
         logger.info(f"全书切分完成，共 {len(chunks)} 个 Chunk")
         return chunks
 
-    def build_speech_units(self, paragraphs: List[Any], chapter_id: str = "chapter_001") -> List[SpeechUnit]:
+    def build_speech_units(self, paragraphs: List[Any], chapter_id: str = "chapter_001", skip_english: bool = False) -> List[SpeechUnit]:
         """直接构建符合书声 v2.0 规范的 SpeechUnit 列表"""
-        return self.speech_unit_builder.build_from_paragraphs(paragraphs, chapter_id=chapter_id)
+        return self.speech_unit_builder.build_from_paragraphs(paragraphs, chapter_id=chapter_id, skip_english=skip_english)
 
     def _chunk_paragraphs(self, paragraphs: List[Any], backend: str, voice: str, speed: float, chapter_id: Any, start_chunk_idx: int) -> List[TTSChunk]:
         """

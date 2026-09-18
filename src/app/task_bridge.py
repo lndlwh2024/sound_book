@@ -79,8 +79,9 @@ class PlanWorker(QThread):
             # 2. 正文清洗阶段
             self.sig_status_changed.emit("CLEANED")
             self.sig_progress_updated.emit(50.0, "【2/8 正文清洗 (CLEANED)】正在执行确定性正文清洗与噪音剔除...")
+            skip_english = bool(cfg.get("skip_english", False))
             cleaner = TextCleaner()
-            cleaned_structure, cleaning_report = cleaner.clean(structure)
+            cleaned_structure, cleaning_report = cleaner.clean(structure, skip_english=skip_english)
 
             # 3. 质量校验阶段
             self.sig_status_changed.emit("VALIDATED")
@@ -155,6 +156,8 @@ class ProductionWorker(QThread):
         nfe_step = int(cfg.get("nfe_step", 16))
         cfg_strength = float(cfg.get("cfg_strength", 2.0))
         speech_speed = float(cfg.get("speech_speed", 1.0))
+        skip_english = bool(cfg.get("skip_english", False))
+        cover_mode = str(cfg.get("cover_mode", "single"))
 
         # 彻底锁定绝对物理路径，支持自定义目标输出根目录
         project_root = Path(__file__).resolve().parent.parent.parent
@@ -186,7 +189,7 @@ class ProductionWorker(QThread):
         self.sig_status_changed.emit("CLEANED")
         self.sig_progress_updated.emit(10.0, "【2/8 正文清洗 (CLEANED)】正在执行确定性正文清洗...")
         cleaner = TextCleaner()
-        cleaned_structure, cleaning_report = cleaner.clean(structure)
+        cleaned_structure, cleaning_report = cleaner.clean(structure, skip_english=skip_english)
 
         # 3. 校验阶段
         self.sig_status_changed.emit("VALIDATED")
@@ -231,11 +234,6 @@ class ProductionWorker(QThread):
             )
 
             # 为该分集创建对应产物路径
-            # 【为什么这样设计】
-            # MP4 视频画面已内嵌专业醒目大字烧录硬字幕（62px 粗体白字 + 浓黑描边）。
-            # 若在 MP4 同级目录输出任何 Episode_*.srt 或 *.transcript.srt，
-            # PotPlayer、VLC 等主流播放器会自动模糊匹配加载外挂字幕，导致画面出现双重字幕重叠。
-            # 因此将所有外挂字幕统一规整移入 subtitles/ 专属子目录，保证根目录视频播放纯净整洁。
             ep_audio_path = book_dir / f"episode_{ep_order:02d}_mixed.m4a"
             subtitles_dir = output_base / "subtitles"
             subtitles_dir.mkdir(parents=True, exist_ok=True)
@@ -248,7 +246,7 @@ class ProductionWorker(QThread):
             ep_chapters = [c for c in cleaned_structure.chapters if getattr(c, 'chapter_id', c.id) in ep.chapter_ids]
             ep_units = []
             for ch in ep_chapters:
-                ep_units.extend(chunker.build_speech_units(ch.paragraphs, chapter_id=getattr(ch, 'chapter_id', ch.id)))
+                ep_units.extend(chunker.build_speech_units(ch.paragraphs, chapter_id=getattr(ch, 'chapter_id', ch.id), skip_english=skip_english))
 
 
             tts_engine_name = str(cfg.get("tts_engine", "f5")).lower()
@@ -363,7 +361,8 @@ class ProductionWorker(QThread):
                     subtitle=ep.subtitle,
                     output_mp4_path=ep_mp4_path,
                     ass_subtitles_path=ep_ass_path,
-                    layout_name=layout_name
+                    layout_name=layout_name,
+                    cover_mode=cover_mode
                 )
 
             episodes_manifests.append(EpisodeManifest(

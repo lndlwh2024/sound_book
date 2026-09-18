@@ -50,15 +50,28 @@ def test_contain_geometry_extreme_aspect_ratios():
 
 
 def test_build_visual_filtergraph_syntax():
-    """测试视觉滤镜图构建"""
+    """测试视觉滤镜图构建（同时覆盖单层极简模式与双层毛玻璃模式）"""
     engine = VideoLayoutEngine("portrait_9_16")
-    graph = engine.build_visual_filtergraph(
+    # 1. 单层极简模式 (纯黑科技底板，杜绝两层截图重影)
+    graph_single = engine.build_visual_filtergraph(
         main_title="《人类简史》精选",
         subtitle="第01集 · 认知革命",
-        ass_subtitles_path=None
+        ass_subtitles_path=None,
+        cover_mode="single"
     )
-    assert "boxblur=" in graph
-    assert "scale=1080:1920" in graph
-    assert "drawtext=" in graph
-    assert "认知革命" in graph
-    assert "[vout]" in graph
+    assert "drawbox=c=0x0D0D12:t=fill" in graph_single
+    assert "scale=1080:1920" in graph_single
+    assert "drawtext=" in graph_single
+    assert "认知革命" in graph_single
+    assert "[vout]" in graph_single
+
+    # 2. 双层毛玻璃模式 (高斯模糊全屏底板 + 居中清晰原画)
+    graph_dual = engine.build_visual_filtergraph(
+        main_title="《人类简史》精选",
+        subtitle="第01集 · 认知革命",
+        ass_subtitles_path=None,
+        cover_mode="dual"
+    )
+    assert "boxblur=" in graph_dual
+    assert "scale=1080:1920" in graph_dual
+    assert "[vout]" in graph_dual

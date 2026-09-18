@@ -134,17 +134,15 @@ class VideoLayoutEngine:
         main_title: str,
         subtitle: str,
         ass_subtitles_path: Optional[str] = None,
-        font_name: Optional[str] = None
+        font_name: Optional[str] = None,
+        cover_mode: str = "single"
     ) -> str:
         """
         构建视觉图层复合滤镜描述符（Filtergraph）。
-        滤镜流顺序：
-        1. [0:v] 封面放大填满并裁剪为画布尺寸，应用高斯模糊 -> [bg]
-        2. [0:v] 封面等比缩放居中 Contain -> [fg]
-        3. [bg][fg] 叠加居中 -> [comp1]
-        4. [comp1] 渲染主标题文本 -> [comp2]
-        5. [comp2] 渲染自动副标题文本 -> [comp3]
-        6. (可选) [comp3] 挂载 ASS 字幕 -> [vout]
+        【为什么这样设计】
+        1. 单层极简模式 (single)：使用纯净科技深黑底板 (#0D0D12)，封面仅作为清晰前景等比居中，杜绝底层模糊放大导致的双层重影问题；
+        2. 双层毛玻璃模式 (dual)：保持原有的艺术层次感，底层全屏放大裁剪并经高斯模糊处理，前景居中清晰显示；
+        3. 滤镜流通过 [0:v]split 显式派生图层流，确保不同模式下 FFmpeg 滤镜图命名一致且语法规范。
         """
         W = self.layout_spec.width
         H = self.layout_spec.height
@@ -159,16 +157,25 @@ class VideoLayoutEngine:
         safe_title = main_title.replace("'", "").replace(":", r"\:")
         safe_subtitle = subtitle.replace("'", "").replace(":", r"\:")
 
-        # 1. 背景层：保持比例放大至覆盖全屏，居中裁剪为精确宽高，再执行高斯模糊
-        bg_filter = (
-            f"[0:v]scale={W}:{H}:force_original_aspect_ratio=increase,"
-            f"crop={W}:{H},boxblur={sigma}:5[bg];"
-        )
-
-        # 2. 前景层：等比缩放居中放置在安全区内
-        fg_filter = (
-            f"[0:v]scale={max_w}:{max_h}:force_original_aspect_ratio=decrease[fg];"
-        )
+        if cover_mode == "dual":
+            # 模式 A：双层毛玻璃（底层等比放大铺满裁剪 + 高斯模糊）
+            bg_filter = (
+                f"[0:v]split[v_bg][fg_in];"
+                f"[v_bg]scale={W}:{H}:force_original_aspect_ratio=increase,"
+                f"crop={W}:{H},boxblur={sigma}:5[bg];"
+            )
+            fg_filter = (
+                f"[fg_in]scale={max_w}:{max_h}:force_original_aspect_ratio=decrease[fg];"
+            )
+        else:
+            # 模式 B：单层极简纯净底板（深黑科技背景 #0D0D12，杜绝二次重影）
+            bg_filter = (
+                f"[0:v]split[v_bg][fg_in];"
+                f"[v_bg]scale={W}:{H},drawbox=c=0x0D0D12:t=fill[bg];"
+            )
+            fg_filter = (
+                f"[fg_in]scale={max_w}:{max_h}:force_original_aspect_ratio=decrease[fg];"
+            )
 
         # 3. 叠加前景到背景居中位置
         overlay_filter = (

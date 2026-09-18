@@ -17,10 +17,19 @@ class TextCleaner:
         ]
         # 排版控制字符（排版噪声）
         self.control_chars_pattern = re.compile(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]')
+        # 中文夹杂的纯英文括号注释 (如 (workouts)、（General Issues）等)
+        self.en_bracket_pattern = re.compile(r'[\(（]\s*[A-Za-z0-9\s,.\'\"-_/]+\s*[\)）]')
 
-    def clean(self, book_structure: BookStructure) -> Tuple[BookStructure, CleaningReport]:
-        """清洗书籍文本，返回清洗后的结构和清洗报告。"""
-        logger.info("开始进行确定性文本清洗...")
+    def clean(self, book_structure: BookStructure, skip_english: bool = False) -> Tuple[BookStructure, CleaningReport]:
+        """
+        清洗书籍文本，返回清洗后的结构和清洗报告。
+        【为什么这样设计】
+        当 skip_english 为 True 时：
+        1. 自动清洗中文夹杂的英文注释（如 “投资运作(workouts)” -> “投资运作”），避免 TTS 发音割裂；
+        2. 自动过滤纯英文段落（如英文前言、版权声明、引文），无需朗读；
+        3. 纯文本处理层过滤，绝不修改任何 TTS 模型的采样参数与音色权重，杜绝音质劣化。
+        """
+        logger.info(f"开始进行确定性文本清洗 (skip_english={skip_english})...")
         
         before_chars = 0
         after_chars = 0
@@ -50,14 +59,26 @@ class TextCleaner:
             # 4. 修复换行
             lines = self._fix_newlines(lines)
             
-            # 5. 合并连续空白 & 7. 去除排版噪声
+            # 5. 合并连续空白 & 去除排版噪声 & 跳过英文处理
             cleaned_lines = []
             for line in lines:
                 # 移除明显的排版控制字符
                 line = self.control_chars_pattern.sub('', line)
                 # 合并多个连续空格为一个
                 line = re.sub(r'[ \t]+', ' ', line)
-                cleaned_lines.append(line.strip())
+                stripped = line.strip()
+
+                if skip_english and stripped:
+                    # 1) 如果整行完全没有汉字，且含有英文字母，认定为纯英文段落/版权页，直接跳过
+                    has_chinese = any('\u4e00' <= ch <= '\u9fff' for ch in stripped)
+                    has_alpha = any(ch.isalpha() for ch in stripped)
+                    if not has_chinese and has_alpha:
+                        continue
+                    # 2) 清洗中文夹杂的英文括号注释
+                    line = self.en_bracket_pattern.sub('', line)
+                    stripped = line.strip()
+
+                cleaned_lines.append(stripped)
             
             # 6. 去掉多余空行
             final_lines = []

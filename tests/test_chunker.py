@@ -71,3 +71,28 @@ def test_kokoro_subsentence_split():
         assert len(s) <= 45
         assert s[-1] in "。！？!?；;,，、…"
 
+
+def test_speech_unit_builder_skip_english():
+    """测试 SpeechUnit 构建时智能跳过纯英文段落并清洗中文夹杂的英文括号注释"""
+    from src.chunker.text_chunker import SpeechUnitBuilder
+    builder = SpeechUnitBuilder()
+    paras = [
+        "第一段是核心中文正文。",
+        "Copyright 2026 Berkshire Hathaway Inc. All rights reserved.",
+        "我们要重点关注特殊投资运作（workouts），这是核心策略。",
+        "Another pure English paragraph to be skipped.",
+        "第二类是普通股票(General Issues)。"
+    ]
+    # 开启 skip_english
+    units = builder.build_from_paragraphs(paras, skip_english=True)
+    texts = [u.text for u in units]
+
+    # 1. 验证纯英文段落被彻底过滤
+    assert not any("Copyright" in t for t in texts)
+    assert not any("Another pure English" in t for t in texts)
+
+    # 2. 验证中文夹杂的英文括号注释被清洗干净
+    assert any("特殊投资运作" in t and "workouts" not in t for t in texts)
+    assert any("普通股票" in t and "General Issues" not in t for t in texts)
+
+

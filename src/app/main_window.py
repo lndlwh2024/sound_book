@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QLabel, QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox, QSlider, QPushButton,
     QProgressBar, QFileDialog, QMessageBox, QGroupBox, QScrollArea,
-    QFrame, QTextEdit, QTabWidget, QDialog
+    QFrame, QTextEdit, QTabWidget, QDialog, QCheckBox
 )
 from PySide6.QtCore import Qt, QSize, QTimer, Signal, QObject, QPointF
 from PySide6.QtGui import QPixmap, QFont, QIcon, QPainter, QColor, QPolygonF, QFontMetrics
@@ -653,13 +653,14 @@ class MainWindow(QMainWindow):
             QPushButton.audio_play_btn {
                 background-color: #20202C;
                 border: 1.5px solid #444458;
-                border-radius: 17px;
-                font-size: 13px;
-                min-width: 34px;
-                max-width: 34px;
-                min-height: 34px;
-                max-height: 34px;
-                padding: 0px;
+                border-radius: 19px;
+                font-size: 20px;
+                font-weight: bold;
+                min-width: 38px;
+                max-width: 38px;
+                min-height: 38px;
+                max-height: 38px;
+                padding: 0px 0px 0px 2px;
                 color: #888899;
             }
             QPushButton.audio_play_btn:hover:enabled {
@@ -809,8 +810,11 @@ class MainWindow(QMainWindow):
         left_panel = self._build_left_config_panel()
         right_panel = self._build_right_preview_panel()
 
-        top_split_layout.addWidget(left_panel, 5)
-        top_split_layout.addWidget(right_panel, 5)
+        # 【为什么这样设计】
+        # 响应用户最新要求“尽量拓展右侧两个窗口的空间”，将水平比例调整为 38:62，
+        # 左侧表单收窄为 38%，大幅释放空间给右侧排版画布、音频工作台与三 Sheet 诊断面板。
+        top_split_layout.addWidget(left_panel, 38)
+        top_split_layout.addWidget(right_panel, 62)
         main_layout.addLayout(top_split_layout, 8)
 
         # 2. 底部控制区：动作按钮、全局进度、硬件负载监控
@@ -891,6 +895,15 @@ class MainWindow(QMainWindow):
         self.spn_speed.setSuffix("x")
         self.spn_speed.setToolTip("朗读语速倍率：默认 1.0x 标准语速")
 
+        self.chk_skip_english = QCheckBox("跳过英文")
+        self.chk_skip_english.setChecked(False)
+        self.chk_skip_english.setToolTip(
+            "智能跳过英文：\n"
+            "• 自动过滤无中文的纯英文段落（如英文版权页、纯英文引文等）；\n"
+            "• 自动清洗中文夹杂的英文括号注释如 (workouts) -> 空；\n"
+            "• 严格保证：完全不改变任何 TTS 扩散推理参数、步数与音色质量。"
+        )
+
         v_layout.addWidget(QLabel("TTS 引擎:"), 0, 0)
         v_layout.addWidget(self.cmb_tts_engine, 0, 1)
         v_layout.addWidget(self.btn_azure_config, 0, 2)
@@ -903,6 +916,7 @@ class MainWindow(QMainWindow):
 
         v_layout.addWidget(QLabel("朗读语速:"), 3, 0)
         v_layout.addWidget(self.spn_speed, 3, 1)
+        v_layout.addWidget(self.chk_skip_english, 3, 2)
 
         layout.addWidget(grp_voice)
 
@@ -940,6 +954,21 @@ class MainWindow(QMainWindow):
         btn_browse_cover = QPushButton("选择封面...")
         btn_browse_cover.clicked.connect(self._on_browse_cover)
 
+        # 【为什么这样设计】
+        # 响应用户需求：保留原有毛玻璃双层艺术背景，同时提供消除两层截图重影的单层极简选项。
+        # 在选择封面同行右侧提供快速切换开关，联动视频合成与右侧画布实时预览。
+        self.cmb_cover_mode = QComboBox()
+        self.cmb_cover_mode.addItems(["单层极简", "双层毛玻璃"])
+        self.cmb_cover_mode.setToolTip("封面呈现模式切换：\n• 单层极简：科技纯黑底板 + 单层居中原画，纯净无重影\n• 双层毛玻璃：全屏拉伸高斯模糊底层 + 居中清晰原画")
+        self.cmb_cover_mode.currentIndexChanged.connect(self._refresh_visual_preview)
+
+        cover_row = QHBoxLayout()
+        cover_row.setContentsMargins(0, 0, 0, 0)
+        cover_row.setSpacing(6)
+        cover_row.addWidget(self.txt_cover_path, 1)
+        cover_row.addWidget(btn_browse_cover)
+        cover_row.addWidget(self.cmb_cover_mode)
+
         self.txt_bgm_path = QLineEdit()
         self.txt_bgm_path.setPlaceholderText("留空则不添加背景音乐 (纯净人声)...")
         self.txt_bgm_path.textChanged.connect(self._on_bgm_text_changed)
@@ -962,8 +991,7 @@ class MainWindow(QMainWindow):
         m_layout.addWidget(self.cmb_run_mode, 2, 1, 1, 3)
 
         m_layout.addWidget(QLabel("封面图片:"), 3, 0)
-        m_layout.addWidget(self.txt_cover_path, 3, 1, 1, 2)
-        m_layout.addWidget(btn_browse_cover, 3, 3)
+        m_layout.addLayout(cover_row, 3, 1, 1, 3)
 
         m_layout.addWidget(QLabel("背景音乐:"), 4, 0)
         m_layout.addWidget(self.txt_bgm_path, 4, 1, 1, 2)
@@ -1040,7 +1068,7 @@ class MainWindow(QMainWindow):
         # [中央] 封面与标题排版预览
         self.lbl_preview_image = QLabel()
         self.lbl_preview_image.setAlignment(Qt.AlignCenter)
-        self.lbl_preview_image.setMinimumSize(220, 210)
+        self.lbl_preview_image.setMinimumSize(240, 280)
         self.lbl_preview_image.setStyleSheet("border: 1px dashed #555566; background-color: #121216; border-radius: 6px;")
         stage_layout.addWidget(self.lbl_preview_image, 1)
 
@@ -1094,7 +1122,10 @@ class MainWindow(QMainWindow):
         self.btn_mix_preview.clicked.connect(self._on_test_mix)
         wb_main_layout.addWidget(self.btn_mix_preview)
 
-        layout.addWidget(grp_workbench, 4)
+        # 【为什么这样设计】
+        # 响应用户需求：“将右上角的窗口纵向加1/3的长度，右下的窗口纵向减少1/3的长度”，
+        # 将垂直比例调整为 65:35，为封面排版与混音试听留出极度充裕的视觉空间。
+        layout.addWidget(grp_workbench, 65)
 
         # ── 3. 生产计划、硬件诊断与后台实时日志 (三 Sheet TabWidget) ──
         grp_dashboard = QGroupBox("【生产计划全景、系统诊断与实时日志】")
@@ -1136,7 +1167,7 @@ class MainWindow(QMainWindow):
         self.tab_widget.addTab(tab_log_widget, "📜 实时日志")
 
         dash_layout.addWidget(self.tab_widget)
-        layout.addWidget(grp_dashboard, 5)
+        layout.addWidget(grp_dashboard, 35)
         return panel
 
 
@@ -1543,10 +1574,23 @@ class MainWindow(QMainWindow):
                 cover_path = self.txt_cover_path.text().strip() if hasattr(self, 'txt_cover_path') else ""
                 has_cover = bool(cover_path and os.path.exists(cover_path))
 
+                # 识别当前封面模式：单层极简 (纯黑底板) vs 双层毛玻璃 (全屏背景)
+                is_dual_mode = hasattr(self, 'cmb_cover_mode') and "双层" in self.cmb_cover_mode.currentText()
+
                 if has_cover:
                     orig_pix = QPixmap(cover_path)
                     if not orig_pix.isNull():
-                        painter.fillRect(0, 0, canvas_w, canvas_h, QColor("#121218"))
+                        if is_dual_mode:
+                            # 双层毛玻璃模式：底层全屏拉伸铺满并叠加半透明暗层模拟高斯模糊毛玻璃
+                            bg_pix = orig_pix.scaled(canvas_w, canvas_h, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
+                            bx = max(0, (bg_pix.width() - canvas_w) // 2)
+                            by = max(0, (bg_pix.height() - canvas_h) // 2)
+                            painter.drawPixmap(0, 0, bg_pix, bx, by, canvas_w, canvas_h)
+                            painter.fillRect(0, 0, canvas_w, canvas_h, QColor(0, 0, 0, 168))
+                        else:
+                            # 单层极简模式：深黑纯净科技底板 (#0D0D12)，彻底消除底层模糊重影
+                            painter.fillRect(0, 0, canvas_w, canvas_h, QColor("#0D0D12"))
+
                         scaled_cover = orig_pix.scaled(
                             int(canvas_w * 0.85), int(canvas_h * 0.65),
                             Qt.KeepAspectRatio, Qt.SmoothTransformation
@@ -1664,7 +1708,9 @@ class MainWindow(QMainWindow):
             "voice_profile": self.cmb_voice_profile.currentText(),
             "nfe_step": self.spn_nfe_step.value(),
             "cfg_strength": default_cfg_strength,
-            "speech_speed": self.spn_speed.value()
+            "speech_speed": self.spn_speed.value(),
+            "cover_mode": "single" if hasattr(self, 'cmb_cover_mode') and "单层" in self.cmb_cover_mode.currentText() else "dual",
+            "skip_english": self.chk_skip_english.isChecked() if hasattr(self, 'chk_skip_english') else False
         }
 
     def _on_generate_plan(self) -> None:
