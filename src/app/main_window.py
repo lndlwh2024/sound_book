@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QLabel, QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox, QSlider, QPushButton,
     QProgressBar, QFileDialog, QMessageBox, QGroupBox, QScrollArea,
-    QFrame, QTextEdit, QTabWidget, QDialog, QCheckBox
+    QFrame, QTextEdit, QTabWidget, QDialog, QCheckBox, QSizePolicy
 )
 from PySide6.QtCore import Qt, QSize, QTimer, Signal, QObject, QPointF
 from PySide6.QtGui import QPixmap, QFont, QIcon, QPainter, QColor, QPolygonF, QFontMetrics
@@ -929,6 +929,18 @@ class MainWindow(QMainWindow):
         self.cmb_video_layout.addItems(["竖屏 9:16 (1080x1920, 手机/短视频流)", "横屏 16:9 (1920x1080, 电脑/B站/宽屏)"])
         self.cmb_video_layout.currentIndexChanged.connect(self._refresh_visual_preview)
 
+        # 【为什么这样设计】
+        # 响应用户需求 6：“在单集时长上 要加入一个选项 即 按自然章节切割还是按时长切割，
+        # 如果是时长切割则与配置一致，若按自然章节切割，则无需限定单集时长（由书籍章节长短决定）”。
+        self.cmb_split_mode = QComboBox()
+        self.cmb_split_mode.addItems(["按目标时长切割 (推荐)", "按自然章节切割 (一章一集)"])
+        self.cmb_split_mode.setToolTip(
+            "单集切割逻辑：\n"
+            "• 按目标时长切割：按设定的时长预算贪心聚合章节，尾部残余自动合并；\n"
+            "• 按自然章节切割：原生 1:1 映射书籍章节，一章一集，无需限定单集时长。"
+        )
+        self.cmb_split_mode.currentIndexChanged.connect(self._on_split_mode_changed)
+
         self.spn_target_duration = QSpinBox()
         self.spn_target_duration.setRange(1, 120)
         self.spn_target_duration.setValue(15)
@@ -942,12 +954,31 @@ class MainWindow(QMainWindow):
         self.spn_min_interval.setSuffix(" 分钟")
         self.spn_min_interval.setToolTip("两集合并最小阈值：若尾部残余内容不足此阈值，自动合并到最后一集（支持 0.5~10 分钟）")
 
+        # 【为什么这样设计】
+        # 响应用户需求 5：“运行方式中，仅生成下一集、全书连续生成、限时生成，其中限时生成没有输入限时时间的入口”。
+        # 在运行方式同行右侧放置时间输入框 spn_limit_minutes，默认 60 分钟，仅在限时生成模式下亮起激活。
         self.cmb_run_mode = QComboBox()
         self.cmb_run_mode.addItems([
-            "仅生成下一集 (推荐夜间/防降频)",
-            "全书连续生成 (全部 67 集连续批量生产)",
-            "限时运行 (生产指定集数后自动休眠)"
+            "仅生成下一集 (防降频/单集调试)",
+            "全书连续生成 (全部章节连续生产)",
+            "限时生成 (生产指定时长后自动休眠)"
         ])
+        self.cmb_run_mode.setToolTip("选择生产调度策略：仅生成下一集、全书连续批量或限时运行自动休眠")
+        self.cmb_run_mode.currentIndexChanged.connect(self._on_run_mode_changed)
+
+        self.spn_limit_minutes = QSpinBox()
+        self.spn_limit_minutes.setRange(5, 1440)
+        self.spn_limit_minutes.setSingleStep(10)
+        self.spn_limit_minutes.setValue(60)
+        self.spn_limit_minutes.setSuffix(" 分钟")
+        self.spn_limit_minutes.setToolTip("限时生成运行阈值：累计运行达到设定时长后，自动保存断点并休眠停机")
+        self.spn_limit_minutes.setEnabled(False)
+
+        run_mode_layout = QHBoxLayout()
+        run_mode_layout.setContentsMargins(0, 0, 0, 0)
+        run_mode_layout.setSpacing(6)
+        run_mode_layout.addWidget(self.cmb_run_mode, 1)
+        run_mode_layout.addWidget(self.spn_limit_minutes, 0)
 
         self.txt_cover_path = QLineEdit()
         self.txt_cover_path.setPlaceholderText("留空则使用默认极简书影...")
@@ -955,9 +986,6 @@ class MainWindow(QMainWindow):
         btn_browse_cover = QPushButton("选择封面...")
         btn_browse_cover.clicked.connect(self._on_browse_cover)
 
-        # 【为什么这样设计】
-        # 响应用户需求：保留原有毛玻璃双层艺术背景，同时提供消除两层截图重影的单层极简选项。
-        # 在选择封面同行右侧提供快速切换开关，联动视频合成与右侧画布实时预览。
         self.cmb_cover_mode = QComboBox()
         self.cmb_cover_mode.addItems(["单层极简", "双层毛玻璃"])
         self.cmb_cover_mode.setToolTip("封面呈现模式切换：\n• 单层极简：科技纯黑底板 + 单层居中原画，纯净无重影\n• 双层毛玻璃：全屏拉伸高斯模糊底层 + 居中清晰原画")
@@ -983,25 +1011,53 @@ class MainWindow(QMainWindow):
         m_layout.addWidget(QLabel("视频版式:"), 0, 0)
         m_layout.addWidget(self.cmb_video_layout, 0, 1, 1, 3)
 
-        m_layout.addWidget(QLabel("单集时长:"), 1, 0)
-        m_layout.addWidget(self.spn_target_duration, 1, 1)
-        m_layout.addWidget(QLabel("最小间隔:"), 1, 2)
-        m_layout.addWidget(self.spn_min_interval, 1, 3)
+        m_layout.addWidget(QLabel("切割模式:"), 1, 0)
+        m_layout.addWidget(self.cmb_split_mode, 1, 1, 1, 3)
 
-        m_layout.addWidget(QLabel("运行方式:"), 2, 0)
-        m_layout.addWidget(self.cmb_run_mode, 2, 1, 1, 3)
+        m_layout.addWidget(QLabel("单集时长:"), 2, 0)
+        m_layout.addWidget(self.spn_target_duration, 2, 1)
+        m_layout.addWidget(QLabel("最小间隔:"), 2, 2)
+        m_layout.addWidget(self.spn_min_interval, 2, 3)
 
-        m_layout.addWidget(QLabel("封面图片:"), 3, 0)
-        m_layout.addLayout(cover_row, 3, 1, 1, 3)
+        m_layout.addWidget(QLabel("运行方式:"), 3, 0)
+        m_layout.addLayout(run_mode_layout, 3, 1, 1, 3)
 
-        m_layout.addWidget(QLabel("背景音乐:"), 4, 0)
-        m_layout.addWidget(self.txt_bgm_path, 4, 1, 1, 2)
-        m_layout.addWidget(btn_browse_bgm, 4, 3)
+        m_layout.addWidget(QLabel("封面图片:"), 4, 0)
+        m_layout.addLayout(cover_row, 4, 1, 1, 3)
 
-        m_layout.addWidget(QLabel("视频主标题:"), 5, 0)
-        m_layout.addWidget(self.txt_main_title, 5, 1, 1, 3)
+        m_layout.addWidget(QLabel("背景音乐:"), 5, 0)
+        m_layout.addWidget(self.txt_bgm_path, 5, 1, 1, 2)
+        m_layout.addWidget(btn_browse_bgm, 5, 3)
+
+        m_layout.addWidget(QLabel("视频主标题:"), 6, 0)
+        m_layout.addWidget(self.txt_main_title, 6, 1, 1, 3)
 
         layout.addWidget(grp_video)
+
+        # 【为什么这样设计】
+        # 响应用户需求 1：“输出目录要缩到左侧栏目下，省出的空间由 生产计划全景的框向下拉 并与左框对齐下沿”。
+        # 将原底部横跨整行的输出目录收纳至左侧配置面板最下方，使左右两栏底部水平齐平，界面紧凑和谐。
+        grp_output = QGroupBox("【目标输出目录】")
+        o_layout = QHBoxLayout(grp_output)
+        o_layout.setContentsMargins(8, 10, 8, 8)
+        o_layout.setSpacing(6)
+
+        self.txt_output_dir = QLineEdit()
+        default_out = (Path(__file__).resolve().parent.parent.parent / "output").resolve()
+        self.txt_output_dir.setText(str(default_out))
+        self.txt_output_dir.setToolTip("分集音频、视频与字幕的根输出目录")
+
+        self.btn_browse_output = QPushButton("更改...")
+        self.btn_browse_output.clicked.connect(self._on_browse_output)
+
+        self.btn_open_output = QPushButton("打开目录")
+        self.btn_open_output.clicked.connect(self._on_open_output)
+
+        o_layout.addWidget(self.txt_output_dir, 1)
+        o_layout.addWidget(self.btn_browse_output)
+        o_layout.addWidget(self.btn_open_output)
+
+        layout.addWidget(grp_output)
         layout.addStretch()
         return panel
 
@@ -1174,44 +1230,20 @@ class MainWindow(QMainWindow):
 
     def _build_bottom_control_panel(self) -> QWidget:
         """
-        构建底部控制区与监控指示（4 层一体化空间重构）。
+        构建底部控制区与监控指示（精简 3 层布局）。
         【为什么这样设计】
-        根据用户最新界面批注（红箭头与红字标注）：
-        1. [第 1 层] 输出目录行整块移至顶部独立成行，不再挤在操作按钮右侧；
-        2. [第 2 层] 状态指示（呼吸灯与状态文字）移至【继续生产】按钮右侧同行展示，动作与状态强关联；
-        3. [第 3 层] 8 步全流程管线指示图贯穿展开；
-        4. [第 4 层] 硬件负载实时监控条与全局进度条横向左右并列，彻底填补右下角空白，空间利用率达到极致。
+        响应用户需求 1 & 2：
+        1. 输出目录整行已收纳至左侧面板最下方，使底部腾出高度，右侧生产计划面板自然向下延伸并与左框齐平；
+        2. 动作按钮与状态指示直接位于第一层，lbl_status 被赋予 stretch=1 与 Expanding 策略，
+           在横向有充裕空间时完整展示全部内容，只有触碰右边界时才优雅省略，悬停显示 ToolTip；
+        3. 第二层为 8 节点管线图，第三层为硬件负载与进度条。
         """
         panel = QWidget()
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
 
-        # ── 第 1 层：目标输出根目录设定（横跨上方整行） ──
-        out_layout = QHBoxLayout()
-        out_layout.setSpacing(8)
-
-        lbl_out = QLabel("输出目录:")
-        lbl_out.setStyleSheet("font-weight: bold; color: #CCCCCC; font-size: 12px;")
-        out_layout.addWidget(lbl_out)
-
-        self.txt_output_dir = QLineEdit()
-        default_out = (Path(__file__).resolve().parent.parent.parent / "output").resolve()
-        self.txt_output_dir.setText(str(default_out))
-        self.txt_output_dir.setToolTip("分集音频、视频与字幕的根输出目录")
-        out_layout.addWidget(self.txt_output_dir, 1)
-
-        self.btn_browse_output = QPushButton("更改...")
-        self.btn_browse_output.clicked.connect(self._on_browse_output)
-        out_layout.addWidget(self.btn_browse_output)
-
-        self.btn_open_output = QPushButton("打开输出目录")
-        self.btn_open_output.clicked.connect(self._on_open_output)
-        out_layout.addWidget(self.btn_open_output)
-
-        layout.addLayout(out_layout)
-
-        # ── 第 2 层：核心动作按钮组 + 任务状态反馈（同行并列） ──
+        # ── 第 1 层：核心动作按钮组 + 任务状态反馈（自适应整行宽度展开） ──
         act_layout = QHBoxLayout()
         act_layout.setSpacing(10)
 
@@ -1237,17 +1269,18 @@ class MainWindow(QMainWindow):
         act_layout.addWidget(self.btn_pause)
         act_layout.addWidget(self.btn_resume)
 
-        # 状态指示灯与文字移至操作按钮右侧
+        # 状态指示灯与自适应全宽展示文本
         act_layout.addSpacing(14)
         self.lbl_status_led = QLabel("●")
         self.lbl_status_led.setStyleSheet("font-size: 16px; color: #555568; font-weight: bold;")
 
         self.lbl_status = QLabel("空闲就绪 (IDLE)")
+        self.lbl_status.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self.lbl_status.setStyleSheet("color: #CCCCCC; font-size: 12px; font-weight: bold;")
+        self.lbl_status.setToolTip("当前生产流水线状态: 空闲就绪 (IDLE)")
 
         act_layout.addWidget(self.lbl_status_led)
-        act_layout.addWidget(self.lbl_status)
-        act_layout.addStretch()
+        act_layout.addWidget(self.lbl_status, 1)
 
         layout.addLayout(act_layout)
 
@@ -1501,6 +1534,52 @@ class MainWindow(QMainWindow):
             if not self.txt_main_title.text().strip():
                 self.txt_main_title.setText(f"《{clean_stem}》精选")
 
+            # 【为什么这样设计】
+            # 响应用户需求 3：“程序没有自动获取书籍PDF的封面图片（并自动裁剪成设置的竖屏或横屏）”
+            # 当选择 PDF 电子书时，自动使用 PyMuPDF 提取第 1 页高清位图（200 DPI）作为封面图片，
+            # 自动保存落盘并填入 txt_cover_path，立即触发右侧画布的实时 Contain 等比排版渲染。
+            if clean_path.lower().endswith(".pdf"):
+                try:
+                    import pymupdf as fitz
+                    doc = fitz.open(clean_path)
+                    if len(doc) > 0:
+                        page = doc[0]
+                        pix = page.get_pixmap(dpi=200)
+                        out_dir = Path(self.txt_output_dir.text().strip() or "output") / "covers"
+                        out_dir.mkdir(parents=True, exist_ok=True)
+                        safe_stem = sanitize_filename(clean_stem) or "book"
+                        cover_file = (out_dir / f"{safe_stem}_cover.png").resolve()
+                        pix.save(str(cover_file))
+                        doc.close()
+                        self.txt_cover_path.setText(str(cover_file))
+                        self._refresh_visual_preview()
+                        logger.info(f"已自动从书籍 PDF 提取第一页封面: {cover_file}")
+                except Exception as e:
+                    logger.warning(f"自动提取 PDF 封面失败: {e}")
+
+    def _on_split_mode_changed(self, idx: int = 0) -> None:
+        """
+        单集切割模式联动处理。
+        【为什么这样设计】
+        响应用户需求 6：若按自然章节切割，单集时长由书籍章节实际长度决定，无需限定单集时长与最小间隔，
+        故自动置灰锁定这两个微调框；若按目标时长切割，则恢复激活。
+        """
+        if hasattr(self, 'cmb_split_mode') and hasattr(self, 'spn_target_duration') and hasattr(self, 'spn_min_interval'):
+            is_by_duration = "时长" in self.cmb_split_mode.currentText()
+            self.spn_target_duration.setEnabled(is_by_duration)
+            self.spn_min_interval.setEnabled(is_by_duration)
+
+    def _on_run_mode_changed(self, idx: int = 0) -> None:
+        """
+        运行方式联动处理。
+        【为什么这样设计】
+        响应用户需求 5：限时生成增加输入入口。当选择限时生成时，微调框激活；
+        其他模式（仅生成下一集、全书连续生成）则置灰锁定。
+        """
+        if hasattr(self, 'cmb_run_mode') and hasattr(self, 'spn_limit_minutes'):
+            is_limit = "限时" in self.cmb_run_mode.currentText()
+            self.spn_limit_minutes.setEnabled(is_limit)
+
     def _on_browse_cover(self) -> None:
         file_path, _ = QFileDialog.getOpenFileName(self, "选择封面图像", "", "Images (*.jpg *.jpeg *.png *.webp)")
         if file_path:
@@ -1747,9 +1826,11 @@ class MainWindow(QMainWindow):
             "output_dir": self.txt_output_dir.text().strip(),
             "start_page": self.spn_start_page.value(),
             "video_layout": layout_name,
+            "split_mode": "by_chapter" if hasattr(self, 'cmb_split_mode') and "自然章节" in self.cmb_split_mode.currentText() else "by_duration",
             "target_duration_mins": float(self.spn_target_duration.value()),
             "min_interval_mins": float(self.spn_min_interval.value()),
             "run_mode": run_mode,
+            "limit_duration_mins": float(self.spn_limit_minutes.value()) if hasattr(self, 'spn_limit_minutes') else 60.0,
             "cover_path": self.txt_cover_path.text().strip(),
             "bgm_path": self.txt_bgm_path.text().strip(),
             "main_title": self.txt_main_title.text().strip(),
@@ -1773,7 +1854,9 @@ class MainWindow(QMainWindow):
         self.btn_gen_plan.setEnabled(False)
         self.lbl_status_led.setText("●")
         self.lbl_status_led.setStyleSheet("font-size: 16px; color: #FFD93D; font-weight: bold;")
-        self.lbl_status.setText("正在分析全书章节与生成生产计划 (PLANNING)...")
+        plan_msg = "正在分析全书章节与生成生产计划 (PLANNING)..."
+        self.lbl_status.setText(plan_msg)
+        self.lbl_status.setToolTip(plan_msg)
         self.pipeline_flow.reset_pipeline()
         self.tab_widget.setCurrentIndex(0) # 切换到分集规划 Sheet
         self.bridge.generate_plan(cfg)
@@ -1917,6 +2000,7 @@ class MainWindow(QMainWindow):
             self.lbl_status_led.setStyleSheet("font-size: 14px;")
 
         self.lbl_status.setText(desc)
+        self.lbl_status.setToolTip(desc)
 
         if status == "PLANNED":
             self.btn_gen_plan.setEnabled(True)
@@ -1941,6 +2025,7 @@ class MainWindow(QMainWindow):
             self.progress_bar.setValue(int(pct))
         if msg:
             self.lbl_status.setText(msg)
+            self.lbl_status.setToolTip(msg)
 
     def _on_worker_plan_ready(self, plan: Any) -> None:
         try:

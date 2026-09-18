@@ -62,3 +62,24 @@ def test_final_plan_duration_rebalance():
     assert manifests[0].chapters == ["ch_01", "ch_02"]
     assert manifests[1].chapters == ["ch_03"]
     assert manifests[0].duration == 1850.0
+
+def test_initial_plan_by_chapter():
+    """测试阶段一按自然章节切割（一章一集）规划逻辑"""
+    planner = EpisodePlanner(target_duration_mins=30.0)
+    # 构造 3 个长短不一的章节：微短章 200 字，中等章 3000 字，超大章 20000 字
+    chapters = [
+        Chapter(chapter_id="ch_01", title="短引言", order=1, content="A" * 200),
+        Chapter(chapter_id="ch_02", title="中等篇章", order=2, content="B" * 3000),
+        Chapter(chapter_id="ch_03", title="宏篇巨著", order=3, content="C" * 20000),
+    ]
+    # 在 by_chapter 模式下，无论单章长短，严格 1:1 映射，生成 3 集
+    plan = planner.plan_initial_episodes("自然章节测试", chapters, split_mode="by_chapter")
+    assert plan.total_episodes == 3
+    assert plan.total_chapters == 3
+    assert plan.episodes[0].chapter_ids == ["ch_01"]
+    assert plan.episodes[1].chapter_ids == ["ch_02"]
+    assert plan.episodes[2].chapter_ids == ["ch_03"]
+    assert "短引言" in plan.episodes[0].subtitle
+    assert "宏篇巨著" in plan.episodes[2].subtitle
+
+

@@ -93,10 +93,11 @@ class PlanWorker(QThread):
             # 4. 分集规划阶段 (阶段一)
             self.sig_status_changed.emit("PLANNED")
             self.sig_progress_updated.emit(100.0, "【4/8 规划就绪 (PLANNED)】生产规划已生成完毕，请确认规划并点击[开始生产]")
+            split_mode = cfg.get("split_mode", "by_duration")
             planner = EpisodePlanner(target_duration_mins=target_ep_mins)
-            plan = planner.plan_initial_episodes(book_title, cleaned_structure.chapters)
+            plan = planner.plan_initial_episodes(book_title, cleaned_structure.chapters, split_mode=split_mode)
             self.sig_plan_ready.emit(plan)
-            logger.info("PlanWorker 规划阶段完成，安全就绪待命中")
+            logger.info(f"PlanWorker 规划阶段完成 (模式: {split_mode})，安全就绪待命中")
         except Exception as e:
             logger.exception(f"后台规划任务异常终止: {e}")
             self.sig_error.emit("PLAN_ERROR", str(e))
@@ -200,11 +201,12 @@ class ProductionWorker(QThread):
             logger.warning(f"正文清洗校验发现问题: {val_report.issues}")
 
         # 4. 分集规划阶段 (阶段一)
+        split_mode = cfg.get("split_mode", "by_duration")
         planner = EpisodePlanner(target_duration_mins=target_ep_mins)
-        plan = planner.plan_initial_episodes(book_title, cleaned_structure.chapters)
+        plan = planner.plan_initial_episodes(book_title, cleaned_structure.chapters, split_mode=split_mode)
         self.sig_plan_ready.emit(plan)
         self.sig_status_changed.emit("PLANNED")
-        self.sig_progress_updated.emit(20.0, f"【4/8 规划就绪 (PLANNED)】共规划 {plan.total_episodes} 集，即将启动语音合成...")
+        self.sig_progress_updated.emit(20.0, f"【4/8 规划就绪 (PLANNED)】共规划 {plan.total_episodes} 集 (模式: {split_mode})，即将启动语音合成...")
 
         # 5. SpeechUnit 构建
         chunker = TextChunker()
@@ -219,6 +221,7 @@ class ProductionWorker(QThread):
         video_composer = VideoComposer(layout_name=layout_name)
 
         episodes_manifests: List[EpisodeManifest] = []
+        production_start_time = time.time()
 
         for ep in plan.episodes:
             if self._pause_requested:
@@ -376,10 +379,20 @@ class ProductionWorker(QThread):
                 subtitle_file=str(ep_srt_path)
             ))
 
-            # 检查运行模式：若仅生成下一集，到此即安全收尾
+            # 检查运行模式：
             if run_mode == "RUN_NEXT_EPISODE":
                 logger.info(f"当前运行模式为【仅生成下一集】，第 {ep_order} 集完成后自动安全停机")
                 break
+            elif run_mode in ("RUN_DURATION_LIMIT", "RUN_TIME_LIMIT"):
+                limit_mins = float(cfg.get("limit_duration_mins", 60.0))
+                elapsed_mins = (time.time() - production_start_time) / 60.0
+                if elapsed_mins >= limit_mins:
+                    logger.info(f"当前运行模式为【限时生成】，累计耗时 {elapsed_mins:.1f} 分钟 (>= 限时 {limit_mins} 分钟)，第 {ep_order} 集完成后自动安全休眠")
+                    manifest_mgr.save_episode_manifest(episodes_manifests)
+                    self.sig_status_changed.emit("PAUSED")
+                    self.sig_progress_updated.emit(-1.0, f"【限时休眠】已达到设定运行时长 ({elapsed_mins:.1f}/{limit_mins}分钟)，任务已安全休眠。")
+                    self.sig_task_paused.emit()
+                    return
 
         manifest_mgr.save_episode_manifest(episodes_manifests)
         self.sig_status_changed.emit("COMPLETED")

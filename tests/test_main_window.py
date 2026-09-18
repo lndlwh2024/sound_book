@@ -242,3 +242,68 @@ def test_main_window_v070_features(qapp, monkeypatch):
         window.cmb_voice_profile.setCurrentIndex(idx_d1)
         assert "D1" in window.btn_play_voice.toolTip()
 
+
+def test_main_window_v076_features(qapp):
+    """
+    测试 v0.7.6 新特性：
+    1. 切集模式选项（按时长 / 按自然章节）及其与单集时长/最小间隔的置灰联动；
+    2. 限时生成分钟数输入框及其与运行方式的激活联动；
+    3. 输出目录收缩到左侧栏底，保持左右齐平；
+    4. 状态指示标签横向全宽自适应与 ToolTip 同步；
+    5. 全局配置字典采集 split_mode 与 limit_duration_mins。
+    """
+    from PySide6.QtWidgets import QSizePolicy
+
+    window = MainWindow()
+
+    # 1. 验证切集模式及置灰联动
+    assert hasattr(window, "cmb_split_mode")
+    assert "按目标时长" in window.cmb_split_mode.currentText()
+    assert window.spn_target_duration.isEnabled() is True
+    assert window.spn_min_interval.isEnabled() is True
+
+    # 切换至自然章节切集模式 -> 时长与最小间隔自动置灰锁定
+    idx_chap = window.cmb_split_mode.findText("自然章节", Qt.MatchContains)
+    assert idx_chap >= 0
+    window.cmb_split_mode.setCurrentIndex(idx_chap)
+    assert window.spn_target_duration.isEnabled() is False
+    assert window.spn_min_interval.isEnabled() is False
+
+    # 切换回按时长切割 -> 恢复可用
+    idx_dur = window.cmb_split_mode.findText("时长", Qt.MatchContains)
+    window.cmb_split_mode.setCurrentIndex(idx_dur)
+    assert window.spn_target_duration.isEnabled() is True
+    assert window.spn_min_interval.isEnabled() is True
+
+    # 2. 验证运行方式与限时分钟数输入框联动
+    assert hasattr(window, "spn_limit_minutes")
+    assert window.spn_limit_minutes.value() == 60
+    assert window.spn_limit_minutes.isEnabled() is False  # 初始默认“仅生成下一集”，置灰
+
+    # 切换为限时生成 -> 自动激活
+    idx_limit = window.cmb_run_mode.findText("限时", Qt.MatchContains)
+    assert idx_limit >= 0
+    window.cmb_run_mode.setCurrentIndex(idx_limit)
+    assert window.spn_limit_minutes.isEnabled() is True
+
+    # 切换为全书连续生成 -> 自动置灰
+    idx_full = window.cmb_run_mode.findText("全书连续", Qt.MatchContains)
+    assert idx_full >= 0
+    window.cmb_run_mode.setCurrentIndex(idx_full)
+    assert window.spn_limit_minutes.isEnabled() is False
+
+    # 3. 验证状态指示标签
+    assert hasattr(window, "lbl_status")
+    assert window.lbl_status.sizePolicy().horizontalPolicy() == QSizePolicy.Expanding
+    assert len(window.lbl_status.toolTip()) > 0
+
+    # 4. 验证配置提取
+    window.cmb_split_mode.setCurrentIndex(idx_chap)
+    window.cmb_run_mode.setCurrentIndex(idx_limit)
+    window.spn_limit_minutes.setValue(90)
+    cfg = window._get_current_config()
+    assert cfg["split_mode"] == "by_chapter"
+    assert cfg["run_mode"] == "RUN_DURATION_LIMIT"
+    assert cfg["limit_duration_mins"] == 90.0
+
+

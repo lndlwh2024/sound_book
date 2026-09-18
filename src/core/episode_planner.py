@@ -60,9 +60,14 @@ class EpisodePlanner:
         # 单集目标字数
         self.target_chars = int(target_duration_mins * speed_chars_per_min)
 
-    def plan_initial_episodes(self, book_title: str, chapters: List[Chapter]) -> BookProductionPlan:
+    def plan_initial_episodes(self, book_title: str, chapters: List[Chapter], split_mode: str = "by_duration") -> BookProductionPlan:
         """
-        阶段一：TTS 前基于章节字符数和语速进行预估分集。
+        阶段一：TTS 前进行预估分集规划。
+        【为什么这样设计】
+        1. split_mode == "by_chapter" (按自然章节切割)：
+           严格遵循书籍原生章节结构，一章对应一集，不合并、不拆分，完全由章节自身长短决定；
+        2. split_mode == "by_duration" (按目标时长切割)：
+           根据用户指定的单集时长预算，利用贪心算法智能进行多短章合并与超长章隔离。
         """
         if not chapters:
             return BookProductionPlan(
@@ -76,11 +81,35 @@ class EpisodePlanner:
             )
 
         episodes: List[EpisodePreview] = []
+        total_book_chars = 0
+
+        # 分支 1：按自然章节切割 (一章一集)
+        if split_mode == "by_chapter":
+            for idx, ch in enumerate(chapters, 1):
+                ch_id = getattr(ch, "chapter_id", None) or getattr(ch, "id", f"chapter_{idx:03d}")
+                ch_title = getattr(ch, "title", "").strip() or f"第{getattr(ch, 'order', idx)}章"
+                ch_chars = len(ch.content) if hasattr(ch, "content") else sum(len(p) for p in getattr(ch, "paragraphs", []))
+                total_book_chars += ch_chars
+                episodes.append(self._create_episode_preview(
+                    idx, [ch_id], [ch_title], ch_chars
+                ))
+            est_total_mins = round(total_book_chars / self.speed_chars_per_min, 1)
+            logger.info(f"阶段一按自然章节规划完成：全书 {len(chapters)} 章，对应生成 {len(episodes)} 集")
+            return BookProductionPlan(
+                book_title=book_title,
+                total_chapters=len(chapters),
+                total_chars=total_book_chars,
+                estimated_total_minutes=est_total_mins,
+                target_duration_minutes=self.target_duration_mins,
+                total_episodes=len(episodes),
+                episodes=episodes
+            )
+
+        # 分支 2：按目标时长切割 (时长贪心与边界合并)
         current_ch_ids: List[str] = []
         current_ch_titles: List[str] = []
         current_chars = 0
         ep_order = 1
-        total_book_chars = 0
 
         for ch in chapters:
             ch_id = getattr(ch, "chapter_id", None) or getattr(ch, "id", "")
