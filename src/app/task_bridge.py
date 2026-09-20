@@ -32,6 +32,26 @@ from ..utils.path_utils import sanitize_filename
 logger = logging.getLogger(__name__)
 
 
+def _get_git_commit_short() -> str:
+    """获取当前代码仓库 Git Commit 短哈希，用于输出文件命名溯源"""
+    import subprocess
+    try:
+        project_root = Path(__file__).resolve().parent.parent.parent
+        res = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=str(project_root),
+            capture_output=True,
+            text=True,
+            check=True
+        )
+        h = res.stdout.strip()
+        if h:
+            return h
+    except Exception:
+        pass
+    return "unknown"
+
+
 class PlanWorker(QThread):
     """
     生产规划专用工作线程。
@@ -237,13 +257,14 @@ class ProductionWorker(QThread):
             )
 
             # 为该分集创建对应产物路径
+            commit_hash = _get_git_commit_short()
             ep_audio_path = book_dir / f"episode_{ep_order:02d}_mixed.m4a"
             subtitles_dir = output_base / "subtitles"
             subtitles_dir.mkdir(parents=True, exist_ok=True)
             ep_srt_path = subtitles_dir / f"Episode_{ep_order:02d}.srt"
             ep_srt_transcript_path = subtitles_dir / f"Episode_{ep_order:02d}.transcript.srt"
             ep_ass_path = book_dir / f"episode_{ep_order:02d}.ass"
-            ep_mp4_path = output_base / f"Episode_{ep_order:02d}.mp4"
+            ep_mp4_path = output_base / f"Episode_{ep_order:02d}_[{commit_hash}].mp4"
 
             # 对应当前集数的章节段落
             ep_chapters = [c for c in cleaned_structure.chapters if getattr(c, 'chapter_id', c.id) in ep.chapter_ids]
@@ -271,10 +292,15 @@ class ProductionWorker(QThread):
                             break
                         u_wav = (ep_units_dir / f"unit_{idx:04d}.wav").resolve()
                         if not u_wav.exists():
-                            clean_preview = u.text[:16].replace('\n', ' ')
+                            clean_text = u.text.strip().replace('\n', ' ')
+                            if len(clean_text) > 20:
+                                preview_fmt = f"{clean_text[:10]}...{clean_text[-10:]}(共{len(clean_text)}字)"
+                            else:
+                                preview_fmt = f"{clean_text}(共{len(clean_text)}字)"
+
                             self.sig_progress_updated.emit(
                                 20.0 + ((idx + 1) / max(1, total_u)) * 45.0,
-                                f"【5/8 语音合成】第 {ep_order:02d} 集 · 正在朗读第 {idx+1}/{total_u} 句 | 原文：\"{clean_preview}...\""
+                                f"【5/8 语音合成】第 {ep_order:02d} 集 · 正在朗读第 {idx+1}/{total_u} 句 | 原文: \"{preview_fmt}\""
                             )
                             res = tts_backend.synthesize(
                                 text=u.text,
@@ -340,7 +366,7 @@ class ProductionWorker(QThread):
 
 
             # 无论是否渲染视频，均将高品质单集音频交付至最终产物目录
-            ep_final_wav = output_base / f"Episode_{ep_order:02d}.wav"
+            ep_final_wav = output_base / f"Episode_{ep_order:02d}_[{commit_hash}].wav"
             if ep_voice_tmp.exists():
                 import shutil
                 shutil.copy2(ep_voice_tmp, ep_final_wav)

@@ -929,15 +929,13 @@ class MainWindow(QMainWindow):
         self.cmb_video_layout.addItems(["竖屏 9:16 (1080x1920, 手机/短视频流)", "横屏 16:9 (1920x1080, 电脑/B站/宽屏)"])
         self.cmb_video_layout.currentIndexChanged.connect(self._refresh_visual_preview)
 
-        # 【为什么这样设计】
-        # 响应用户需求 6：“在单集时长上 要加入一个选项 即 按自然章节切割还是按时长切割，
-        # 如果是时长切割则与配置一致，若按自然章节切割，则无需限定单集时长（由书籍章节长短决定）”。
+        # 响应用户需求：在单集时长上加入分集模式选项，文案规范化去除'切割'字样
         self.cmb_split_mode = QComboBox()
-        self.cmb_split_mode.addItems(["按目标时长切割 (推荐)", "按自然章节切割 (一章一集)"])
+        self.cmb_split_mode.addItems(["按时长 (推荐) (最小分割单元为章节的时长)", "按自然章节 (一章一集)"])
         self.cmb_split_mode.setToolTip(
-            "单集切割逻辑：\n"
-            "• 按目标时长切割：按设定的时长预算贪心聚合章节，尾部残余自动合并；\n"
-            "• 按自然章节切割：原生 1:1 映射书籍章节，一章一集，无需限定单集时长。"
+            "单集规划逻辑：\n"
+            "• 按时长 (推荐)：按设定的时长预算贪心聚合章节，最小分割单元为章节，尾部残余自动合并；\n"
+            "• 按自然章节：原生 1:1 映射书籍章节，一章一集，无需限定单集时长。"
         )
         self.cmb_split_mode.currentIndexChanged.connect(self._on_split_mode_changed)
 
@@ -972,6 +970,7 @@ class MainWindow(QMainWindow):
         self.spn_limit_minutes.setValue(60)
         self.spn_limit_minutes.setSuffix(" 分钟")
         self.spn_limit_minutes.setToolTip("限时生成运行阈值：累计运行达到设定时长后，自动保存断点并休眠停机")
+        self.spn_limit_minutes.setVisible(False)
         self.spn_limit_minutes.setEnabled(False)
 
         run_mode_layout = QHBoxLayout()
@@ -1011,7 +1010,7 @@ class MainWindow(QMainWindow):
         m_layout.addWidget(QLabel("视频版式:"), 0, 0)
         m_layout.addWidget(self.cmb_video_layout, 0, 1, 1, 3)
 
-        m_layout.addWidget(QLabel("切割模式:"), 1, 0)
+        m_layout.addWidget(QLabel("分集模式:"), 1, 0)
         m_layout.addWidget(self.cmb_split_mode, 1, 1, 1, 3)
 
         m_layout.addWidget(QLabel("单集时长:"), 2, 0)
@@ -1140,12 +1139,13 @@ class MainWindow(QMainWindow):
 
         self.sld_bgm_preview = QSlider(Qt.Vertical)
         self.sld_bgm_preview.setRange(0, 100)
-        self.sld_bgm_preview.setValue(30)
+        self.sld_bgm_preview.setValue(0)
+        self.sld_bgm_preview.setEnabled(False)
         self.sld_bgm_preview.setMinimumHeight(120)
-        self.sld_bgm_preview.setToolTip("背景音乐独立音量")
+        self.sld_bgm_preview.setToolTip("背景音乐独立音量 (未配置背景音乐时禁用)")
         col_bgm.addWidget(self.sld_bgm_preview, 1, Qt.AlignHCenter)
 
-        self.lbl_bgm_vol_pct = QLabel("30%")
+        self.lbl_bgm_vol_pct = QLabel("0%")
         self.lbl_bgm_vol_pct.setStyleSheet("font-size: 11px; color: #E0E0E0;")
         self.sld_bgm_preview.valueChanged.connect(lambda v: self.lbl_bgm_vol_pct.setText(f"{v}%"))
         col_bgm.addWidget(self.lbl_bgm_vol_pct, 0, Qt.AlignHCenter)
@@ -1164,6 +1164,8 @@ class MainWindow(QMainWindow):
 
         # 下部：仅一行【混合试听】主控制按钮
         self.btn_mix_preview = QPushButton("▶ 混合试听 (播放时长 = min(BGM, 朗读))")
+        self.btn_mix_preview.setEnabled(False)
+        self.btn_mix_preview.setToolTip("未配置背景音乐，请先选择背景音乐后再进行混合试听")
         self.btn_mix_preview.setStyleSheet("""
             QPushButton {
                 background-color: #235A23;
@@ -1173,8 +1175,9 @@ class MainWindow(QMainWindow):
                 padding: 7px;
                 border-radius: 5px;
             }
-            QPushButton:hover { background-color: #2F7A2F; }
-            QPushButton:pressed { background-color: #1A441A; }
+            QPushButton:hover:enabled { background-color: #2F7A2F; }
+            QPushButton:pressed:enabled { background-color: #1A441A; }
+            QPushButton:disabled { background-color: #2A332A; color: #667766; }
         """)
         self.btn_mix_preview.clicked.connect(self._on_test_mix)
         wb_main_layout.addWidget(self.btn_mix_preview)
@@ -1243,9 +1246,9 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
 
-        # ── 第 1 层：核心动作按钮组 + 任务状态反馈（自适应整行宽度展开） ──
-        act_layout = QHBoxLayout()
-        act_layout.setSpacing(10)
+        # ── 第 1 层：核心动作按钮组（独立一行操作区） ──
+        btn_layout = QHBoxLayout()
+        btn_layout.setSpacing(12)
 
         self.btn_gen_plan = QPushButton("生成生产计划")
         self.btn_gen_plan.clicked.connect(self._on_generate_plan)
@@ -1264,13 +1267,18 @@ class MainWindow(QMainWindow):
         self.btn_resume.setEnabled(False)
         self.btn_resume.clicked.connect(self._on_start_production)
 
-        act_layout.addWidget(self.btn_gen_plan)
-        act_layout.addWidget(self.btn_start)
-        act_layout.addWidget(self.btn_pause)
-        act_layout.addWidget(self.btn_resume)
+        btn_layout.addWidget(self.btn_gen_plan)
+        btn_layout.addWidget(self.btn_start)
+        btn_layout.addWidget(self.btn_pause)
+        btn_layout.addWidget(self.btn_resume)
+        btn_layout.addStretch()
 
-        # 状态指示灯与自适应全宽展示文本
-        act_layout.addSpacing(14)
+        layout.addLayout(btn_layout)
+
+        # ── 第 2 层：运行状态反馈区（独占全宽整行，单行展示不折行） ──
+        status_layout = QHBoxLayout()
+        status_layout.setSpacing(8)
+
         self.lbl_status_led = QLabel("●")
         self.lbl_status_led.setStyleSheet("font-size: 16px; color: #555568; font-weight: bold;")
 
@@ -1279,10 +1287,10 @@ class MainWindow(QMainWindow):
         self.lbl_status.setStyleSheet("color: #CCCCCC; font-size: 12px; font-weight: bold;")
         self.lbl_status.setToolTip("当前生产流水线状态: 空闲就绪 (IDLE)")
 
-        act_layout.addWidget(self.lbl_status_led)
-        act_layout.addWidget(self.lbl_status, 1)
+        status_layout.addWidget(self.lbl_status_led)
+        status_layout.addWidget(self.lbl_status, 1)
 
-        layout.addLayout(act_layout)
+        layout.addLayout(status_layout)
 
         # ── 第 3 层：全流程管线 8 节点可视化指示图 ──
         self.pipeline_flow = PipelineFlowWidget()
@@ -1572,12 +1580,13 @@ class MainWindow(QMainWindow):
     def _on_run_mode_changed(self, idx: int = 0) -> None:
         """
         运行方式联动处理。
-        【为什么这样设计】
-        响应用户需求 5：限时生成增加输入入口。当选择限时生成时，微调框激活；
-        其他模式（仅生成下一集、全书连续生成）则置灰锁定。
+        【设计规范】：
+        - 当选择“限时生成”时，限时分钟微调框显示 (setVisible(True)) 并激活可用；
+        - 其他模式（仅生成下一集、全书连续生成）时，彻底隐藏 (setVisible(False))。
         """
         if hasattr(self, 'cmb_run_mode') and hasattr(self, 'spn_limit_minutes'):
             is_limit = "限时" in self.cmb_run_mode.currentText()
+            self.spn_limit_minutes.setVisible(is_limit)
             self.spn_limit_minutes.setEnabled(is_limit)
 
     def _on_browse_cover(self) -> None:
@@ -1595,14 +1604,15 @@ class MainWindow(QMainWindow):
 
     def _on_bgm_text_changed(self, text: str) -> None:
         """
-        背景音乐路径变动时同步更新试听图标可用性与样式。
-        【为什么这样设计】
-        解决用户反馈“单独播放背景音频不可用”的根因：
-        初始时 btn_play_bgm 被设为 disabled，必须在此处显式调用 setEnabled(has_bgm) 激活点击事件，
-        并联动切换彩色高亮形态与灰色不可点击形态。
+        背景音乐路径变动时同步更新BGM音量滑块与试听按钮的可用性与状态。
+        【设计规范】：
+        - 未配置有效 BGM 时：BGM 竖向滑块强制归零 (0%) 且禁用置灰，单独试听与混合试听按钮禁用置灰；
+        - 配置了有效 BGM 时：BGM 滑块恢复默认值 15% 且激活可用，试听按钮激活点亮。
         """
         clean_text = text.strip()
         has_bgm = bool(clean_text and os.path.exists(clean_text))
+
+        # 1. 联动 BGM 单独播放按钮
         if hasattr(self, 'btn_play_bgm'):
             self.btn_play_bgm.setEnabled(has_bgm)
             if has_bgm:
@@ -1611,6 +1621,22 @@ class MainWindow(QMainWindow):
             else:
                 self.btn_play_bgm.setStyleSheet("")
                 self.btn_play_bgm.setToolTip("当前未选择背景音乐 (点击左侧'选择音乐'添加)")
+
+        # 2. 联动 BGM 竖向滑块与读数
+        if hasattr(self, 'sld_bgm_preview'):
+            self.sld_bgm_preview.setEnabled(has_bgm)
+            if not has_bgm:
+                self.sld_bgm_preview.setValue(0)
+            elif self.sld_bgm_preview.value() == 0:
+                self.sld_bgm_preview.setValue(15)
+
+        # 3. 联动混合试听按钮
+        if hasattr(self, 'btn_mix_preview'):
+            self.btn_mix_preview.setEnabled(has_bgm)
+            if has_bgm:
+                self.btn_mix_preview.setToolTip("点击试听包含旁白与背景音乐的混合片段")
+            else:
+                self.btn_mix_preview.setToolTip("未配置背景音乐，请先选择背景音乐后再进行混合试听")
 
     def _on_clear_bgm(self) -> None:
         """清除当前选择的背景音乐"""
@@ -1888,7 +1914,57 @@ class MainWindow(QMainWindow):
         self._timer_elapsed.start(1000)
         self._timer_breathing.start(350)
 
+        # 生产启动后全量冻结配置面板
+        self._set_config_inputs_enabled(False)
+
         self.bridge.start_production(cfg)
+
+    def _set_config_inputs_enabled(self, enabled: bool) -> None:
+        """
+        全量启用或禁用左侧配置输入面板中的控件。
+        【设计规范】：
+        在生产流水线启动后，锁定全部输入，防止参数在运行中被意外篡改；
+        在任务暂停、完成或出错时，恢复解冻。
+        """
+        input_widgets = [
+            getattr(self, 'txt_book_path', None),
+            getattr(self, 'btn_browse_book', None),
+            getattr(self, 'txt_book_title', None),
+            getattr(self, 'spn_start_page', None),
+            getattr(self, 'cmb_tts_engine', None),
+            getattr(self, 'btn_azure_config', None),
+            getattr(self, 'cmb_voice_profile', None),
+            getattr(self, 'btn_manage_voice', None),
+            getattr(self, 'spn_nfe_step', None),
+            getattr(self, 'spn_speed', None),
+            getattr(self, 'cmb_video_layout', None),
+            getattr(self, 'cmb_split_mode', None),
+            getattr(self, 'spn_target_duration', None),
+            getattr(self, 'spn_min_interval', None),
+            getattr(self, 'cmb_run_mode', None),
+            getattr(self, 'spn_limit_minutes', None),
+            getattr(self, 'txt_cover_path', None),
+            getattr(self, 'btn_browse_cover', None),
+            getattr(self, 'cmb_cover_mode', None),
+            getattr(self, 'txt_bgm_path', None),
+            getattr(self, 'btn_browse_bgm', None),
+            getattr(self, 'txt_main_title', None),
+            getattr(self, 'txt_output_dir', None),
+            getattr(self, 'btn_browse_output', None),
+            getattr(self, 'btn_gen_plan', None),
+        ]
+        for w in input_widgets:
+            if w is not None:
+                w.setEnabled(enabled)
+
+        # 特殊联动控件恢复时，尊重其内部规则
+        if enabled:
+            if hasattr(self, '_on_split_mode_changed'):
+                self._on_split_mode_changed()
+            if hasattr(self, '_on_run_mode_changed'):
+                self._on_run_mode_changed()
+            if hasattr(self, '_on_bgm_text_changed') and hasattr(self, 'txt_bgm_path'):
+                self._on_bgm_text_changed(self.txt_bgm_path.text())
 
     def _on_safe_pause(self) -> None:
         """安全暂停"""
@@ -1994,7 +2070,11 @@ class MainWindow(QMainWindow):
         }
 
         icon, desc = stage_names.get(status, ("⚪", status))
-        if status not in ["TTS_GENERATING", "AUDIO_MIXING", "VIDEO_RENDERING"]:
+        if status in ["TTS_GENERATING", "ALIGNING_SUBTITLES", "AUDIO_MIXING", "VIDEO_RENDERING"]:
+            if not self._timer_breathing.isActive():
+                self._timer_breathing.start(350)
+            self._set_config_inputs_enabled(False)
+        else:
             self._timer_breathing.stop()
             self.lbl_status_led.setText(icon)
             self.lbl_status_led.setStyleSheet("font-size: 14px;")
@@ -2007,11 +2087,13 @@ class MainWindow(QMainWindow):
             self.btn_start.setEnabled(True)
             self.btn_pause.setEnabled(False)
             self.btn_resume.setEnabled(False)
+            self._set_config_inputs_enabled(True)
         elif status == "PAUSED":
             self.btn_start.setEnabled(False)
             self.btn_pause.setEnabled(False)
             self.btn_resume.setEnabled(True)
             self._timer_elapsed.stop()
+            self._set_config_inputs_enabled(True)
         elif status in ["COMPLETED", "FAILED"]:
             self.btn_gen_plan.setEnabled(True)
             self.btn_start.setEnabled(True)
@@ -2019,6 +2101,9 @@ class MainWindow(QMainWindow):
             self.btn_resume.setEnabled(False)
             self._timer_elapsed.stop()
             self._timer_breathing.stop()
+            self._set_config_inputs_enabled(True)
+        elif status == "IDLE":
+            self._set_config_inputs_enabled(True)
 
     def _on_worker_progress_updated(self, pct: float, msg: str) -> None:
         if pct >= 0:
@@ -2054,6 +2139,7 @@ class MainWindow(QMainWindow):
     def _on_worker_task_completed(self, output_path: str) -> None:
         self._timer_elapsed.stop()
         self._timer_breathing.stop()
+        self._set_config_inputs_enabled(True)
         self.lbl_status_led.setText("●")
         self.lbl_status_led.setStyleSheet("font-size: 16px; color: #00E676; font-weight: bold;")
         QMessageBox.information(
@@ -2065,6 +2151,7 @@ class MainWindow(QMainWindow):
     def _on_worker_task_paused(self) -> None:
         self._timer_elapsed.stop()
         self._timer_breathing.stop()
+        self._set_config_inputs_enabled(True)
         self.lbl_status_led.setText("●")
         self.lbl_status_led.setStyleSheet("font-size: 16px; color: #CD853F; font-weight: bold;")
         QMessageBox.information(self, "暂停提示", "当前分集切片已安全落盘并持久化记录，任务已暂停。您可以点击 [继续生产] 随时断点续跑。")
@@ -2072,6 +2159,7 @@ class MainWindow(QMainWindow):
     def _on_worker_error(self, code: str, msg: str) -> None:
         self._timer_elapsed.stop()
         self._timer_breathing.stop()
+        self._set_config_inputs_enabled(True)
         self.lbl_status_led.setText("●")
         self.lbl_status_led.setStyleSheet("font-size: 16px; color: #FF6B6B; font-weight: bold;")
         self.tab_widget.setCurrentIndex(2) # 自动跳转到实时日志 Sheet 方便用户排查

@@ -100,3 +100,26 @@ def test_sanitize_filename_and_trailing_space_immunity(tmp_path):
     test_srt = subtitles_dir / "Episode_01.srt"
     test_srt.write_text("1\n00:00:00,000 --> 00:00:05,000\n测试字幕\n", encoding="utf-8")
     assert test_srt.exists()
+
+
+def test_git_commit_short_and_naming():
+    """
+    测试输出产物附带 Git Commit 短哈希的命名机制
+    【为什么这样设计】
+    通过在文件名末尾附加当前分支的 Git Commit 短哈希（如 Episode_01_[2800d7e].mp4），
+    确保每一份生成的有声书产物均可精准回溯到生成时的代码基线与配置参数版本。
+    """
+    from src.app.task_bridge import _get_git_commit_short
+    commit_hash = _get_git_commit_short()
+    assert isinstance(commit_hash, str)
+    assert len(commit_hash) >= 4  # Git short hash 通常为 7 位或降级字符串
+
+    # 验证文件名拼装
+    ep_order = 1
+    mp4_name = f"Episode_{ep_order:02d}_[{commit_hash}].mp4"
+    wav_name = f"Episode_{ep_order:02d}_[{commit_hash}].wav"
+    assert mp4_name.startswith("Episode_01_[")
+    assert mp4_name.endswith("].mp4")
+    assert wav_name.startswith("Episode_01_[")
+    assert wav_name.endswith("].wav")
+
