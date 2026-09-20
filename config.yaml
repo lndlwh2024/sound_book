@@ -24,18 +24,11 @@ audio_output:
   mp3_bitrate: 128k
   trim_silence: true
 tts:
-  default_backend: kokoro
+  default_backend: f5
   models_dir: models
   retry_count: 3
   worker_timeout_seconds: 600
-  kokoro:
-    repo_id: hexgrad/Kokoro-82M
-    model_path: ''
-    voice: zm_yunjian
-    speed: 0.85
-    device: cuda
-    blend_en_voice: am_onyx
-    blend_en_ratio: 0.2
+  # kokoro 引擎已正式下线
   f5:
     repo_id: SWivid/F5-TTS
     subfolder: F5TTS_v1_Base
@@ -47,10 +40,6 @@ tts:
     preset_voice: preset_male_e1_narrator
     preset_dir: models/f5_tts/presets
     available_presets:
-      d1:
-        name: "D1 (男生低音 - 商业精英)"
-        audio: "models/f5_tts/presets/preset_male_d1_elite.wav"
-        text: "在去年写给合伙人的信中，我写道："
       e1:
         name: "E1 (男生中声 - 巴菲特股东信旁白)"
         audio: "models/f5_tts/presets/preset_male_e1_narrator.wav"

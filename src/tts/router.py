@@ -46,11 +46,10 @@ def create_tts_router(config: dict) -> TTSRouter:
     router = TTSRouter(config)
     
     # 延迟导入以避免在此处引发不必要的模块加载
-    from src.tts.kokoro_backend import KokoroBackend
     from src.tts.f5_backend import F5Backend
     from src.tts.azure_backend import AzureBackend
     
-    router.register_backend("kokoro", KokoroBackend(config.get("kokoro", {})))
+    # kokoro 引擎已下线，默认注册 F5 扩散模型与 Azure 云端官方引擎
     router.register_backend("f5", F5Backend(config.get("f5", {})))
     router.register_backend("azure", AzureBackend(config.get("azure", {})))
     

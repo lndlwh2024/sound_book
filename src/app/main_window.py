@@ -550,12 +550,14 @@ class MainWindow(QMainWindow):
             QWidget {
                 color: #E0E0E0;
                 font-family: 'Segoe UI', 'Microsoft YaHei', sans-serif;
+                font-size: 13px;
             }
             QGroupBox {
                 border: 1px solid #33333F;
                 border-radius: 8px;
                 margin-top: 12px;
                 font-weight: bold;
+                font-size: 13px;
                 background-color: #262630;
             }
             QGroupBox::title {
@@ -568,7 +570,8 @@ class MainWindow(QMainWindow):
                 background-color: #16161C;
                 border: 1px solid #444455;
                 border-radius: 4px;
-                padding: 6px 10px;
+                padding: 7px 10px;
+                font-size: 12px;
                 color: #FFFFFF;
             }
             QLineEdit:focus, QComboBox:focus {
@@ -579,7 +582,8 @@ class MainWindow(QMainWindow):
                 background-color: #16161C;
                 border: 1px solid #444455;
                 border-radius: 4px;
-                padding: 5px 24px 5px 8px;
+                padding: 6px 24px 6px 8px;
+                font-size: 12px;
                 color: #FFFFFF;
             }
             QSpinBox:focus, QDoubleSpinBox:focus {
@@ -738,28 +742,54 @@ class MainWindow(QMainWindow):
             QMessageBox QPushButton:hover {
                 background-color: #3CB371;
             }
+            /* 全局通用按钮样式 */
             QPushButton {
                 background-color: #2E5B88;
                 border: none;
                 border-radius: 5px;
                 padding: 8px 16px;
                 font-weight: bold;
+                font-size: 12px;
                 color: white;
             }
             QPushButton:hover { background-color: #3A73AA; }
             QPushButton:pressed { background-color: #1F3F5F; }
+
+            /* 底部 4 个核心动作按钮统一尺寸与排版规范 */
+            QPushButton.bottom_action_btn {
+                min-width: 110px;
+                min-height: 38px;
+                max-height: 38px;
+                font-size: 13px;
+                font-weight: bold;
+                border: none;
+                border-radius: 5px;
+                color: #FFFFFF;
+                padding: 0 16px;
+            }
+            QPushButton#btn_gen_plan {
+                background-color: #2E5B88;
+            }
+            QPushButton#btn_gen_plan:hover:enabled { background-color: #3A73AA; }
+            QPushButton#btn_gen_plan:disabled { background-color: #1F2A38; color: #667788; }
+
             QPushButton#btn_start {
                 background-color: #2E8B57;
-                font-size: 14px;
-                padding: 10px 24px;
             }
-            QPushButton#btn_start:hover { background-color: #3CB371; }
+            QPushButton#btn_start:hover:enabled { background-color: #3CB371; }
+            QPushButton#btn_start:disabled { background-color: #1E3326; color: #557766; }
+
             QPushButton#btn_pause {
                 background-color: #CD853F;
-                font-size: 14px;
-                padding: 10px 20px;
             }
-            QPushButton#btn_pause:hover { background-color: #D2B48C; }
+            QPushButton#btn_pause:hover:enabled { background-color: #D2B48C; }
+            QPushButton#btn_pause:disabled { background-color: #3D2E20; color: #776655; }
+
+            QPushButton#btn_resume {
+                background-color: #20B2AA;
+            }
+            QPushButton#btn_resume:hover:enabled { background-color: #2E8B57; }
+            QPushButton#btn_resume:disabled { background-color: #1A3030; color: #557777; }
             QProgressBar {
                 border: 1px solid #444455;
                 border-radius: 5px;
@@ -864,7 +894,7 @@ class MainWindow(QMainWindow):
         v_layout.setSpacing(8)
 
         self.cmb_tts_engine = QComboBox()
-        self.cmb_tts_engine.addItems(["F5-TTS (本地高质量扩散模型)", "Kokoro (本地超轻量快速)", "Azure AI Speech (云端官方)"])
+        self.cmb_tts_engine.addItems(["F5-TTS (本地高质量扩散模型)", "Azure AI Speech (云端官方)"])
         self.cmb_tts_engine.currentIndexChanged.connect(self._on_engine_changed)
 
         self.btn_azure_config = QPushButton("🔑 凭据配置")
@@ -875,10 +905,7 @@ class MainWindow(QMainWindow):
 
         self.cmb_voice_profile = QComboBox()
         self.cmb_voice_profile.addItems([
-            "E1 (男生中声 - 巴菲特股东信旁白推荐)",
-            "D1 (男生低音 - 商业精英推荐)",
-            "D2 (男生播音 - 新闻纪录片)",
-            "V1 (女声解说 - 知性温和)"
+            "E1 (男声中声 - 巴菲特股东信旁白推荐)"
         ])
         self.cmb_voice_profile.currentIndexChanged.connect(self._on_voice_profile_changed)
 
@@ -1235,10 +1262,9 @@ class MainWindow(QMainWindow):
         """
         构建底部控制区与监控指示（精简 3 层布局）。
         【为什么这样设计】
-        响应用户需求 1 & 2：
-        1. 输出目录整行已收纳至左侧面板最下方，使底部腾出高度，右侧生产计划面板自然向下延伸并与左框齐平；
-        2. 动作按钮与状态指示直接位于第一层，lbl_status 被赋予 stretch=1 与 Expanding 策略，
-           在横向有充裕空间时完整展示全部内容，只有触碰右边界时才优雅省略，悬停显示 ToolTip；
+        响应用户需求：
+        1. 4 个操作按钮大小统一，状态指示灯与文案挪至 4 个按钮右侧同行全宽单行展示，绝不换行；
+        2. 省去原有独立的状态展示行，将释放的纵向空间等比例扩充给上方左侧配置栏与右侧工作台；
         3. 第二层为 8 节点管线图，第三层为硬件负载与进度条。
         """
         panel = QWidget()
@@ -1246,24 +1272,29 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
 
-        # ── 第 1 层：核心动作按钮组（独立一行操作区） ──
+        # ── 第 1 层：核心动作按钮组 + 运行状态反馈（合并为单行，状态灯与文案紧随按钮右侧） ──
         btn_layout = QHBoxLayout()
-        btn_layout.setSpacing(12)
+        btn_layout.setSpacing(10)
 
         self.btn_gen_plan = QPushButton("生成生产计划")
+        self.btn_gen_plan.setObjectName("btn_gen_plan")
+        self.btn_gen_plan.setProperty("class", "bottom_action_btn")
         self.btn_gen_plan.clicked.connect(self._on_generate_plan)
 
         self.btn_start = QPushButton("开始生产")
         self.btn_start.setObjectName("btn_start")
+        self.btn_start.setProperty("class", "bottom_action_btn")
         self.btn_start.clicked.connect(self._on_start_production)
 
         self.btn_pause = QPushButton("安全暂停")
         self.btn_pause.setObjectName("btn_pause")
+        self.btn_pause.setProperty("class", "bottom_action_btn")
         self.btn_pause.setEnabled(False)
         self.btn_pause.clicked.connect(self._on_safe_pause)
 
         self.btn_resume = QPushButton("继续生产")
         self.btn_resume.setObjectName("btn_resume")
+        self.btn_resume.setProperty("class", "bottom_action_btn")
         self.btn_resume.setEnabled(False)
         self.btn_resume.clicked.connect(self._on_start_production)
 
@@ -1271,13 +1302,9 @@ class MainWindow(QMainWindow):
         btn_layout.addWidget(self.btn_start)
         btn_layout.addWidget(self.btn_pause)
         btn_layout.addWidget(self.btn_resume)
-        btn_layout.addStretch()
 
-        layout.addLayout(btn_layout)
-
-        # ── 第 2 层：运行状态反馈区（独占全宽整行，单行展示不折行） ──
-        status_layout = QHBoxLayout()
-        status_layout.setSpacing(8)
+        # 状态指示灯与文案紧随在 4 个按钮右侧，独占整行剩余空间，单行行内展示不折行
+        btn_layout.addSpacing(16)
 
         self.lbl_status_led = QLabel("●")
         self.lbl_status_led.setStyleSheet("font-size: 16px; color: #555568; font-weight: bold;")
@@ -1287,12 +1314,12 @@ class MainWindow(QMainWindow):
         self.lbl_status.setStyleSheet("color: #CCCCCC; font-size: 12px; font-weight: bold;")
         self.lbl_status.setToolTip("当前生产流水线状态: 空闲就绪 (IDLE)")
 
-        status_layout.addWidget(self.lbl_status_led)
-        status_layout.addWidget(self.lbl_status, 1)
+        btn_layout.addWidget(self.lbl_status_led)
+        btn_layout.addWidget(self.lbl_status, 1)
 
-        layout.addLayout(status_layout)
+        layout.addLayout(btn_layout)
 
-        # ── 第 3 层：全流程管线 8 节点可视化指示图 ──
+        # ── 第 2 层：全流程管线 8 节点可视化指示图 ──
         self.pipeline_flow = PipelineFlowWidget()
         layout.addWidget(self.pipeline_flow)
 
@@ -1425,7 +1452,6 @@ class MainWindow(QMainWindow):
             diag_lines.extend([
                 "【语音与混音后端状态】:",
                 f"  - F5-TTS 本地高质量扩散: {'🟢 就绪 (F5TTS_v1_Base 模型已就绪)' if f5_model.exists() else '🟡 未下载完整权重'}",
-                "  - Kokoro 超轻量引擎: 🟢 就绪 (支持中英双语与年份/多音字位读)",
                 f"  - Azure AI Speech 官方云端: {'🟢 已配置 API 凭据' if (os.environ.get('AZURE_SPEECH_KEY') or config.get('tts.azure.key')) else '⚪ 未配置凭据 (可点击[🔑 凭据配置]录入)'}",
                 "【包装素材状态】:",
                 f"  - E1 商业男声旁白预设: {'🟢 已锁定 (' + str(e1_path.name) + ')' if e1_path.exists() else '🔴 缺失'}",
@@ -1461,7 +1487,7 @@ class MainWindow(QMainWindow):
         需要明确告知用户并在可见终端中执行下载，避免"静默失败"的黑盒体验。
         """
         try:
-            backend = "f5" if "F5" in engine_text else "kokoro"
+            backend = "f5"
             project_root = Path(__file__).resolve().parent.parent.parent
             model_dir = project_root / config.get(f"tts.{backend}.model_path", f"models/{backend}")
 
@@ -1470,7 +1496,7 @@ class MainWindow(QMainWindow):
                 return  # 模型已就绪
 
             # 模型未找到，提示用户下载
-            model_name = "F5-TTS 扩散模型" if backend == "f5" else "Kokoro 轻量模型"
+            model_name = "F5-TTS 扩散模型"
             repo_id = config.get(f"tts.{backend}.repo_id", "")
             reply = QMessageBox.question(
                 self,
@@ -1656,16 +1682,7 @@ class MainWindow(QMainWindow):
         """
         try:
             project_root = Path(__file__).resolve().parent.parent.parent
-            cur_voice = self.cmb_voice_profile.currentText() if hasattr(self, 'cmb_voice_profile') else "E1"
-            preset_file = "preset_male_e1_narrator.wav"
-            if "D1" in cur_voice:
-                preset_file = "preset_male_d1_elite.wav"
-            elif "D2" in cur_voice:
-                preset_file = "preset_male_d2_broadcast.wav"
-
-            voice_sample = project_root / "models" / "f5_tts" / "presets" / preset_file
-            if not voice_sample.exists():
-                voice_sample = project_root / "models" / "f5_tts" / "presets" / "preset_male_e1_narrator.wav"
+            voice_sample = project_root / "models" / "f5_tts" / "presets" / "preset_male_e1_narrator.wav"
             if not voice_sample.exists():
                 voice_sample = project_root / "outputtest" / "E1.wav"
 
@@ -1862,7 +1879,7 @@ class MainWindow(QMainWindow):
             "main_title": self.txt_main_title.text().strip(),
             "voice_volume_percent": float(self.sld_narr_preview.value()),
             "bgm_volume_percent": float(self.sld_bgm_preview.value()),
-            "tts_engine": "f5" if "F5" in self.cmb_tts_engine.currentText() else ("kokoro" if "Kokoro" in self.cmb_tts_engine.currentText() else "azure"),
+            "tts_engine": "f5" if "F5" in self.cmb_tts_engine.currentText() else "azure",
             "voice_profile": self.cmb_voice_profile.currentText(),
             "nfe_step": self.spn_nfe_step.value(),
             "cfg_strength": default_cfg_strength,
@@ -1984,17 +2001,8 @@ class MainWindow(QMainWindow):
         try:
             project_root = Path(__file__).resolve().parent.parent.parent
 
-            # 1. 动态匹配当前选中的音色预设样本
-            cur_voice = self.cmb_voice_profile.currentText() if hasattr(self, 'cmb_voice_profile') else "E1"
-            preset_file = "preset_male_e1_narrator.wav"
-            if "D1" in cur_voice:
-                preset_file = "preset_male_d1_elite.wav"
-            elif "D2" in cur_voice:
-                preset_file = "preset_male_d2_broadcast.wav"
-
-            voice_sample = project_root / "models" / "f5_tts" / "presets" / preset_file
-            if not voice_sample.exists():
-                voice_sample = project_root / "models" / "f5_tts" / "presets" / "preset_male_e1_narrator.wav"
+            # 1. 动态匹配当前选中的音色预设样本（统一使用固化的 E1 男声中声）
+            voice_sample = project_root / "models" / "f5_tts" / "presets" / "preset_male_e1_narrator.wav"
             if not voice_sample.exists():
                 voice_sample = project_root / "outputtest" / "E1.wav"
 

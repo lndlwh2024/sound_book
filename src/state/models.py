@@ -208,7 +208,7 @@ class TTSChunk:
     order: int = 1
     text: str = ""
     text_hash: str = ""
-    backend: str = "kokoro"
+    backend: str = "f5"
     voice: str = ""
     speed: float = 1.0
     fingerprint: str = ""

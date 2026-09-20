@@ -11,7 +11,7 @@ def parse_args() -> argparse.Namespace:
     
     # 核心参数
     parser.add_argument("book_file", nargs="?", help="书籍文件路径，支持 .pdf 和 .epub")
-    parser.add_argument("--tts", choices=["kokoro", "f5", "azure"], help="TTS 后端选择")
+    parser.add_argument("--tts", choices=["f5", "azure"], help="TTS 后端选择 (f5/azure)")
     parser.add_argument("--voice", help="指定 TTS voice")
     parser.add_argument("--speed", type=float, default=None, help="语速（默认按配置生效，例如 0.85）")
     
@@ -38,10 +38,10 @@ def interactive_input(config: dict) -> dict:
     
     book_file = input("请输入书籍路径：\n> ").strip()
     
-    print("\n请选择 TTS：\n1. Kokoro\n2. F5-TTS\n3. Azure AI Speech")
+    print("\n请选择 TTS：\n1. F5-TTS (本地高质量扩散模型)\n2. Azure AI Speech")
     tts_choice = input("> ").strip()
-    tts_map = {"1": "kokoro", "2": "f5", "3": "azure"}
-    tts = tts_map.get(tts_choice, "kokoro")  # 默认 kokoro
+    tts_map = {"1": "f5", "2": "azure"}
+    tts = tts_map.get(tts_choice, "f5")  # 默认 f5
     
     voice = input("\n请选择声音：\n> ").strip()
     if not voice:

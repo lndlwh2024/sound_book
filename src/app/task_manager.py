@@ -105,7 +105,7 @@ class TaskManager:
         """执行完整的有声书处理流水线"""
         print(f"\n==================================================")
         print(f"当前书籍: 《{self.display_name}》")
-        backend_name = self.params.get('tts') or self.config.get('tts.default_backend', 'kokoro')
+        backend_name = self.params.get('tts') or self.config.get('tts.default_backend', 'f5')
         print(f"TTS 后端: {backend_name.capitalize()}")
         print(f"状态: 开始处理")
         print(f"==================================================\n")
@@ -199,7 +199,7 @@ class TaskManager:
 
         self._copy_source(self.book_file, self.book_dir)
 
-        backend = self.params.get("tts") or self.config.get("tts.default_backend", "kokoro")
+        backend = self.params.get("tts") or self.config.get("tts.default_backend", "f5")
         voice = self.params.get("voice") or self.config.get(f"tts.{backend}.voice", "")
         speed_param = self.params.get("speed")
         speed = float(speed_param) if speed_param is not None else float(self.config.get(f"tts.{backend}.speed", 0.85))
@@ -343,7 +343,7 @@ class TaskManager:
 
         max_chars = self.config.get("chunking.default_max_chars", 1000)
         chunker = TextChunker(max_chars=max_chars)
-        backend = self.params.get("tts") or self.config.get("tts.default_backend", "kokoro")
+        backend = self.params.get("tts") or self.config.get("tts.default_backend", "f5")
         voice = self.params.get("voice") or self.config.get(f"tts.{backend}.voice", "")
         speed_param = self.params.get("speed")
         speed = float(speed_param) if speed_param is not None else float(self.config.get(f"tts.{backend}.speed", 0.85))
@@ -417,7 +417,7 @@ class TaskManager:
         2. 遇到崩溃自动重启并恢复断点；
         3. 仅展示章节与总体百分比高层进度，不向普通用户倾泻底层 chunk_id。
         """
-        backend_name = self.params.get("tts") or self.config.get("tts.default_backend", "kokoro")
+        backend_name = self.params.get("tts") or self.config.get("tts.default_backend", "f5")
         voice = self.params.get("voice") or self.config.get(f"tts.{backend_name}.voice", "")
         speed_param = self.params.get("speed")
         speed = float(speed_param) if speed_param is not None else float(self.config.get(f"tts.{backend_name}.speed", 0.85))
