@@ -85,12 +85,30 @@ def trim_audio_silence(audio, sr: int = 24000, thresh_ratio: float = 0.002):
             break
 
     return arr[first_idx:last_idx]
+def split_natural_sentences(text: str) -> list:
+    """
+    自然句切分算法：
+    仅在自然句边界标点（句号、问号、感叹号、分号、换行）处切分，绝不在逗号处硬截断。
+    【为什么这样设计】：
+    此前实验已确认 26 字硬切分会严重破坏语法语义连贯性，导致 F5 流匹配模型注意力对齐失真并明显放大句首漏词问题。
+    保持自然句切分可确保语调与情感完整连贯。
+    """
+    if not text or not text.strip():
+        return []
+    raw_segments = re.split(r'([。！？!?；;\n]+)', text)
+    sentences = []
+    for i in range(0, len(raw_segments), 2):
+        seg = raw_segments[i]
+        punc = raw_segments[i + 1] if i + 1 < len(raw_segments) else ""
+        combined = (seg + punc).strip()
+        if combined:
+            sentences.append(combined)
+    return sentences
 
 def split_chinese_sentences(text: str, max_len: int = 26) -> list:
     """
-    智能分句算法，将长篇正文切分为 15~26 字的黄金语音片段。
-    【设计原因】：F5-TTS 基于参考音频（5~8秒）估算生成时长，分句长度控制在 25 字以内
-    能与参考音频保持近 1:1 的注意力对齐比例，彻底根除跨步漂移导致的忽快忽慢与叠字杂音。
+    【DEPRECATED / 已废弃】：旧版 26 字硬切分算法。
+    该算法已被确认会明显放大 F5 句首漏词，正式生产管线禁止调用，仅保留供历史兼容或回归对照测试。
     """
     if not text or not text.strip():
         return []
@@ -306,11 +324,13 @@ def main():
                 pause_paragraph = np.zeros(int(sample_rate * pause_para_sec), dtype=np.float32)
                 tail_silence = np.zeros(int(sample_rate * 0.35), dtype=np.float32)
 
-                # 分句合成与精准停顿重构（采用 26 字黄金分句限制）
-                sentences = split_chinese_sentences(text, max_len=26)
+                # 分句合成与精准停顿重构（正式废弃 26 字硬切，全面采用自然句切分）
+                sentences = split_natural_sentences(text)
                 all_audio = []
 
-                nfe_step = int(payload.get("nfe_step", 32))
+                # 固化生产基线：默认 NFE 步数为 16（已通过人工严格盲听验收）
+                nfe_step = int(payload.get("nfe_step", 16))
+                base_seed = int(payload.get("seed", 42))
 
                 for sent_idx, sent in enumerate(sentences):
                     # 净化特殊非 ASCII/非拼音合法符号，防止 token 嵌入未定义越界
@@ -319,13 +339,17 @@ def main():
                     if not clean_sent:
                         clean_sent = sent
 
+                    # 固化随机种子策略：42 + sent_idx，保证单句间既有动态多样性，又保持确定性可复现
+                    current_seed = base_seed + sent_idx
+
                     # 调用 F5-TTS 内存级直接推理单句
                     seg_data, seg_sr, _ = f5_model.infer(
                         ref_file=ref_audio,
                         ref_text=ref_text,
                         gen_text=clean_sent,
                         speed=speed,
-                        nfe_step=nfe_step
+                        nfe_step=nfe_step,
+                        seed=current_seed
                     )
 
                     if seg_data is not None and len(seg_data) > 0:

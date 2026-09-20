@@ -362,6 +362,25 @@ def atomic_save_json(target_path: str, data: dict):
 4. **停机指令（Stop Request）**：
    - 主程序发送：`{"cmd": "stop"}`，Worker 安全释放显存并返回退出码 0。
 
+### 9.3 F5-TTS 生产基线与音色工程规范 (Production Baseline)
+经过深度单变量专项实验与严格人工听验验收，F5-TTS 生产基线固化如下规范：
+1. **稳定推理超参数**：
+   - `nfe_step = 16`（在生成质量与 GPU 推理耗时之间达到最优平衡）；
+   - `speed = 1.0`；
+   - `seed` 策略：`42 + sent_idx`（保证单句间声学自然微扰动，同时实现确定性可复现）；
+   - 保持 F5 官方原生流匹配截断逻辑 `ref_audio_len`，严禁修改官方底层。
+2. **Reference Pair 强约束**：
+   - 参考音频与参考文本必须 **100% 逐字严格对应**，严禁开头或结尾存在未发音或多出的文字；
+   - 参考音频必须在**自然完整语义和静音低谷处闭合**（如 `models/f5_tts/presets/preset_male_e1_narrator.wav` 截断于 5.30 秒）；
+   - 严禁在“与此同时、但是、如果、因此”等未完结连接词处截断参考音频，防止扩散模型将未完成从句作为前置语境导致生成句首多字。
+3. **文本切分规范（全面废弃 26 字硬切）**：
+   - 生产管线全面采用自然句切分 `split_natural_sentences`，仅在自然标点（`。！？!?；;\n`）处切断；
+   - 严禁使用旧版 `split_chinese_sentences(max_len=26)`，该硬切算法会破坏语义并严重放大句首丢词。
+4. **最小回归测试集门禁（Minimal Regression Suite）**：
+   - 测试脚本位于 `tests/regression/test_f5_minimal_regression.py`，包含 6 个核心测试单元（重点覆盖“如果”、“就算”、“反之”等易丢词句首）；
+   - **门禁标准**：6 单元全部生成成功、0 漏词、0 多词、语调自然；
+   - 凡修改文本切分、F5 Worker、音色资产、Seed/NFE 等模块，必须强制重新执行回归测试。
+
 ---
 
 ## 10. 字幕时间累计算法与 ASS 生成规范

@@ -54,9 +54,9 @@ tts:
       e1:
         name: "E1 (男生中声 - 巴菲特股东信旁白)"
         audio: "models/f5_tts/presets/preset_male_e1_narrator.wav"
-        text: "例如大幅增加短期美债持有量和对日本五大商社的持续加码。"
+        text: "大幅增加短期美债持有量和对日本五大商社的持续加码。"
     ref_audio: models/f5_tts/presets/preset_male_e1_narrator.wav
-    ref_text: "例如大幅增加短期美债持有量和对日本五大商社的持续加码。"
+    ref_text: "大幅增加短期美债持有量和对日本五大商社的持续加码。"
   azure:
     voice: zh-CN-XiaoxiaoNeural
     rate: '1.0'

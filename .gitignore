@@ -22,7 +22,7 @@ build/
 # 保留测试 fixture 与系统固化预设资源
 !tests/fixtures/**/*.wav
 !tests/fixtures/**/*.mp3
-!models/f5_tts/presets/*.wav
+!models/f5_tts/presets/preset_male_e1_narrator.wav
 !resources/bgm/*.mp3
 
 # === 书籍工作目录 ===
@@ -39,10 +39,10 @@ validation_report.json
 *.bin
 *.onnx
 *.safetensors
-models/
-!models/f5_tts/presets/*.txt
-!models/f5_tts/presets/*.srt
-!models/f5_tts/presets/*.wav
+models/f5/
+models/kokoro/
+models/f5_tts/F5TTS_v1_Base/
+models/f5_tts/.cache/
 
 # === IDE ===
 .idea/
@@ -57,3 +57,4 @@ Thumbs.db
 # === 产物与本地语料 ===
 output/
 原声/
+debug/

@@ -109,10 +109,10 @@ GUI 与后台 Task Manager 之间通过线程安全的信号槽双向交互：
 | **Text Cleaner** | 文本解析 | 确定性清洗页眉、页脚、页码及格式乱码，绝对不改变正文字词。 |
 | **Validator** | 文本解析 | 校验正文字符损失率、空章节与异常截断，超阈值自动触发 `NEEDS_REVIEW`。 |
 | **Chapter Detector** | 文本解析 | 识别书籍大纲、章节标题与层级结构，构建统一的内部书籍大纲树。 |
-| **SpeechUnit Builder** | 文本解析 | 将章节切分为兼具自然朗读体验与字幕展示适宜性的最小生成单元。 |
+| **SpeechUnit Builder** | 文本解析 | 将章节切分为兼具自然朗读体验与字幕展示适宜性的最小生成单元。**正式架构全面采用自然句切分，严禁 26 字硬切**。 |
 | **TTS Router** | 语音调度 | 统一调度 F5、Kokoro、Azure 后端，实现请求路由与参数转换。 |
-| **VoiceProfile Manager** | 语音调度 | 集中管理音色配置资产，解耦音色名称与底层模型参数。 |
-| **Persistent Worker** | 语音执行 | 跨环境 Python 工作进程，单次启动常驻显存，连续批处理，隔离运行依赖。 |
+| **VoiceProfile Manager** | 语音调度 | 集中管理音色配置资产，解耦音色名称与底层模型参数。**严格维护 Reference Audio 与 Text 的 100% 逐字对应及自然语义闭合**。 |
+| **Persistent Worker** | 语音执行 | 跨环境 Python 工作进程，单次启动常驻显存，连续批处理，隔离运行依赖；内建最小回归测试（Minimal Regression Suite）质量准入门禁。 |
 | **Subtitle Engine** | 视频字幕 | 基于 1:1 WAV 实际时长生成精准原文字幕，保留 SubtitleAligner 对齐接口。 |
 | **Audio QC** | 音频流水线 | 检查生成的 WAV 文件完整性、静音异常、振幅削顶及 NaN 溢出。 |
 | **Audio Mixer** | 音频流水线 | 旁白与 BGM 增益换算、基于侧链压缩的自动闪避（Ducking）、BGM 自动循环淡出。 |
