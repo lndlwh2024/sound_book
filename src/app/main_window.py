@@ -582,6 +582,8 @@ class MainWindow(QMainWindow):
         self.preview_controller.sig_progress.connect(self._on_preview_progress)
         self.preview_controller.sig_state_changed.connect(self._on_preview_state_changed)
         self.preview_controller.sig_error_fallback.connect(self._on_preview_error_fallback)
+        self.preview_controller.sig_preparing.connect(self._on_preview_preparing)
+        self.preview_controller.sig_duration_resolved.connect(self._on_preview_duration_resolved)
 
         self._init_ui()
         self._connect_signals()
@@ -1363,8 +1365,11 @@ class MainWindow(QMainWindow):
 
         wb_main_layout.addLayout(stage_layout)
 
-        # 下部：仅一行【混合试听】主控制按钮
-        self.btn_mix_preview = QPushButton("▶ 混合试听 (播放时长 = min(BGM, 朗读))")
+        # 下部：【混合试听】主控制按钮 — 三态切换（播放/暂停/继续）
+        # 【为什么这样设计】
+        # 响应用户需求：删除左下角独立播放按钮（功能与混合试听重复），
+        # 将播放/暂停状态切换直接集成到混合试听按钮上，减少 UI 冗余。
+        self.btn_mix_preview = QPushButton("▶ 混合试听")
         self.btn_mix_preview.setEnabled(False)
         self.btn_mix_preview.setToolTip("未配置背景音乐，请先选择背景音乐后再进行混合试听")
         self.btn_mix_preview.setStyleSheet("""
@@ -1380,25 +1385,25 @@ class MainWindow(QMainWindow):
             QPushButton:pressed:enabled { background-color: #1A441A; }
             QPushButton:disabled { background-color: #2A332A; color: #667766; }
         """)
-        self.btn_mix_preview.clicked.connect(self._on_test_mix)
+        self.btn_mix_preview.clicked.connect(self._on_mix_preview_clicked)
         wb_main_layout.addWidget(self.btn_mix_preview)
 
+        # 转码/准备状态提示标签 — 首次加载音频流时可见，出声后自动隐藏
+        self.lbl_preview_status = QLabel("")
+        self.lbl_preview_status.setStyleSheet(
+            "font-size: 11px; color: #DDAA33; font-weight: bold; padding: 2px 4px;"
+        )
+        self.lbl_preview_status.setAlignment(Qt.AlignCenter)
+        self.lbl_preview_status.setVisible(False)
+        wb_main_layout.addWidget(self.lbl_preview_status)
+
         # 【为什么这样设计】
-        # 响应用户需求：统一音频试听播放器改造，提供轻量控制栏（播放/暂停、停止、进度条、时间、Seek 拖动），
-        # 仅在内置播放模式下显示，外置模式下自动隐藏，轻巧精炼。
+        # 响应用户需求：统一音频试听播放器改造，提供轻量控制栏（停止、进度条、时间、Seek 拖动），
+        # 独立播放键已删除（合并到混合试听按钮三态切换），仅在内置播放模式下显示。
         self.widget_preview_bar = QWidget()
         bar_layout = QHBoxLayout(self.widget_preview_bar)
         bar_layout.setContentsMargins(0, 2, 0, 0)
         bar_layout.setSpacing(6)
-
-        self.btn_preview_play_pause = QPushButton("▶ 播放")
-        self.btn_preview_play_pause.setFixedWidth(68)
-        self.btn_preview_play_pause.setStyleSheet("""
-            QPushButton { background-color: #2E5B88; color: #FFFFFF; font-weight: bold; border-radius: 4px; padding: 4px 6px; font-size: 11px; }
-            QPushButton:hover { background-color: #3A73AA; }
-            QPushButton:disabled { background-color: #333344; color: #777788; }
-        """)
-        self.btn_preview_play_pause.clicked.connect(self._on_preview_play_pause_clicked)
 
         self.btn_preview_stop = QPushButton("■ 停止")
         self.btn_preview_stop.setFixedWidth(56)
@@ -1419,7 +1424,6 @@ class MainWindow(QMainWindow):
         self.lbl_preview_time.setStyleSheet("font-size: 11px; color: #BBBBCC; font-family: Consolas, monospace;")
         self.lbl_preview_time.setAlignment(Qt.AlignCenter)
 
-        bar_layout.addWidget(self.btn_preview_play_pause)
         bar_layout.addWidget(self.btn_preview_stop)
         bar_layout.addWidget(self.sld_preview_progress, 1)
         bar_layout.addWidget(self.lbl_preview_time)
@@ -1973,13 +1977,29 @@ class MainWindow(QMainWindow):
         except Exception as e:
             logger.warning(f"持久化保存播放模式配置失败: {e}")
 
-    def _on_preview_play_pause_clicked(self) -> None:
-        """播放/暂停按钮点击切换"""
-        self.preview_controller.toggle_play_pause()
+    def _on_mix_preview_clicked(self) -> None:
+        """
+        混合试听按钮三态点击响应
+        【为什么这样设计】
+        响应用户需求：删除左下角独立播放按钮，将播放/暂停/继续状态切换合并到混合试听按钮。
+        空闲状态 → 触发混合试听播放；播放中 → 暂停；暂停中 → 继续播放。
+        """
+        if self.preview_controller.is_active():
+            # 当前有活跃播放任务
+            if self.preview_controller.is_playing():
+                self.preview_controller.pause()
+            else:
+                self.preview_controller.resume()
+        else:
+            # 空闲状态：发起新的混合试听
+            self._on_test_mix()
 
     def _on_preview_stop_clicked(self) -> None:
         """停止试听播放"""
         self.preview_controller.stop()
+        # 立即隐藏准备提示（stop 触发 sig_state_changed(False) 也会处理，此处双保险）
+        if hasattr(self, 'lbl_preview_status'):
+            self.lbl_preview_status.setVisible(False)
 
     def _on_preview_seek(self, value: int) -> None:
         """用户在进度条拖动定位 Seek"""
@@ -1998,10 +2018,39 @@ class MainWindow(QMainWindow):
             t_sec = total_ms // 1000
             self.lbl_preview_time.setText(f"{c_sec//60:02d}:{c_sec%60:02d} / {t_sec//60:02d}:{t_sec%60:02d}")
 
+    def _on_preview_preparing(self) -> None:
+        """
+        播放器正在准备音频流：显示转码提示信息
+        【为什么这样设计】
+        响应用户需求：首次加载 BGM 时有 0.5-1s 的准备时间，
+        在此期间在工作台展示提示信息，避免用户以为播放键无响应。
+        """
+        if hasattr(self, 'lbl_preview_status'):
+            self.lbl_preview_status.setText("⏳ 正在准备音频流，请稍候...")
+            self.lbl_preview_status.setVisible(True)
+
     def _on_preview_state_changed(self, is_playing: bool) -> None:
-        """播放状态改变：更新按钮文字与状态"""
-        if hasattr(self, 'btn_preview_play_pause'):
-            self.btn_preview_play_pause.setText("❚❚ 暂停" if is_playing else "▶ 播放")
+        """
+        播放状态改变：更新混合试听按钮文案 + 隐藏转码提示
+        【为什么这样设计】
+        将三态文案切换集中到此回调：播放中显示暂停、非播放时区分暂停中和停止状态。
+        """
+        if hasattr(self, 'btn_mix_preview'):
+            if is_playing:
+                self.btn_mix_preview.setText("❚❚ 暂停试听")
+            elif self.preview_controller.is_active():
+                self.btn_mix_preview.setText("▶ 继续试听")
+            else:
+                self.btn_mix_preview.setText("▶ 混合试听")
+        # 音频流成功出声后隐藏准备提示
+        if hasattr(self, 'lbl_preview_status') and is_playing:
+            self.lbl_preview_status.setVisible(False)
+
+    def _on_preview_duration_resolved(self, real_duration: float) -> None:
+        """异步时长查询完成：修正进度条总时长显示"""
+        if hasattr(self, 'lbl_preview_time') and real_duration > 0:
+            t_sec = int(real_duration)
+            self.lbl_preview_time.setText(f"00:00 / {t_sec//60:02d}:{t_sec%60:02d}")
 
     def _on_preview_error_fallback(self, err_msg: str) -> None:
         """
@@ -2011,6 +2060,8 @@ class MainWindow(QMainWindow):
         绝不卡死界面，弹窗询问用户是否本次使用系统默认播放器打开，
         且绝不静默破坏用户的全局永久偏好。
         """
+        if hasattr(self, 'lbl_preview_status'):
+            self.lbl_preview_status.setVisible(False)
         reply = QMessageBox.question(
             self,
             "试听播放器提示",
@@ -2335,12 +2386,21 @@ class MainWindow(QMainWindow):
             bgm_vol = self.sld_bgm_preview.value() if hasattr(self, 'sld_bgm_preview') else 25
 
             # 4. 计算试听播放时长 = min(BGM长度, 朗读长度)
+            # 【为什么这样设计】
+            # voice_sample 为预设 wav，使用 wave 模块读取耗时 <1ms；
+            # 背景音乐若为非 wav 格式 (如 mp3/aac)，不在主线程同步调用 ffprobe 以免阻塞界面 1~2s；
+            # 优先以朗读样本时长 (约 5.3s) 秒开启动混音推流，彻底解决首次加载卡顿。
             voice_dur = self._get_audio_duration(voice_sample)
+            if voice_dur <= 0:
+                voice_dur = 10.0
+
+            preview_sec = voice_dur
             if bgm_path and Path(bgm_path).exists():
-                bgm_dur = self._get_audio_duration(bgm_path)
-                preview_sec = max(2.0, min(bgm_dur, voice_dur))
-            else:
-                preview_sec = max(2.0, voice_dur)
+                bgm_p = Path(bgm_path)
+                if bgm_p.suffix.lower() == ".wav":
+                    bgm_dur = self._get_audio_duration(bgm_p)
+                    if bgm_dur > 0:
+                        preview_sec = max(2.0, min(bgm_dur, voice_dur))
 
             logger.info(f"触发混合试听: 朗读={voice_sample.name}({voice_vol}%), BGM={Path(bgm_path).name if bgm_path else '无'}({bgm_vol}%), 时长={preview_sec:.1f}s")
             self.preview_controller.play_mix(

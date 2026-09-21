@@ -14,6 +14,7 @@ import sys
 import time
 import logging
 import subprocess
+import threading
 from pathlib import Path
 from typing import Optional, Dict, Any, Union
 
@@ -215,6 +216,8 @@ class AudioPreviewController(QObject):
     sig_state_changed = Signal(bool)     # True=播放中, False=暂停/停止
     sig_error_fallback = Signal(str)     # 发生错误，触发向用户确认是否回退至外部播放器
     sig_source_changed = Signal(str)     # 当前播放源标识 ("MAIN_AUDIO", "BGM", "MIX", "")
+    sig_preparing = Signal()             # 通知 UI 正在准备音频流（用于显示转码提示）
+    sig_duration_resolved = Signal(float)  # 异步时长查询完成后通知真实时长
 
     MODE_INTERNAL = "internal"
     MODE_EXTERNAL = "external"
@@ -236,6 +239,9 @@ class AudioPreviewController(QObject):
         self._last_mix_params: Optional[Dict[str, Any]] = None
 
         self._worker: Optional[PlaybackWorker] = None
+
+        # 异步时长查询完成后修正进度条总量
+        self.sig_duration_resolved.connect(self._on_duration_resolved)
 
     def set_playback_mode(self, mode: str):
         """设置播放模式：'internal' 或 'external'"""
@@ -263,11 +269,16 @@ class AudioPreviewController(QObject):
             self._play_externally(voice_path)
             return
 
-        # 获取总时长
-        dur = self._inspect_duration(voice_path)
+        self.sig_preparing.emit()
+
+        # 【为什么这样设计】
+        # 先用保底时长立即启动 FFmpeg 管道，让声卡尽快出声；
+        # 真实时长在后台异步查询，查询完毕后通过信号更新进度条总量。
+        # 这样避免了 ffprobe 冷启动阻塞用户等待 0.5-1.5s 的体感延迟。
+        fallback_dur = 300.0
         self.current_source = self.SOURCE_MAIN
         self.current_file_path = voice_path
-        self.current_total_sec = dur
+        self.current_total_sec = fallback_dur
         self._last_mix_params = None
 
         cmd = [
@@ -275,7 +286,8 @@ class AudioPreviewController(QObject):
             "-i", str(voice_path.resolve()),
             "-f", "s16le", "-ar", "48000", "-ac", "2", "pipe:1"
         ]
-        self._start_internal_stream(cmd, total_sec=dur, start_sec=0.0)
+        self._start_internal_stream(cmd, total_sec=fallback_dur, start_sec=0.0)
+        self._async_resolve_duration(voice_path)
 
     def play_bgm(self, bgm_path: Path):
         """播放背景音乐 (支持快速切歌)"""
@@ -287,10 +299,13 @@ class AudioPreviewController(QObject):
             self._play_externally(bgm_path)
             return
 
-        dur = self._inspect_duration(bgm_path)
+        self.sig_preparing.emit()
+
+        # 同 play_main_audio：先用保底时长即刻启动管道，异步查询真实时长
+        fallback_dur = 300.0
         self.current_source = self.SOURCE_BGM
         self.current_file_path = bgm_path
-        self.current_total_sec = dur
+        self.current_total_sec = fallback_dur
         self._last_mix_params = None
 
         cmd = [
@@ -298,7 +313,8 @@ class AudioPreviewController(QObject):
             "-i", str(bgm_path.resolve()),
             "-f", "s16le", "-ar", "48000", "-ac", "2", "pipe:1"
         ]
-        self._start_internal_stream(cmd, total_sec=dur, start_sec=0.0)
+        self._start_internal_stream(cmd, total_sec=fallback_dur, start_sec=0.0)
+        self._async_resolve_duration(bgm_path)
 
     def play_mix(self, voice_path: Path, bgm_path: Optional[Path],
                  voice_vol_percent: float, bgm_vol_percent: float,
@@ -309,19 +325,20 @@ class AudioPreviewController(QObject):
         彻底放弃先生成完整 WAV/MP3 落盘文件再播放的低效做法。
         直接使用 FFmpeg amix 滤镜从主音频与 BGM 实时混合并输出 PCM，
         在内存管道中秒开，同时完美保留已设定的主音量与背景音量比例。
+        preview_sec 由调用方预先传入以避免阻塞式时长查询；
+        若为 None 则使用保底值并通过信号后续修正。
         """
         if not voice_path.exists():
             self.sig_error_fallback.emit(f"主音频参考文件不存在: {voice_path}")
             return
 
-        voice_dur = self._inspect_duration(voice_path)
-        bgm_dur = self._inspect_duration(bgm_path) if (bgm_path and bgm_path.exists()) else 0.0
+        # 【为什么这样设计】
+        # 消除旧版中 play_mix 内部同步调用 _inspect_duration 导致的阻塞。
+        # 调用方已在外部预计算 preview_sec，此处直接使用保底值兜底即可。
+        if preview_sec is None or preview_sec <= 0:
+            preview_sec = 60.0
 
-        if preview_sec is None:
-            if bgm_dur > 0:
-                preview_sec = max(2.0, min(voice_dur, bgm_dur))
-            else:
-                preview_sec = max(2.0, voice_dur)
+        self.sig_preparing.emit()
 
         self.current_source = self.SOURCE_MIX
         self.current_file_path = voice_path
@@ -483,6 +500,40 @@ class AudioPreviewController(QObject):
             return float(info.get("duration", 0.0))
         except Exception:
             return 10.0  # 保底 10 秒
+
+    def _async_resolve_duration(self, audio_path: Path):
+        """
+        在后台 daemon 线程中异步查询音频文件真实时长。
+        【为什么这样设计】
+        将 ffprobe 子进程冷启动（Windows 上约 0.5-1.5s）从播放关键路径中剥离，
+        不阻塞 FFmpeg 管道启动和声卡初始化，首帧 PCM 可提前 0.5-1.5s 到达声卡。
+        查询完毕后通过 sig_duration_resolved 信号在主线程安全地修正进度条总量。
+        """
+        def _worker():
+            try:
+                dur = self._inspect_duration(audio_path)
+                if dur > 0:
+                    self.sig_duration_resolved.emit(dur)
+            except Exception as e:
+                logger.warning(f"异步时长查询失败: {e}")
+
+        t = threading.Thread(target=_worker, daemon=True)
+        t.start()
+
+    @Slot(float)
+    def _on_duration_resolved(self, real_duration: float):
+        """
+        异步时长查询完成回调：修正当前播放总时长和 worker 内的时长记录。
+        【为什么这样设计】
+        播放启动时使用保底值 300s，此回调用真实时长替换之，
+        使得进度条比例和时间读数从保底值无缝过渡为真实值。
+        """
+        if real_duration <= 0:
+            return
+        self.current_total_sec = real_duration
+        if self._worker and self._worker.isRunning():
+            self._worker.total_duration_sec = real_duration
+        logger.debug(f"异步时长查询完毕，已修正为 {real_duration:.2f}s")
 
     def _build_mix_ffmpeg_cmd(self, voice_path: Path, bgm_path: Optional[Path],
                               voice_vol: float, bgm_vol: float,
