@@ -575,10 +575,10 @@ class MainWindow(QMainWindow):
         screen = QApplication.primaryScreen()
         if screen:
             avail = screen.availableGeometry()
-            init_w = max(1240, min(1440, int(avail.width() * 0.90)))
-            init_h = max(780, min(920, int(avail.height() * 0.92)))
+            init_w = max(1360, min(1500, int(avail.width() * 0.92)))
+            init_h = max(840, min(960, int(avail.height() * 0.93)))
             self.resize(init_w, init_h)
-        self.setMinimumSize(1080, 720)
+        self.setMinimumSize(1100, 750)
 
         # 设置主窗口左上角图标为 package/logo.png
         logo_path = Path(__file__).resolve().parent.parent.parent / "package" / "logo.png"
@@ -687,12 +687,12 @@ class MainWindow(QMainWindow):
                 color: #FFFFFF;
                 padding: 4px;
             }
-            /* 【根治文字截断】微调框：设置 28px 最小高度，右侧预留箭头按钮宽度，文字上下充分留白 */
+            /* 【根治文字截断】微调框：设置 28px 最小高度，右侧预留紧凑箭头按钮，文本空间最大化 */
             QSpinBox, QDoubleSpinBox {
                 background-color: #16161C;
                 border: 1px solid #444455;
                 border-radius: 4px;
-                padding: 3px 26px 3px 8px;
+                padding: 2px 22px 2px 6px;
                 min-height: 28px;
                 font-size: 12px;
                 color: #FFFFFF;
@@ -703,7 +703,7 @@ class MainWindow(QMainWindow):
             QSpinBox::up-button, QDoubleSpinBox::up-button {
                 subcontrol-origin: border;
                 subcontrol-position: top right;
-                width: 24px;
+                width: 20px;
                 border-left: 1px solid #444455;
                 border-bottom: 1px solid #444455;
                 background-color: #252535;
@@ -723,7 +723,7 @@ class MainWindow(QMainWindow):
             QSpinBox::down-button, QDoubleSpinBox::down-button {
                 subcontrol-origin: border;
                 subcontrol-position: bottom right;
-                width: 24px;
+                width: 20px;
                 border-left: 1px solid #444455;
                 background-color: #252535;
                 border-bottom-right-radius: 4px;
@@ -958,8 +958,8 @@ class MainWindow(QMainWindow):
         work_grid.setContentsMargins(0, 0, 0, 0)
         work_grid.setHorizontalSpacing(16)
         work_grid.setVerticalSpacing(8)
-        work_grid.setColumnStretch(0, 36)
-        work_grid.setColumnStretch(1, 64)
+        work_grid.setColumnStretch(0, 41)
+        work_grid.setColumnStretch(1, 59)
         work_grid.setRowStretch(0, 1)
         work_grid.setRowStretch(1, 0)
 
@@ -1295,7 +1295,9 @@ class MainWindow(QMainWindow):
         self.spn_gpu_temp_limit.setRange(75, 80)
         self.spn_gpu_temp_limit.setValue(75)
         self.spn_gpu_temp_limit.setSuffix(" °C")
-        self.spn_gpu_temp_limit.setFixedWidth(68)
+        self.spn_gpu_temp_limit.setMinimumWidth(85)
+        self.spn_gpu_temp_limit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self.spn_gpu_temp_limit.setAlignment(Qt.AlignCenter)
         self.spn_gpu_temp_limit.setToolTip("触发安全挂起的 GPU 核心温度上限（75 至 80°C）")
         self.spn_gpu_temp_limit.setEnabled(False)
         self.lbl_gpu_temp_limit.setEnabled(False)
@@ -1306,7 +1308,9 @@ class MainWindow(QMainWindow):
         self.spn_gpu_temp_resume.setRange(55, 65)
         self.spn_gpu_temp_resume.setValue(60)
         self.spn_gpu_temp_resume.setSuffix(" °C")
-        self.spn_gpu_temp_resume.setFixedWidth(68)
+        self.spn_gpu_temp_resume.setMinimumWidth(85)
+        self.spn_gpu_temp_resume.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self.spn_gpu_temp_resume.setAlignment(Qt.AlignCenter)
         self.spn_gpu_temp_resume.setToolTip("冷却完成后允许恢复生产的 GPU 温度下限（55 至 65°C）")
         self.spn_gpu_temp_resume.setEnabled(False)
         self.lbl_gpu_temp_resume.setEnabled(False)
@@ -1317,7 +1321,9 @@ class MainWindow(QMainWindow):
         self.spn_gpu_cooling_minutes.setRange(1, 60)
         self.spn_gpu_cooling_minutes.setValue(1)
         self.spn_gpu_cooling_minutes.setSuffix(" 分")
-        self.spn_gpu_cooling_minutes.setFixedWidth(68)
+        self.spn_gpu_cooling_minutes.setMinimumWidth(85)
+        self.spn_gpu_cooling_minutes.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self.spn_gpu_cooling_minutes.setAlignment(Qt.AlignCenter)
         self.spn_gpu_cooling_minutes.setToolTip("进入温控休眠后的最小强制冷却时长（1 至 60 分钟）")
         self.spn_gpu_cooling_minutes.setEnabled(False)
         self.lbl_gpu_cooling_min.setEnabled(False)
