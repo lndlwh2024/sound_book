@@ -12,7 +12,7 @@ import ctypes
 import platform
 import subprocess
 from pathlib import Path
-from typing import Optional, Dict, Any, Union
+from typing import Optional, Dict, Any, Union, Tuple
 
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
@@ -571,15 +571,14 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.bridge = bridge or TaskManagerBridge()
         self.setWindowTitle("书声 (ShuSheng) v2.0 - 自动化有声视频生产工具")
-        # 【自适应屏幕工作区】检测当前主显示器可用区域，适度加大默认打开尺寸，保证初始开机与最大化排版一致且完全舒展
+        # 【自适应屏幕工作区】检测当前主显示器可用区域，动态计算最佳默认尺寸，保证初始开机与最大化排版一致且完全舒展
         screen = QApplication.primaryScreen()
         if screen:
             avail = screen.availableGeometry()
-            init_w = max(1280, min(1400, int(avail.width() * 0.94)))
-            init_h = max(860, min(950, int(avail.height() * 0.95)))
+            init_w = max(1240, min(1440, int(avail.width() * 0.90)))
+            init_h = max(780, min(920, int(avail.height() * 0.92)))
             self.resize(init_w, init_h)
-            self.resize(1380, 940)
-        self.setMinimumSize(1100, 760)
+        self.setMinimumSize(1080, 720)
 
         # 设置主窗口左上角图标为 package/logo.png
         logo_path = Path(__file__).resolve().parent.parent.parent / "package" / "logo.png"
@@ -941,25 +940,47 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central_widget)
         main_layout = QVBoxLayout(central_widget)
         main_layout.setContentsMargins(16, 16, 16, 16)
-        main_layout.setSpacing(10)
+        main_layout.setSpacing(8)
 
-        # 1. 上半部分：左侧输入设置 + 右侧多Sheet预览与诊断
-        top_split_layout = QHBoxLayout()
-        top_split_layout.setSpacing(16)
+        # 【核心双列网格架构：实现 4 个按钮与状态文案像素级对齐至左右分栏边界】
+        # 【为什么这样设计】
+        # 响应用户核心需求：“无论在默认开启窗口 还是最大化窗口 都要把 4个按钮 和状态文案的分界线 对齐到 左右栏目的边界”
+        # 若上方左右面板使用独立的 QHBoxLayout，下方控制栏使用另一个独立的 QHBoxLayout，
+        # 两者各自根据内部子组件计算 MinimumSizeHint，必定造成上下列宽脱节与分割线错位；
+        # 改用统一的顶层双列网格 work_grid：
+        # - Row 0, Col 0: 左栏配置面板 (left_panel)
+        # - Row 0, Col 1: 右栏工作台与日志 (right_panel)
+        # - Row 1, Col 0: 4 个核心操作按钮 (left_btn_widget)
+        # - Row 1, Col 1: 运行状态反馈栏 (right_status_widget)
+        # Qt 引擎在物理层面保证：第 0 列上下完全等宽，第 1 列上下完全等宽！
+        # 无论在默认窗口还是全屏最大化下，4 个按钮的右边缘与左栏右边缘 100% 绝对重合，状态栏左边缘与右栏左边缘 100% 绝对重合！
+        work_grid = QGridLayout()
+        work_grid.setContentsMargins(0, 0, 0, 0)
+        work_grid.setHorizontalSpacing(16)
+        work_grid.setVerticalSpacing(8)
+        work_grid.setColumnStretch(0, 36)
+        work_grid.setColumnStretch(1, 64)
+        work_grid.setRowStretch(0, 1)
+        work_grid.setRowStretch(1, 0)
 
         left_panel = self._build_left_config_panel()
         right_panel = self._build_right_preview_panel()
+        left_btn_widget, right_status_widget = self._build_control_and_status_widgets()
 
-        # 【为什么这样设计】
-        # 响应用户最新要求“尽量拓展右侧两个窗口的空间”，将水平比例调整为 38:62，
-        # 左侧表单收窄为 38%，大幅释放空间给右侧排版画布、音频工作台与三 Sheet 诊断面板。
-        top_split_layout.addWidget(left_panel, 38)
-        top_split_layout.addWidget(right_panel, 62)
-        main_layout.addLayout(top_split_layout, 8)
+        work_grid.addWidget(left_panel, 0, 0)
+        work_grid.addWidget(right_panel, 0, 1)
+        work_grid.addWidget(left_btn_widget, 1, 0)
+        work_grid.addWidget(right_status_widget, 1, 1)
 
-        # 2. 底部控制区：动作按钮、全局进度、硬件负载监控（经典 8:3 黄金弹性分配）
-        bottom_panel = self._build_bottom_control_panel()
-        main_layout.addWidget(bottom_panel, 3)
+        main_layout.addLayout(work_grid, 1)
+
+        # 底部第 2 层：全流程管线 8 节点可视化指示图
+        self.pipeline_flow = PipelineFlowWidget()
+        main_layout.addWidget(self.pipeline_flow, 0)
+
+        # 底部第 3 层：硬件负载实时监控条 与 全局任务进度条
+        bottom_monitor_bar = self._build_bottom_monitor_bar()
+        main_layout.addWidget(bottom_monitor_bar, 0)
 
     def _build_left_config_panel(self) -> QWidget:
         """构建左侧参数配置区（纯净一体化面板，绝无滑动条）"""
@@ -1255,7 +1276,7 @@ class MainWindow(QMainWindow):
         self.lbl_min_intv.setVisible(False)
         self.spn_min_interval.setVisible(False)
 
-        # 行 2: GPU温控配置（严格遵循用户指定的标题格式与使能开关）
+        # 行 2: GPU温控配置（文案极致精炼：上限、复工、冷却，省 8 个汉字，释放横向空间）
         lbl_gpu_ctrl = QLabel("GPU温控:")
         lbl_gpu_ctrl.setFixedWidth(68)
 
@@ -1268,29 +1289,35 @@ class MainWindow(QMainWindow):
         self.chk_gpu_enable.setToolTip("开启/关闭 GPU 硬件温控保护策略（默认关闭，开启后才执行温控）")
         self.chk_gpu_enable.toggled.connect(self._on_gpu_protect_toggled)
 
-        self.lbl_gpu_temp_limit = QLabel("温控上限:")
+        self.lbl_gpu_temp_limit = QLabel("上限:")
+        self.lbl_gpu_temp_limit.setFixedWidth(32)
         self.spn_gpu_temp_limit = QSpinBox()
         self.spn_gpu_temp_limit.setRange(75, 80)
         self.spn_gpu_temp_limit.setValue(75)
         self.spn_gpu_temp_limit.setSuffix(" °C")
+        self.spn_gpu_temp_limit.setFixedWidth(68)
         self.spn_gpu_temp_limit.setToolTip("触发安全挂起的 GPU 核心温度上限（75 至 80°C）")
         self.spn_gpu_temp_limit.setEnabled(False)
         self.lbl_gpu_temp_limit.setEnabled(False)
 
-        self.lbl_gpu_temp_resume = QLabel("复工温度:")
+        self.lbl_gpu_temp_resume = QLabel("复工:")
+        self.lbl_gpu_temp_resume.setFixedWidth(32)
         self.spn_gpu_temp_resume = QSpinBox()
         self.spn_gpu_temp_resume.setRange(55, 65)
         self.spn_gpu_temp_resume.setValue(60)
         self.spn_gpu_temp_resume.setSuffix(" °C")
+        self.spn_gpu_temp_resume.setFixedWidth(68)
         self.spn_gpu_temp_resume.setToolTip("冷却完成后允许恢复生产的 GPU 温度下限（55 至 65°C）")
         self.spn_gpu_temp_resume.setEnabled(False)
         self.lbl_gpu_temp_resume.setEnabled(False)
 
-        self.lbl_gpu_cooling_min = QLabel("最小冷却时间:")
+        self.lbl_gpu_cooling_min = QLabel("冷却:")
+        self.lbl_gpu_cooling_min.setFixedWidth(32)
         self.spn_gpu_cooling_minutes = QSpinBox()
         self.spn_gpu_cooling_minutes.setRange(1, 60)
         self.spn_gpu_cooling_minutes.setValue(1)
-        self.spn_gpu_cooling_minutes.setSuffix(" 分钟")
+        self.spn_gpu_cooling_minutes.setSuffix(" 分")
+        self.spn_gpu_cooling_minutes.setFixedWidth(68)
         self.spn_gpu_cooling_minutes.setToolTip("进入温控休眠后的最小强制冷却时长（1 至 60 分钟）")
         self.spn_gpu_cooling_minutes.setEnabled(False)
         self.lbl_gpu_cooling_min.setEnabled(False)
@@ -1586,30 +1613,17 @@ class MainWindow(QMainWindow):
         return panel
 
 
-    def _build_bottom_control_panel(self) -> QWidget:
+    def _build_control_and_status_widgets(self) -> Tuple[QWidget, QWidget]:
         """
-        构建底部控制区与监控指示（精简 3 层布局）。
+        构建核心动作按钮组与运行状态反馈栏。
         【为什么这样设计】
-        响应用户需求：
-        1. 4 个操作按钮大小统一，状态指示灯与文案挪至 4 个按钮右侧同行全宽单行展示，绝不换行；
-        2. 省去原有独立的状态展示行，将释放的纵向空间等比例扩充给上方左侧配置栏与右侧工作台；
-        3. 第二层为 8 节点管线图，第三层为硬件负载与进度条。
+        响应用户核心需求：“无论在默认开启窗口 还是最大化窗口 都要把 4个按钮 和状态文案的分界线 对齐到 左右栏目的边界”。
+        返回两个独立的 QWidget 分别嵌入顶层双列网格 work_grid 的 Col 0 与 Col 1：
+        - left_btn_widget 绑定在 Col 0，4 个操作按钮等宽平分拉满，其右边界与左侧配置栏右边界 100% 垂直重合；
+        - right_status_widget 绑定在 Col 1，状态指示灯与文案从左起展示，其左边界与右侧工作台左边界 100% 垂直重合；
+        由 Qt 统一的 QGridLayout 强制约束列宽，在底层机制上彻底根治独立布局引起的上下分割线脱节错位！
         """
-        panel = QWidget()
-        layout = QVBoxLayout(panel)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(8)
-
-        # ── 第 1 层：核心动作按钮组 (左 38%) + 运行状态反馈 (右 62%) ──
-        # 【为什么这样设计】
-        # 严格对齐用户需求：4个按钮显示边界在左侧配置栏边界内，状态栏文案显示边界在右侧窗口栏边界内。
-        # 采用与上方完全一致的 38%:62% 双栏布局与 spacing=16，保证在默认窗口与全屏最大化下，
-        # 4 个按钮与状态指示文案的左右分界线与上方面板完全对齐，严丝合缝。
-        ctrl_row_layout = QHBoxLayout()
-        ctrl_row_layout.setContentsMargins(0, 0, 0, 0)
-        ctrl_row_layout.setSpacing(16)
-
-        # 左半区 (38%)：4 个核心操作按钮自适应平分填满左侧栏宽度
+        # 左半区 (Col 0)：4 个核心操作按钮自适应平分填满左侧栏宽度
         left_btn_widget = QWidget()
         left_btn_layout = QHBoxLayout(left_btn_widget)
         left_btn_layout.setContentsMargins(0, 0, 0, 0)
@@ -1642,7 +1656,7 @@ class MainWindow(QMainWindow):
         left_btn_layout.addWidget(self.btn_pause, 1)
         left_btn_layout.addWidget(self.btn_resume, 1)
 
-        # 右半区 (62%)：状态指示灯与单行长句文案，严格对齐并收纳在右侧栏内
+        # 右半区 (Col 1)：状态指示灯与单行长句文案，严格对齐并收纳在右侧栏内
         right_status_widget = QWidget()
         right_status_layout = QHBoxLayout(right_status_widget)
         right_status_layout.setContentsMargins(0, 0, 0, 0)
@@ -1653,7 +1667,7 @@ class MainWindow(QMainWindow):
 
         self.lbl_status = QLabel("空闲就绪 (IDLE)")
         # 【为什么这样设计】
-        # 响应用户需求 3：设置水平策略为 Ignored，防止任何未预期的超长文字撑爆右侧界面边界
+        # 设置水平策略为 Ignored，防止任何超长状态文字撑爆右侧界面边界
         self.lbl_status.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         self.lbl_status.setStyleSheet("color: #E0E0E0; font-size: 13px; font-weight: bold;")
         self.lbl_status.setToolTip("当前生产流水线状态: 空闲就绪 (IDLE)")
@@ -1661,17 +1675,18 @@ class MainWindow(QMainWindow):
         right_status_layout.addWidget(self.lbl_status_led, 0)
         right_status_layout.addWidget(self.lbl_status, 1)
 
-        ctrl_row_layout.addWidget(left_btn_widget, 38)
-        ctrl_row_layout.addWidget(right_status_widget, 62)
+        return left_btn_widget, right_status_widget
 
-        layout.addLayout(ctrl_row_layout)
-
-        # ── 第 2 层：全流程管线 8 节点可视化指示图 ──
-        self.pipeline_flow = PipelineFlowWidget()
-        layout.addWidget(self.pipeline_flow)
-
-        # ── 第 3 层：硬件负载实时监控条 与 全局任务进度条（紧凑包裹 + 进度条充分舒展） ──
-        bottom_monitor_layout = QHBoxLayout()
+    def _build_bottom_monitor_bar(self) -> QWidget:
+        """
+        构建底部硬件负载实时监控条与全局任务进度条。
+        【为什么这样设计】
+        横跨窗口全宽底沿，左侧紧凑展示 6 项硬件负荷指标，右侧充分延展全局进度与耗时，
+        视觉饱满修长且不浪费屏幕纵向空间。
+        """
+        panel = QWidget()
+        bottom_monitor_layout = QHBoxLayout(panel)
+        bottom_monitor_layout.setContentsMargins(0, 0, 0, 0)
         bottom_monitor_layout.setSpacing(12)
 
         # 左侧：硬件监控条 (自适应紧凑包裹 6 项核心指标，右侧绝无闲置空白)
@@ -1713,8 +1728,7 @@ class MainWindow(QMainWindow):
         prog_layout.addWidget(self.progress_bar, 1)
         prog_layout.addWidget(self.lbl_elapsed_time, 0)
 
-        bottom_monitor_layout.addWidget(prog_widget, 4)
-        layout.addLayout(bottom_monitor_layout)
+        bottom_monitor_layout.addWidget(prog_widget, 1)
 
         return panel
 
