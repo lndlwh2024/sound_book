@@ -578,9 +578,13 @@ class MainWindow(QMainWindow):
             init_w = max(1280, min(1400, int(avail.width() * 0.94)))
             init_h = max(860, min(950, int(avail.height() * 0.95)))
             self.resize(init_w, init_h)
-        else:
             self.resize(1380, 940)
         self.setMinimumSize(1100, 760)
+
+        # 设置主窗口左上角图标为 package/logo.png
+        logo_path = Path(__file__).resolve().parent.parent.parent / "package" / "logo.png"
+        if logo_path.exists():
+            self.setWindowIcon(QIcon(str(logo_path)))
         # 应用自定义箭头绘制样式，确保 QSpinBox 箭头在所有 Qt 版本下正确渲染三角形
         self._arrow_style = SpinBoxArrowStyle()
         self.setStyle(self._arrow_style)
@@ -1135,11 +1139,11 @@ class MainWindow(QMainWindow):
         # 在运行方式同行右侧放置时间输入框 spn_limit_minutes，默认 60 分钟，仅在限时生成模式下亮起激活。
         self.cmb_run_mode = QComboBox()
         self.cmb_run_mode.addItems([
-            "仅生成下一集 (防降频/单集调试)",
+            "仅生成一次",
             "全书连续生成 (全部章节连续生产)",
             "限时生成 (生产指定时长后自动休眠)"
         ])
-        self.cmb_run_mode.setToolTip("选择生产调度策略：仅生成下一集、全书连续批量或限时运行自动休眠")
+        self.cmb_run_mode.setToolTip("选择生产调度策略：仅生成一次、全书连续批量或限时运行自动休眠")
         self.cmb_run_mode.currentIndexChanged.connect(self._on_run_mode_changed)
 
         self.spn_limit_minutes = QSpinBox()
@@ -1465,11 +1469,11 @@ class MainWindow(QMainWindow):
 
         wb_main_layout.addWidget(self.widget_preview_bar)
 
-        # 控制栏整体常驻显示，初始根据模式决定停止键和进度条的可见性
+        # 控制栏整体常驻显示，初始根据模式决定停止键和进度条的可用性（置灰不隐藏）
         is_internal_mode = (self.cmb_playback_mode.currentIndex() == 0)
-        self.btn_preview_stop.setVisible(is_internal_mode)
-        self.sld_preview_progress.setVisible(is_internal_mode)
-        self.lbl_preview_time.setVisible(is_internal_mode)
+        self.btn_preview_stop.setEnabled(is_internal_mode)
+        self.sld_preview_progress.setEnabled(is_internal_mode)
+        self.lbl_preview_time.setEnabled(is_internal_mode)
 
         # 【为什么这样设计】
         # 响应用户需求：“将右上角的窗口纵向加1/3的长度，右下的窗口纵向减少1/3的长度”，
@@ -2022,18 +2026,18 @@ class MainWindow(QMainWindow):
         """
         用户切换试听播放方式 (内置播放器 / 系统默认播放器)
         【为什么这样设计】
-        统一接管试听后端并将偏好持久化；当切换为外部播放器时，保持下拉框本身常驻，
-        仅隐藏内置播放器专用的停止键、进度条与时间读数，界面纯粹干练。
+        响应用户需求：当选择系统默认播放器时，右侧的停止键和进度条置灰，不用隐藏，
+        使整个控制条宽度和排版保持绝对稳固，不会产生控件跳动。
         """
         is_internal = (idx == 0)
         mode = "internal" if is_internal else "external"
         self.preview_controller.set_playback_mode(mode)
         if hasattr(self, 'btn_preview_stop'):
-            self.btn_preview_stop.setVisible(is_internal)
+            self.btn_preview_stop.setEnabled(is_internal)
         if hasattr(self, 'sld_preview_progress'):
-            self.sld_preview_progress.setVisible(is_internal)
+            self.sld_preview_progress.setEnabled(is_internal)
         if hasattr(self, 'lbl_preview_time'):
-            self.lbl_preview_time.setVisible(is_internal)
+            self.lbl_preview_time.setEnabled(is_internal)
         try:
             config.set("app.playback_mode", mode)
             config.save()

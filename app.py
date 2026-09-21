@@ -25,6 +25,14 @@ def run_gui():
     from PySide6.QtCore import Qt
     from src.app.main_window import MainWindow
 
+    # 针对 Windows 平台注册专属 AppUserModelID，使任务栏独立呈现书声专属图标，避免显示 Python 默认图标
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("ShuSheng.SoundBook.App.2.0")
+        except Exception:
+            pass
+
     # 适配 Windows 高 DPI 屏幕显示
     if hasattr(Qt, "AA_EnableHighDpiScaling"):
         QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
@@ -33,6 +41,13 @@ def run_gui():
 
     app = QApplication(sys.argv)
     app.setApplicationName("书声 ShuSheng")
+
+    # 全局设置应用运行时图标为 package/logo.png
+    from PySide6.QtGui import QIcon
+    logo_path = Path(__file__).resolve().parent / "package" / "logo.png"
+    if logo_path.exists():
+        app.setWindowIcon(QIcon(str(logo_path)))
+
     window = MainWindow()
     window.show()
     sys.exit(app.exec())
