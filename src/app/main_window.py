@@ -20,7 +20,7 @@ from PySide6.QtWidgets import (
     QProgressBar, QFileDialog, QMessageBox, QGroupBox, QScrollArea,
     QFrame, QTextEdit, QTabWidget, QDialog, QCheckBox, QSizePolicy, QApplication
 )
-from PySide6.QtCore import Qt, QSize, QTimer, Signal, QObject, QPointF
+from PySide6.QtCore import Qt, QSize, QTimer, Signal, QObject, QPointF, QRectF
 from PySide6.QtGui import QPixmap, QFont, QIcon, QPainter, QColor, QPolygonF, QFontMetrics
 from PySide6.QtWidgets import QStyle, QProxyStyle
 
@@ -502,18 +502,30 @@ class PipelineFlowWidget(QWidget):
 
 class AudioPlayButton(QPushButton):
     """
-    自定义圆形试听播放按钮。
+    自定义圆形试听播放/暂停按钮。
     【为什么这样设计】
-    采纳用户需求：将三角形播放图标增大一倍。
-    系统默认字符 '▶' 受字体 glyph 与行内 padding 限制，视觉尺寸仅约 8px，
-    使用 QPainter 原生抗锯齿绘制实心等边三角形，边长精确放大至 16px (整整翻倍)，
-    绝对居中，在不同系统、分辨率与悬浮/禁用状态下呈现高保真质感，交互逻辑与信号槽保持 100% 不变。
+    响应用户需求：主音频和背景音频各自维护播放与暂停状态，仅控制自己。
+    1. 增加 _is_playing 属性与 set_playing() 方法；
+    2. 当处于播放中 (_is_playing=True) 时，使用 QPainter 原生绘制抗锯齿双竖条暂停图标 (❚❚)；
+    3. 当处于未播放或暂停中 (_is_playing=False) 时，绘制高清晰实心等边三角形播放图标 (▶)；
+    4. 颜色与悬浮、禁用状态保持高度保真与一致的视觉体验。
     """
     def __init__(self, color_theme: str = "#00E676", parent=None):
         super().__init__(parent)
         self.color_theme = color_theme
         self.setProperty("class", "audio_play_btn")
         self.setText("")
+        self._is_playing = False
+
+    def set_playing(self, is_playing: bool) -> None:
+        """设置当前按钮的播放/暂停状态并触发重绘"""
+        if self._is_playing != is_playing:
+            self._is_playing = is_playing
+            self.update()
+
+    def is_playing(self) -> bool:
+        """获取当前按钮是否处于播放状态"""
+        return self._is_playing
 
     def paintEvent(self, event):
         super().paintEvent(event)
@@ -529,14 +541,27 @@ class AudioPlayButton(QPushButton):
         painter.setBrush(brush_color)
         painter.setPen(Qt.NoPen)
 
-        # 圆心居中并微调 +1px 满足播放三角视觉光学中心
-        cx = self.width() / 2.0 + 1.0
+        cx = self.width() / 2.0
         cy = self.height() / 2.0
-        r = 8.5  # 半径约 8.5px，总高 17px，宽度 15px，比原字符增大一倍
-        p1 = QPointF(cx + r, cy)
-        p2 = QPointF(cx - r * 0.7, cy - r)
-        p3 = QPointF(cx - r * 0.7, cy + r)
-        painter.drawPolygon(QPolygonF([p1, p2, p3]))
+
+        if self._is_playing:
+            # 绘制高清两根并排微圆角竖条暂停图标 (❚❚)
+            bar_w = 3.5
+            bar_h = 15.0
+            gap = 5.0
+            left_x = cx - gap / 2.0 - bar_w
+            right_x = cx + gap / 2.0
+            top_y = cy - bar_h / 2.0
+            painter.drawRoundedRect(QRectF(left_x, top_y, bar_w, bar_h), 1.0, 1.0)
+            painter.drawRoundedRect(QRectF(right_x, top_y, bar_w, bar_h), 1.0, 1.0)
+        else:
+            # 绘制实心等边三角形播放图标 (▶)，圆心微调 +1px 满足光学平衡
+            cx_tri = cx + 1.0
+            r = 8.5  # 半径约 8.5px，总高 17px，宽度 15px
+            p1 = QPointF(cx_tri + r, cy)
+            p2 = QPointF(cx_tri - r * 0.7, cy - r)
+            p3 = QPointF(cx_tri - r * 0.7, cy + r)
+            painter.drawPolygon(QPolygonF([p1, p2, p3]))
 
 
 class MainWindow(QMainWindow):
@@ -1176,15 +1201,32 @@ class MainWindow(QMainWindow):
         m_layout.addWidget(lbl_split_mode, 1, 0)
         m_layout.addWidget(self.cmb_split_mode, 1, 1, 1, 3)
 
-        lbl_target_dur = QLabel("单集时长:")
-        lbl_target_dur.setFixedWidth(68)
-        lbl_min_intv = QLabel("最小间隔:")
-        lbl_min_intv.setFixedWidth(60)
-        lbl_min_intv.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        m_layout.addWidget(lbl_target_dur, 2, 0)
+        self.lbl_target_dur = QLabel("单集时长:")
+        self.lbl_target_dur.setFixedWidth(68)
+        self.lbl_min_intv = QLabel("最小间隔:")
+        self.lbl_min_intv.setFixedWidth(60)
+        self.lbl_min_intv.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+
+        # 响应用户需求：按自然章节（一章一集）选中时，显示第几章，支持上下箭头微调
+        self.lbl_target_chapter = QLabel("指定章节:")
+        self.lbl_target_chapter.setFixedWidth(68)
+        self.spn_target_chapter = QSpinBox()
+        self.spn_target_chapter.setRange(1, 9999)
+        self.spn_target_chapter.setValue(1)
+        self.spn_target_chapter.setPrefix("第 ")
+        self.spn_target_chapter.setSuffix(" 章")
+        self.spn_target_chapter.setToolTip("选择或输入制作的具体自然章节序号（1~9999，支持上下箭头快速微调）")
+        self.lbl_target_chapter.setVisible(False)
+        self.spn_target_chapter.setVisible(False)
+
+        # 默认行 2 网格：按时长模式控件
+        m_layout.addWidget(self.lbl_target_dur, 2, 0)
         m_layout.addWidget(self.spn_target_duration, 2, 1)
-        m_layout.addWidget(lbl_min_intv, 2, 2)
+        m_layout.addWidget(self.lbl_min_intv, 2, 2)
         m_layout.addWidget(self.spn_min_interval, 2, 3)
+        # 自然章节模式控件（重叠在同一行，动态互斥显示）
+        m_layout.addWidget(self.lbl_target_chapter, 2, 0)
+        m_layout.addWidget(self.spn_target_chapter, 2, 1, 1, 3)
 
         lbl_run_mode = QLabel("运行方式:")
         lbl_run_mode.setFixedWidth(68)
@@ -1256,36 +1298,6 @@ class MainWindow(QMainWindow):
         wb_main_layout = QVBoxLayout(grp_workbench)
         wb_main_layout.setContentsMargins(8, 8, 8, 8)
         wb_main_layout.setSpacing(6)
-
-        # 播放方式选择行 (采纳用户需求：统一设置内置/系统播放器并记住选择)
-        mode_box = QHBoxLayout()
-        mode_box.setContentsMargins(0, 0, 0, 0)
-        mode_box.setSpacing(6)
-
-        lbl_mode = QLabel("播放方式:")
-        lbl_mode.setStyleSheet("font-size: 11px; color: #BBBBCC; font-weight: bold;")
-        self.cmb_playback_mode = QComboBox()
-        self.cmb_playback_mode.addItems(["内置播放器 (推荐)", "系统默认播放器"])
-        self.cmb_playback_mode.setToolTip(
-            "选择音频试听模式：\n"
-            "• 内置播放器 (推荐)：基于 FFmpeg 管道流式解码 + 声卡直推，0.2~0.6s 秒开，零转码等待，支持拖动 Seek；\n"
-            "• 系统默认播放器：调用操作系统默认关联的外部播放器打开音频。"
-        )
-
-        saved_playback_mode = config.get("app.playback_mode", "internal")
-        if saved_playback_mode == "external":
-            self.cmb_playback_mode.setCurrentIndex(1)
-            self.preview_controller.set_playback_mode("external")
-        else:
-            self.cmb_playback_mode.setCurrentIndex(0)
-            self.preview_controller.set_playback_mode("internal")
-
-        self.cmb_playback_mode.currentIndexChanged.connect(self._on_playback_mode_changed)
-
-        mode_box.addWidget(lbl_mode)
-        mode_box.addWidget(self.cmb_playback_mode)
-        mode_box.addStretch()
-        wb_main_layout.addLayout(mode_box)
 
         # 上部：左翼控台 + 中央预览 + 右翼控台
         stage_layout = QHBoxLayout()
@@ -1398,12 +1410,32 @@ class MainWindow(QMainWindow):
         wb_main_layout.addWidget(self.lbl_preview_status)
 
         # 【为什么这样设计】
-        # 响应用户需求：统一音频试听播放器改造，提供轻量控制栏（停止、进度条、时间、Seek 拖动），
-        # 独立播放键已删除（合并到混合试听按钮三态切换），仅在内置播放模式下显示。
+        # 响应用户需求：将“播放方式”控制下拉选项挪到下面，在停止键之前显示；
+        # 同时保留停止、进度条、时间与 Seek 拖动，使工作台控制集中在一行，直观紧凑。
         self.widget_preview_bar = QWidget()
         bar_layout = QHBoxLayout(self.widget_preview_bar)
         bar_layout.setContentsMargins(0, 2, 0, 0)
         bar_layout.setSpacing(6)
+
+        lbl_mode = QLabel("播放方式:")
+        lbl_mode.setStyleSheet("font-size: 11px; color: #BBBBCC; font-weight: bold;")
+        self.cmb_playback_mode = QComboBox()
+        self.cmb_playback_mode.addItems(["内置播放器 (推荐)", "系统默认播放器"])
+        self.cmb_playback_mode.setToolTip(
+            "选择音频试听模式：\n"
+            "• 内置播放器 (推荐)：基于 FFmpeg 管道流式解码 + 声卡直推，0.2~0.6s 秒开，零转码等待，支持拖动 Seek；\n"
+            "• 系统默认播放器：调用操作系统默认关联的外部播放器打开音频。"
+        )
+
+        saved_playback_mode = config.get("app.playback_mode", "internal")
+        if saved_playback_mode == "external":
+            self.cmb_playback_mode.setCurrentIndex(1)
+            self.preview_controller.set_playback_mode("external")
+        else:
+            self.cmb_playback_mode.setCurrentIndex(0)
+            self.preview_controller.set_playback_mode("internal")
+
+        self.cmb_playback_mode.currentIndexChanged.connect(self._on_playback_mode_changed)
 
         self.btn_preview_stop = QPushButton("■ 停止")
         self.btn_preview_stop.setFixedWidth(56)
@@ -1424,14 +1456,20 @@ class MainWindow(QMainWindow):
         self.lbl_preview_time.setStyleSheet("font-size: 11px; color: #BBBBCC; font-family: Consolas, monospace;")
         self.lbl_preview_time.setAlignment(Qt.AlignCenter)
 
+        # 顺序：播放方式标签 -> 下拉框 -> 停止按钮 -> 进度条 -> 时间
+        bar_layout.addWidget(lbl_mode)
+        bar_layout.addWidget(self.cmb_playback_mode)
         bar_layout.addWidget(self.btn_preview_stop)
         bar_layout.addWidget(self.sld_preview_progress, 1)
         bar_layout.addWidget(self.lbl_preview_time)
 
         wb_main_layout.addWidget(self.widget_preview_bar)
 
-        # 初始根据当前播放模式决定是否显示控制栏
-        self.widget_preview_bar.setVisible(self.cmb_playback_mode.currentIndex() == 0)
+        # 控制栏整体常驻显示，初始根据模式决定停止键和进度条的可见性
+        is_internal_mode = (self.cmb_playback_mode.currentIndex() == 0)
+        self.btn_preview_stop.setVisible(is_internal_mode)
+        self.sld_preview_progress.setVisible(is_internal_mode)
+        self.lbl_preview_time.setVisible(is_internal_mode)
 
         # 【为什么这样设计】
         # 响应用户需求：“将右上角的窗口纵向加1/3的长度，右下的窗口纵向减少1/3的长度”，
@@ -1838,15 +1876,29 @@ class MainWindow(QMainWindow):
 
     def _on_split_mode_changed(self, idx: int = 0) -> None:
         """
-        单集切割模式联动处理。
+        分集模式联动处理。
         【为什么这样设计】
-        响应用户需求 6：若按自然章节切割，单集时长由书籍章节实际长度决定，无需限定单集时长与最小间隔，
-        故自动置灰锁定这两个微调框；若按目标时长切割，则恢复激活。
+        响应用户需求：按自然章节（一章一集）选中时，下方的选项单集时长和最小间隔时间都要隐藏，
+        改为显示“指定章节: 第 [ 1 ▲▼ ] 章”，使用户明确指向具体章节开始制作；
+        当切回按时长模式时，恢复显示单集时长和最小间隔，隐藏指定章节。
         """
-        if hasattr(self, 'cmb_split_mode') and hasattr(self, 'spn_target_duration') and hasattr(self, 'spn_min_interval'):
+        if hasattr(self, 'cmb_split_mode'):
             is_by_duration = "时长" in self.cmb_split_mode.currentText()
-            self.spn_target_duration.setEnabled(is_by_duration)
-            self.spn_min_interval.setEnabled(is_by_duration)
+            # 时长项的显示/隐藏与可用性
+            for w in (getattr(self, 'lbl_target_dur', None),
+                      getattr(self, 'spn_target_duration', None),
+                      getattr(self, 'lbl_min_intv', None),
+                      getattr(self, 'spn_min_interval', None)):
+                if w is not None:
+                    w.setVisible(is_by_duration)
+                    w.setEnabled(is_by_duration)
+
+            # 自然章节“指定第几章”项的显示/隐藏与可用性
+            for w in (getattr(self, 'lbl_target_chapter', None),
+                      getattr(self, 'spn_target_chapter', None)):
+                if w is not None:
+                    w.setVisible(not is_by_duration)
+                    w.setEnabled(not is_by_duration)
 
     def _on_run_mode_changed(self, idx: int = 0) -> None:
         """
@@ -1925,6 +1977,13 @@ class MainWindow(QMainWindow):
         通过统一音频试听控制器播放：内置模式使用 FFmpeg 管道流式秒开播放；
         外置模式调用系统默认播放器；异常时支持平滑降级。
         """
+    def _on_play_voice_only(self) -> None:
+        """
+        单独试听纯人声参考音频（支持播放/暂停独立切换）
+        【为什么这样设计】
+        响应用户需求：主音频的播放和暂停放到各自的状态中维护，仅控制自己。
+        点击时若正在播放主音频则暂停，暂停中则恢复，未播放则发起播放，图标自动在 ▶ 与 ❚❚ 切换。
+        """
         try:
             project_root = Path(__file__).resolve().parent.parent.parent
             voice_sample = project_root / "models" / "f5_tts" / "presets" / "preset_male_e1_narrator.wav"
@@ -1935,26 +1994,26 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "试听提示", "未找到对应的纯人声参考音频资产。")
                 return
 
-            logger.info(f"触发主音频单独试听: {voice_sample.resolve()}")
-            self.preview_controller.play_main_audio(voice_sample)
+            logger.info(f"触发主音频独立试听切换: {voice_sample.resolve()}")
+            self.preview_controller.toggle_voice(voice_sample)
         except Exception as e:
             logger.exception(f"单独播放纯人声异常: {e}")
             QMessageBox.critical(self, "错误", f"无法播放主音频: {e}")
 
     def _on_play_bgm_only(self) -> None:
         """
-        单独试听用户选定的背景音乐
+        单独试听用户选定的背景音乐（支持播放/暂停独立切换）
         【为什么这样设计】
-        通过统一音频试听控制器播放：内置模式即时管道流式播放，支持快速无缝切歌；
-        外置模式调用系统默认播放器。
+        响应用户需求：背景音频的播放和暂停放到各自的状态中维护，仅控制自己。
+        点击时若正在播放BGM则暂停，暂停中则恢复，未播放则发起播放，图标自动在 ▶ 与 ❚❚ 切换。
         """
         try:
             bgm_path = self.txt_bgm_path.text().strip() if hasattr(self, 'txt_bgm_path') else ""
             if not bgm_path or not os.path.exists(bgm_path):
                 QMessageBox.information(self, "提示", "当前尚未选择背景音乐。\n（留空则生成纯人声视频，若需伴奏请在左侧点击'选择音乐'）")
                 return
-            logger.info(f"触发背景音乐试听: {bgm_path}")
-            self.preview_controller.play_bgm(Path(bgm_path))
+            logger.info(f"触发背景音乐独立试听切换: {bgm_path}")
+            self.preview_controller.toggle_bgm(Path(bgm_path))
         except Exception as e:
             logger.exception(f"单独播放背景音乐异常: {e}")
             QMessageBox.critical(self, "错误", f"无法播放背景音乐: {e}")
@@ -1963,14 +2022,18 @@ class MainWindow(QMainWindow):
         """
         用户切换试听播放方式 (内置播放器 / 系统默认播放器)
         【为什么这样设计】
-        统一接管三个试听按钮的后端，并将用户偏好持久化保存至本地配置，
-        同时动态显示/隐藏轻量控制条。
+        统一接管试听后端并将偏好持久化；当切换为外部播放器时，保持下拉框本身常驻，
+        仅隐藏内置播放器专用的停止键、进度条与时间读数，界面纯粹干练。
         """
         is_internal = (idx == 0)
         mode = "internal" if is_internal else "external"
         self.preview_controller.set_playback_mode(mode)
-        if hasattr(self, 'widget_preview_bar'):
-            self.widget_preview_bar.setVisible(is_internal)
+        if hasattr(self, 'btn_preview_stop'):
+            self.btn_preview_stop.setVisible(is_internal)
+        if hasattr(self, 'sld_preview_progress'):
+            self.sld_preview_progress.setVisible(is_internal)
+        if hasattr(self, 'lbl_preview_time'):
+            self.lbl_preview_time.setVisible(is_internal)
         try:
             config.set("app.playback_mode", mode)
             config.save()
@@ -1981,23 +2044,25 @@ class MainWindow(QMainWindow):
         """
         混合试听按钮三态点击响应
         【为什么这样设计】
-        响应用户需求：删除左下角独立播放按钮，将播放/暂停/继续状态切换合并到混合试听按钮。
-        空闲状态 → 触发混合试听播放；播放中 → 暂停；暂停中 → 继续播放。
+        响应用户需求：混合试听（播放与暂停）仅控制混音播放，不单独控制主音频和背景音频。
+        若当前正在播放混音，点击暂停；若混音处于暂停中，点击恢复播放；若未播放混音，发起混音推流。
         """
-        if self.preview_controller.is_active():
-            # 当前有活跃播放任务
+        if self.preview_controller.current_source == "MIX" and self.preview_controller.is_active():
             if self.preview_controller.is_playing():
                 self.preview_controller.pause()
             else:
                 self.preview_controller.resume()
         else:
-            # 空闲状态：发起新的混合试听
             self._on_test_mix()
 
     def _on_preview_stop_clicked(self) -> None:
-        """停止试听播放"""
-        self.preview_controller.stop()
-        # 立即隐藏准备提示（stop 触发 sig_state_changed(False) 也会处理，此处双保险）
+        """
+        停止试听播放
+        【为什么这样设计】
+        响应用户需求：“混合试听（播放与暂停）与停止键 仅控制混音播放 不单独控制主音频和背景音频”。
+        停止键仅控制混音流停止，若当前在听单轨主音频或BGM，不影响其状态。
+        """
+        self.preview_controller.stop_mix_only()
         if hasattr(self, 'lbl_preview_status'):
             self.lbl_preview_status.setVisible(False)
 
@@ -2031,17 +2096,36 @@ class MainWindow(QMainWindow):
 
     def _on_preview_state_changed(self, is_playing: bool) -> None:
         """
-        播放状态改变：更新混合试听按钮文案 + 隐藏转码提示
+        播放状态改变回调：精准更新各音轨对应的控件状态，彻底解耦
         【为什么这样设计】
-        将三态文案切换集中到此回调：播放中显示暂停、非播放时区分暂停中和停止状态。
+        1. 主音频按钮仅反映主音频的播放与暂停；
+        2. BGM 按钮仅反映 BGM 的播放与暂停；
+        3. 混合试听按钮仅反映混音的播放与暂停；
+        4. 出声后自动隐藏转码提示标签。
         """
+        src = self.preview_controller.current_source
+        active = self.preview_controller.is_active()
+
+        # 1. 主音频播放按钮状态更新
+        if hasattr(self, 'btn_play_voice'):
+            self.btn_play_voice.set_playing(src == "MAIN_AUDIO" and is_playing)
+
+        # 2. 背景音频播放按钮状态更新
+        if hasattr(self, 'btn_play_bgm'):
+            self.btn_play_bgm.set_playing(src == "BGM" and is_playing)
+
+        # 3. 混合试听按钮状态更新
         if hasattr(self, 'btn_mix_preview'):
-            if is_playing:
-                self.btn_mix_preview.setText("❚❚ 暂停试听")
-            elif self.preview_controller.is_active():
-                self.btn_mix_preview.setText("▶ 继续试听")
+            if src == "MIX":
+                if is_playing:
+                    self.btn_mix_preview.setText("❚❚ 暂停试听")
+                elif active:
+                    self.btn_mix_preview.setText("▶ 继续试听")
+                else:
+                    self.btn_mix_preview.setText("▶ 混合试听")
             else:
                 self.btn_mix_preview.setText("▶ 混合试听")
+
         # 音频流成功出声后隐藏准备提示
         if hasattr(self, 'lbl_preview_status') and is_playing:
             self.lbl_preview_status.setVisible(False)
@@ -2235,6 +2319,7 @@ class MainWindow(QMainWindow):
             "split_mode": "by_chapter" if hasattr(self, 'cmb_split_mode') and "自然章节" in self.cmb_split_mode.currentText() else "by_duration",
             "target_duration_mins": float(self.spn_target_duration.value()),
             "min_interval_mins": float(self.spn_min_interval.value()),
+            "target_chapter": int(self.spn_target_chapter.value()) if hasattr(self, 'spn_target_chapter') else 1,
             "run_mode": run_mode,
             "limit_duration_mins": float(self.spn_limit_minutes.value()) if hasattr(self, 'spn_limit_minutes') else 60.0,
             "cover_path": self.txt_cover_path.text().strip(),
@@ -2322,6 +2407,7 @@ class MainWindow(QMainWindow):
             getattr(self, 'cmb_split_mode', None),
             getattr(self, 'spn_target_duration', None),
             getattr(self, 'spn_min_interval', None),
+            getattr(self, 'spn_target_chapter', None),
             getattr(self, 'cmb_run_mode', None),
             getattr(self, 'spn_limit_minutes', None),
             getattr(self, 'txt_cover_path', None),

@@ -224,6 +224,21 @@ class ProductionWorker(QThread):
         split_mode = cfg.get("split_mode", "by_duration")
         planner = EpisodePlanner(target_duration_mins=target_ep_mins)
         plan = planner.plan_initial_episodes(book_title, cleaned_structure.chapters, split_mode=split_mode)
+
+        # 响应用户需求：按自然章节时明确指向具体章节开始制作
+        if split_mode == "by_chapter":
+            target_ch = int(cfg.get("target_chapter", 1))
+            if run_mode == "RUN_NEXT_EPISODE":
+                target_eps = [e for e in plan.episodes if e.episode_order == target_ch]
+                if target_eps:
+                    plan.episodes = target_eps
+                    logger.info(f"自然章节单集调试：明确指向生产第 {target_ch} 章 (共 1 集)")
+            else:
+                target_eps = [e for e in plan.episodes if e.episode_order >= target_ch]
+                if target_eps:
+                    plan.episodes = target_eps
+                    logger.info(f"自然章节连续生产：从第 {target_ch} 章起算 (剩余 {len(target_eps)} 集)")
+
         self.sig_plan_ready.emit(plan)
         self.sig_status_changed.emit("PLANNED")
         self.sig_progress_updated.emit(20.0, f"【4/8 规划就绪 (PLANNED)】共规划 {plan.total_episodes} 集 (模式: {split_mode})，即将启动语音合成...")

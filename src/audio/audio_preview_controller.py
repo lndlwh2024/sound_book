@@ -394,6 +394,62 @@ class AudioPreviewController(QObject):
         else:
             self._worker.pause()
 
+    def toggle_voice(self, voice_path: Path) -> bool:
+        """
+        独立控制主音频的播放与暂停
+        【为什么这样设计】
+        响应用户需求：主音频的播放和暂停放到各自的状态中维护，仅控制自己。
+        若当前正在播放主音频，点击暂停；若主音频暂停中，点击恢复播放；若未播放，发起主音频播放。
+        返回 True 表示进入播放态，False 表示进入暂停态。
+        """
+        if self.current_source == self.SOURCE_MAIN and self.is_active():
+            if self.is_playing():
+                self.pause()
+                return False
+            else:
+                self.resume()
+                return True
+        else:
+            self.play_main_audio(voice_path)
+            return True
+
+    def toggle_bgm(self, bgm_path: Path) -> bool:
+        """
+        独立控制背景音乐的播放与暂停
+        【为什么这样设计】
+        响应用户需求：背景音频的播放和暂停放到各自的状态中维护，仅控制自己。
+        若当前正在播放BGM，点击暂停；若BGM暂停中，点击恢复播放；若未播放，发起BGM播放。
+        返回 True 表示进入播放态，False 表示进入暂停态。
+        """
+        if self.current_source == self.SOURCE_BGM and self.is_active():
+            if self.is_playing():
+                self.pause()
+                return False
+            else:
+                self.resume()
+                return True
+        else:
+            self.play_bgm(bgm_path)
+            return True
+
+    def stop_mix_only(self) -> None:
+        """
+        专用于停止混音试听
+        【为什么这样设计】
+        响应用户需求：“混合试听（播放与暂停）与停止键 仅控制混音播放 不单独控制主音频和背景音频”。
+        若当前活跃的是混音，则执行完全停止并重置进度条；若当前放的是单轨主音或BGM，则不受停止键干扰。
+        """
+        if self.current_source == self.SOURCE_MIX:
+            self.stop()
+
+    def is_source_playing(self, source: str) -> bool:
+        """指定音频源是否正在出声播放"""
+        return self.current_source == source and self.is_playing()
+
+    def is_source_active(self, source: str) -> bool:
+        """指定音频源是否有活跃任务 (包含暂停中)"""
+        return self.current_source == source and self.is_active()
+
     def stop(self):
         """完全停止当前播放并重置状态"""
         if self._worker:
