@@ -33,12 +33,6 @@ def run_gui():
         except Exception:
             pass
 
-    # 适配 Windows 高 DPI 屏幕显示
-    if hasattr(Qt, "AA_EnableHighDpiScaling"):
-        QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
-    if hasattr(Qt, "AA_UseHighDpiPixmaps"):
-        QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
-
     app = QApplication(sys.argv)
     app.setApplicationName("书声 ShuSheng")
 
@@ -50,6 +44,7 @@ def run_gui():
 
     window = MainWindow()
     window.show()
+    print("[书声 ShuSheng v2.0] 桌面客户端已成功加载并就绪运行！")
     sys.exit(app.exec())
 
 

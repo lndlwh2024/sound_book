@@ -3,7 +3,10 @@ import logging
 from pathlib import Path
 from typing import List, Dict, Any
 
-import fitz  # PyMuPDF
+try:
+    import pymupdf as fitz  # PyMuPDF 新版推荐导入方式，消除废弃警告
+except ImportError:
+    import fitz
 
 from src.parser.base import BookParser
 from src.parser.chapter_detector import ChapterDetector

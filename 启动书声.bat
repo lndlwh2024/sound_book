@@ -13,6 +13,9 @@ echo.
 if not exist "%~dp0envs\main\Scripts\python.exe" (
     echo [错误] 未在当前目录下找到 Python 虚拟运行环境:
     echo        %~dp0envs\main\Scripts\python.exe
+    echo.
+    echo 请确认程序完整性，或先运行 setup.bat 完成部署！
+    echo.
     pause
     exit /b 1
 )
