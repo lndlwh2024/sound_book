@@ -1111,13 +1111,18 @@ class MainWindow(QMainWindow):
         lbl_tts_title.setFixedWidth(68)
 
         self.cmb_tts_engine = QComboBox()
-        self.cmb_tts_engine.addItems(["F5-TTS (本地高质量扩散模型)", "Azure AI Speech (云端官方)"])
+        # 【为什么这样设计】
+        # 响应用户需求：微软 API 暂未对接，锁定选项仅显示 F5-TTS，锁死不可选择其他选项；
+        # 保持原有 engine_box 布局不变，凭据配置按钮自动隐藏不出现；
+        # 仅锁死界面选项，底层保留微软 API 对接方法供未来扩展。
+        self.cmb_tts_engine.addItems(["F5-TTS (本地高质量扩散模型)"])
+        self.cmb_tts_engine.setEnabled(False)
         self.cmb_tts_engine.currentIndexChanged.connect(self._on_engine_changed)
 
         self.btn_azure_config = QPushButton("🔑 凭据配置")
         self.btn_azure_config.setToolTip("配置/修改 Azure AI Speech 官方 API 密钥与区域")
         self.btn_azure_config.clicked.connect(self._on_azure_config)
-        self.btn_azure_config.setVisible("Azure" in self.cmb_tts_engine.currentText())
+        self.btn_azure_config.setVisible(False)
 
         engine_box = QHBoxLayout()
         engine_box.setContentsMargins(0, 0, 0, 0)
@@ -1129,8 +1134,10 @@ class MainWindow(QMainWindow):
         lbl_voice_profile.setFixedWidth(68)
 
         self.cmb_voice_profile = QComboBox()
+        # 【为什么这样设计】
+        # 响应用户需求：音色预设正式更名为“男声-中声-A”，去除冗长的括号说明，直观清晰
         self.cmb_voice_profile.addItems([
-            "E1 (男声中声 - 巴菲特股东信旁白推荐)"
+            "男声-中声-A"
         ])
         self.cmb_voice_profile.currentIndexChanged.connect(self._on_voice_profile_changed)
 
@@ -2086,13 +2093,6 @@ class MainWindow(QMainWindow):
 
     def _on_play_voice_only(self) -> None:
         """
-        单独试听纯人声干音资产
-        【为什么这样设计】
-        通过统一音频试听控制器播放：内置模式使用 FFmpeg 管道流式秒开播放；
-        外置模式调用系统默认播放器；异常时支持平滑降级。
-        """
-    def _on_play_voice_only(self) -> None:
-        """
         单独试听纯人声参考音频（支持播放/暂停独立切换）
         【为什么这样设计】
         响应用户需求：主音频的播放和暂停放到各自的状态中维护，仅控制自己。
@@ -2478,7 +2478,7 @@ class MainWindow(QMainWindow):
             "voice_volume_percent": float(self.sld_narr_preview.value()),
             "bgm_volume_percent": float(self.sld_bgm_preview.value()),
             "tts_engine": "f5" if "F5" in self.cmb_tts_engine.currentText() else "azure",
-            "voice_profile": self.cmb_voice_profile.currentText(),
+            "voice_profile": "preset_male_e1_narrator" if ("男声-中声-A" in self.cmb_voice_profile.currentText() or "E1" in self.cmb_voice_profile.currentText()) else self.cmb_voice_profile.currentText().strip(),
             "nfe_step": self.spn_nfe_step.value(),
             "cfg_strength": default_cfg_strength,
             "speech_speed": self.spn_speed.value(),
@@ -2585,6 +2585,13 @@ class MainWindow(QMainWindow):
                 self._on_gpu_protect_toggled(self.chk_gpu_enable.isChecked())
             if hasattr(self, '_on_bgm_text_changed') and hasattr(self, 'txt_bgm_path'):
                 self._on_bgm_text_changed(self.txt_bgm_path.text())
+            # 【为什么这样设计】
+            # TTS 引擎按用户明确需求完全锁死为 F5-TTS，解冻面板时不可被重新启用，保持禁用不可选状态；
+            # 凭据配置按钮亦保持隐藏，避免误操作。
+            if hasattr(self, 'cmb_tts_engine'):
+                self.cmb_tts_engine.setEnabled(False)
+            if hasattr(self, 'btn_azure_config'):
+                self.btn_azure_config.setVisible(False)
 
     def _on_safe_pause(self) -> None:
         """安全暂停"""

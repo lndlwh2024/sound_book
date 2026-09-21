@@ -230,9 +230,21 @@ def main():
                 pass
             # 2. 其次根据 voice 别名在 presets 目录寻找对应 wav
             elif voice:
-                named_wav = Path("models/f5_tts/presets") / f"{voice}.wav"
+                # 【为什么这样设计】
+                # 兼容中文界面显示名称（如“男声-中声-A”）、历史配置（如“E1”）与标准资产文件名（preset_male_e1_narrator）
+                # 确保上层传入任何同义别名均能直接命中预设音频文件，避免回退到默认音频引发音色突变。
+                voice_alias_map = {
+                    "男声-中声-A": "preset_male_e1_narrator",
+                    "E1": "preset_male_e1_narrator",
+                }
+                actual_voice = voice_alias_map.get(voice, voice)
+                named_wav = Path("models/f5_tts/presets") / f"{actual_voice}.wav"
                 if named_wav.exists():
                     ref_audio = str(named_wav)
+                else:
+                    direct_wav = Path("models/f5_tts/presets") / f"{voice}.wav"
+                    if direct_wav.exists():
+                        ref_audio = str(direct_wav)
             # 3. 最后回退到默认成熟商业男声
             if not ref_audio or not Path(ref_audio).exists():
                 if Path(preset_male_wav).exists():
