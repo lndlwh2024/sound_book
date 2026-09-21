@@ -226,7 +226,7 @@ class ResourceMonitorBar(QFrame):
                 background-color: #15151C;
                 border: 1px solid #333345;
                 border-radius: 5px;
-                padding: 4px 8px;
+                padding: 2px 8px;
             }
             QLabel {
                 font-size: 11px;
@@ -235,7 +235,7 @@ class ResourceMonitorBar(QFrame):
             }
         """)
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(8, 2, 8, 2)
+        layout.setContentsMargins(8, 1, 8, 1)
         layout.setSpacing(14)
 
         icon_lbl = QLabel("📊 硬件负载:")
@@ -405,14 +405,14 @@ class PipelineFlowWidget(QWidget):
 
     def _init_ui(self):
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(0, 4, 0, 4)
+        layout.setContentsMargins(0, 2, 0, 2)
         layout.setSpacing(6)
 
         for code, zh_name, en_term in self.STAGES:
             frame = QFrame()
             frame.setObjectName(f"node_{code}")
             f_layout = QVBoxLayout(frame)
-            f_layout.setContentsMargins(4, 3, 4, 3)
+            f_layout.setContentsMargins(4, 2, 4, 2)
             f_layout.setSpacing(1)
 
             lbl_zh = QLabel(zh_name)
@@ -660,29 +660,6 @@ class MainWindow(QMainWindow):
             QSpinBox::down-arrow:hover, QDoubleSpinBox::down-arrow:hover {
                 image: url("@@DN_HOV@@");
             }
-            /* 自适应滚动容器与深色纤细滚动条 */
-            QScrollArea {
-                border: none;
-                background-color: transparent;
-            }
-            QScrollBar:vertical {
-                border: none;
-                background: #181822;
-                width: 8px;
-                margin: 0px 0px 0px 0px;
-                border-radius: 4px;
-            }
-            QScrollBar::handle:vertical {
-                background: #3A3A4E;
-                min-height: 24px;
-                border-radius: 4px;
-            }
-            QScrollBar::handle:vertical:hover {
-                background: #50506E;
-            }
-            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
-                height: 0px;
-            }
             /* 竖向专业音量滑条样式 */
             QSlider::groove:vertical {
                 background: #181822;
@@ -808,12 +785,12 @@ class MainWindow(QMainWindow):
             QPushButton:hover { background-color: #3A73AA; }
             QPushButton:pressed { background-color: #1F3F5F; }
 
-            /* 底部 4 个核心动作按钮统一尺寸与排版规范 */
+            /* 底部 4 个核心动作按钮统一尺寸与排版规范（微调至 34px 高度，释放 4px 宝贵垂直空间） */
             QPushButton.bottom_action_btn {
                 min-width: 110px;
-                min-height: 38px;
-                max-height: 38px;
-                font-size: 13px;
+                min-height: 34px;
+                max-height: 34px;
+                font-size: 12px;
                 font-weight: bold;
                 border: none;
                 border-radius: 5px;
@@ -883,8 +860,8 @@ class MainWindow(QMainWindow):
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         main_layout = QVBoxLayout(central_widget)
-        main_layout.setContentsMargins(16, 16, 16, 16)
-        main_layout.setSpacing(10)
+        main_layout.setContentsMargins(16, 12, 16, 12)
+        main_layout.setSpacing(8)
 
         # 1. 上半部分：左侧输入设置 + 右侧多Sheet预览与诊断
         top_split_layout = QHBoxLayout()
@@ -898,25 +875,18 @@ class MainWindow(QMainWindow):
         # 左侧表单收窄为 38%，大幅释放空间给右侧排版画布、音频工作台与三 Sheet 诊断面板。
         top_split_layout.addWidget(left_panel, 38)
         top_split_layout.addWidget(right_panel, 62)
-        main_layout.addLayout(top_split_layout, 8)
+        main_layout.addLayout(top_split_layout, 1)
 
-        # 2. 底部控制区：动作按钮、全局进度、硬件负载监控
+        # 2. 底部控制区：动作按钮、全局进度、硬件负载监控（设为紧凑自适应尺寸，绝不挤压上方表单）
         bottom_panel = self._build_bottom_control_panel()
-        main_layout.addWidget(bottom_panel, 3)
+        bottom_panel.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+        main_layout.addWidget(bottom_panel, 0)
 
     def _build_left_config_panel(self) -> QWidget:
-        """构建左侧参数配置区（包裹在自适应 QScrollArea 中，确保各种屏幕分辨率与缩放比例下表单字体绝不被纵向挤压截断）"""
-        scroll_area = QScrollArea()
-        scroll_area.setWidgetResizable(True)
-        scroll_area.setFrameShape(QFrame.NoFrame)
-        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        scroll_area.setStyleSheet("QScrollArea { background-color: transparent; border: none; }")
-
+        """构建左侧参数配置区（纯净一体化面板，绝无滑动条）"""
         panel = QWidget()
-        panel.setStyleSheet("QWidget { background-color: transparent; }")
         layout = QVBoxLayout(panel)
-        layout.setContentsMargins(0, 0, 4, 0)
+        layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
 
         # 分组 1: 书籍与正文
@@ -1146,8 +1116,7 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(grp_output)
         layout.addStretch()
-        scroll_area.setWidget(panel)
-        return scroll_area
+        return panel
 
     def _build_right_preview_panel(self) -> QWidget:
         """
@@ -1332,7 +1301,7 @@ class MainWindow(QMainWindow):
         panel = QWidget()
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(8)
+        layout.setSpacing(6)
 
         # ── 第 1 层：核心动作按钮组 + 运行状态反馈（合并为单行，状态灯与文案紧随按钮右侧） ──
         btn_layout = QHBoxLayout()
