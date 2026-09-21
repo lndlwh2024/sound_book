@@ -1096,6 +1096,11 @@ class MainWindow(QMainWindow):
         g_layout.addLayout(bgm_row, 6, 1, 1, 3)
 
         layout.addWidget(grp_book)
+        # 【为什么这样设计】
+        # 响应用户核心需求：实现左侧栏目与右侧栏目在全屏最大化下绝对等高对齐。
+        # 不在最底部堆积单个粗暴的 addStretch，而是在 4 个 GroupBox 之间均匀分配弹性伸缩权重，
+        # 保证最底部的【目标输出目录】下沿与右侧日志框下沿像素级严格齐平，且最大化时各卡片呼吸感自然舒展。
+        layout.addStretch(1)
 
         # 分组 2: 声音与引擎 (解耦体系)
         grp_voice = QGroupBox("【TTS 引擎与音色配置】")
@@ -1191,6 +1196,7 @@ class MainWindow(QMainWindow):
         v_layout.addWidget(self.cmb_skip_english, 3, 3)
 
         layout.addWidget(grp_voice)
+        layout.addStretch(1)
 
         # 分组 3: 执行方式（原视频版式与包装素材板块重构为纯粹的调度与硬件执行控制台）
         grp_exec = QGroupBox("【执行方式】")
@@ -1347,6 +1353,7 @@ class MainWindow(QMainWindow):
         m_layout.addLayout(gpu_layout, 2, 1, 1, 3)
 
         layout.addWidget(grp_exec)
+        layout.addStretch(1)
 
         # 【为什么这样设计】
         # 响应用户需求 1：“输出目录要缩到左侧栏目下，省出的空间由 生产计划全景的框向下拉 并与左框对齐下沿”。
@@ -1380,7 +1387,7 @@ class MainWindow(QMainWindow):
         o_layout.addWidget(self.btn_open_output)
 
         layout.addWidget(grp_output)
-        layout.addStretch()
+        # 最底部不放置弹簧，确保【目标输出目录】下沿与右侧【生产计划全景】下沿在任何分辨率和最大化下均 100% 绝对齐平
         return panel
 
     def _build_right_preview_panel(self) -> QWidget:
