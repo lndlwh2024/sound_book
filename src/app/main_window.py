@@ -30,6 +30,7 @@ from ..audio.audio_mixer import AudioMixer
 from ..utils.config import config
 from ..utils.path_utils import sanitize_filename
 from ..utils.model_manager import ModelManager
+from ..audio.audio_preview_controller import AudioPreviewController
 
 logger = logging.getLogger(__name__)
 
@@ -387,16 +388,24 @@ class ResourceMonitorBar(QFrame):
 
 
 class PipelineFlowWidget(QWidget):
-    """全流程管线 8 节点可视化指示图。"""
+    """
+    全流程管线 8 节点可视化指示图。
+    【为什么这样设计】
+    采纳用户优化建议：
+    1. 移除节点卡片中的冗余英文代码（如 PARSED, TTS_GEN 等），仅保留纯中文名称；
+    2. 纵向空间 2/3 分配给中文管线说明：卡片内部由原双行缩为单行居中，增加垂直 padding 与字号至 12px 加粗，
+       使 8 个生产阶段更加醒目大气、易于辨识；
+    3. 纵向空间 1/3 让渡给底部的硬件负载、进度条和计时层，消除拥挤感。
+    """
     STAGES = [
-        ("PARSED", "1. 结构解析", "PARSED"),
-        ("CLEANED", "2. 正文清洗", "CLEANED"),
-        ("VALIDATED", "3. 质量校验", "VALIDATED"),
-        ("PLANNED", "4. 规划就绪", "PLANNED"),
-        ("TTS_GENERATING", "5. 语音合成", "TTS_GEN"),
-        ("ALIGNING_SUBTITLES", "6. 字幕对齐", "SUBTITLES"),
-        ("AUDIO_MIXING", "7. 混音渲染", "RENDERING"),
-        ("COMPLETED", "8. 生产完成", "COMPLETED"),
+        ("PARSED", "1. 结构解析"),
+        ("CLEANED", "2. 正文清洗"),
+        ("VALIDATED", "3. 质量校验"),
+        ("PLANNED", "4. 规划就绪"),
+        ("TTS_GENERATING", "5. 语音合成"),
+        ("ALIGNING_SUBTITLES", "6. 字幕对齐"),
+        ("AUDIO_MIXING", "7. 混音渲染"),
+        ("COMPLETED", "8. 生产完成"),
     ]
 
     def __init__(self, parent=None):
@@ -408,26 +417,22 @@ class PipelineFlowWidget(QWidget):
 
     def _init_ui(self):
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(0, 4, 0, 4)
+        layout.setContentsMargins(0, 2, 0, 2)
         layout.setSpacing(6)
 
-        for code, zh_name, en_term in self.STAGES:
+        for code, zh_name in self.STAGES:
             frame = QFrame()
             frame.setObjectName(f"node_{code}")
             f_layout = QVBoxLayout(frame)
-            f_layout.setContentsMargins(4, 3, 4, 3)
-            f_layout.setSpacing(1)
+            # 2/3 纵向空间充实给卡片内中文说明：设为 7px 垂直 padding
+            f_layout.setContentsMargins(4, 7, 4, 7)
+            f_layout.setSpacing(0)
 
             lbl_zh = QLabel(zh_name)
             lbl_zh.setAlignment(Qt.AlignCenter)
-            lbl_zh.setStyleSheet("font-size: 11px; font-weight: bold; color: #777788;")
-
-            lbl_en = QLabel(f"({en_term})")
-            lbl_en.setAlignment(Qt.AlignCenter)
-            lbl_en.setStyleSheet("font-size: 9px; color: #555566;")
+            lbl_zh.setStyleSheet("font-size: 12px; font-weight: bold; color: #777788;")
 
             f_layout.addWidget(lbl_zh)
-            f_layout.addWidget(lbl_en)
 
             frame.setStyleSheet("""
                 QFrame {
@@ -437,7 +442,7 @@ class PipelineFlowWidget(QWidget):
                 }
             """)
             layout.addWidget(frame)
-            self.node_frames.append((code, frame, lbl_zh, lbl_en))
+            self.node_frames.append((code, frame, lbl_zh))
 
     def set_stage(self, stage: str):
         self.current_stage = stage
@@ -451,7 +456,7 @@ class PipelineFlowWidget(QWidget):
             if normalized_stage == "COMPLETED":
                 self.completed_stages.add("COMPLETED")
 
-        for code, frame, lbl_zh, lbl_en in self.node_frames:
+        for code, frame, lbl_zh in self.node_frames:
             if code == normalized_stage and normalized_stage != "COMPLETED":
                 frame.setStyleSheet("""
                     QFrame {
@@ -460,8 +465,7 @@ class PipelineFlowWidget(QWidget):
                         border-radius: 4px;
                     }
                 """)
-                lbl_zh.setStyleSheet("font-size: 11px; font-weight: bold; color: #00E676;")
-                lbl_en.setStyleSheet("font-size: 9px; font-weight: bold; color: #70DB93;")
+                lbl_zh.setStyleSheet("font-size: 12px; font-weight: bold; color: #00E676;")
             elif code in self.completed_stages:
                 frame.setStyleSheet("""
                     QFrame {
@@ -470,8 +474,7 @@ class PipelineFlowWidget(QWidget):
                         border-radius: 4px;
                     }
                 """)
-                lbl_zh.setStyleSheet("font-size: 11px; font-weight: bold; color: #3CB371;")
-                lbl_en.setStyleSheet("font-size: 9px; color: #2E8B57;")
+                lbl_zh.setStyleSheet("font-size: 12px; font-weight: bold; color: #3CB371;")
             else:
                 frame.setStyleSheet("""
                     QFrame {
@@ -480,13 +483,12 @@ class PipelineFlowWidget(QWidget):
                         border-radius: 4px;
                     }
                 """)
-                lbl_zh.setStyleSheet("font-size: 11px; font-weight: bold; color: #777788;")
-                lbl_en.setStyleSheet("font-size: 9px; color: #555566;")
+                lbl_zh.setStyleSheet("font-size: 12px; font-weight: bold; color: #777788;")
 
     def reset_pipeline(self):
         self.completed_stages.clear()
         self.current_stage = ""
-        for _, frame, lbl_zh, lbl_en in self.node_frames:
+        for _, frame, lbl_zh in self.node_frames:
             frame.setStyleSheet("""
                 QFrame {
                     background-color: #1A1A22;
@@ -494,8 +496,8 @@ class PipelineFlowWidget(QWidget):
                     border-radius: 4px;
                 }
             """)
-            lbl_zh.setStyleSheet("font-size: 11px; font-weight: bold; color: #777788;")
-            lbl_en.setStyleSheet("font-size: 9px; color: #555566;")
+            lbl_zh.setStyleSheet("font-size: 12px; font-weight: bold; color: #777788;")
+
 
 
 class AudioPlayButton(QPushButton):
@@ -575,9 +577,11 @@ class MainWindow(QMainWindow):
         root_logger = logging.getLogger()
         root_logger.setLevel(logging.INFO)
         root_logger.addHandler(log_handler)
-        agent_logger = logging.getLogger("BookAgent")
-        agent_logger.setLevel(logging.INFO)
-        agent_logger.addHandler(log_handler)
+        # 统一音频试听播放控制器 (接管主音频、BGM与实时混音试听)
+        self.preview_controller = AudioPreviewController(self)
+        self.preview_controller.sig_progress.connect(self._on_preview_progress)
+        self.preview_controller.sig_state_changed.connect(self._on_preview_state_changed)
+        self.preview_controller.sig_error_fallback.connect(self._on_preview_error_fallback)
 
         self._init_ui()
         self._connect_signals()
@@ -940,6 +944,12 @@ class MainWindow(QMainWindow):
         btn_browse_book = QPushButton("浏览...")
         btn_browse_book.clicked.connect(self._on_browse_book)
 
+        book_row = QHBoxLayout()
+        book_row.setContentsMargins(0, 0, 0, 0)
+        book_row.setSpacing(6)
+        book_row.addWidget(self.txt_book_path, 1)
+        book_row.addWidget(btn_browse_book, 0)
+
         self.txt_book_title = QLineEdit()
         self.txt_book_title.setPlaceholderText("书籍正式名称")
 
@@ -948,14 +958,19 @@ class MainWindow(QMainWindow):
         self.spn_start_page.setValue(1)
         self.spn_start_page.setToolTip("正文物理起始页（用于跳过前言、目录和版权页）")
 
-        g_layout.addWidget(QLabel("书籍文件:"), 0, 0)
-        g_layout.addWidget(self.txt_book_path, 0, 1)
-        g_layout.addWidget(btn_browse_book, 0, 2)
+        lbl_book_file = QLabel("书籍文件:")
+        lbl_book_file.setFixedWidth(68)
+        g_layout.addWidget(lbl_book_file, 0, 0)
+        g_layout.addLayout(book_row, 0, 1, 1, 2)
 
-        g_layout.addWidget(QLabel("书籍名称:"), 1, 0)
+        lbl_book_title = QLabel("书籍名称:")
+        lbl_book_title.setFixedWidth(68)
+        g_layout.addWidget(lbl_book_title, 1, 0)
         g_layout.addWidget(self.txt_book_title, 1, 1, 1, 2)
 
-        g_layout.addWidget(QLabel("正文起始页:"), 2, 0)
+        lbl_start_page = QLabel("正文起始页:")
+        lbl_start_page.setFixedWidth(68)
+        g_layout.addWidget(lbl_start_page, 2, 0)
         g_layout.addWidget(self.spn_start_page, 2, 1, 1, 2)
 
         layout.addWidget(grp_book)
@@ -964,6 +979,14 @@ class MainWindow(QMainWindow):
         grp_voice = QGroupBox("【TTS 引擎与音色配置】")
         v_layout = QGridLayout(grp_voice)
         v_layout.setSpacing(8)
+        # 统一 4 列网格比例，与下方视频版式严格拉长对齐
+        v_layout.setColumnStretch(0, 0)
+        v_layout.setColumnStretch(1, 1)
+        v_layout.setColumnStretch(2, 0)
+        v_layout.setColumnStretch(3, 1)
+
+        lbl_tts_title = QLabel("TTS 引擎:")
+        lbl_tts_title.setFixedWidth(68)
 
         self.cmb_tts_engine = QComboBox()
         self.cmb_tts_engine.addItems(["F5-TTS (本地高质量扩散模型)", "Azure AI Speech (云端官方)"])
@@ -972,8 +995,16 @@ class MainWindow(QMainWindow):
         self.btn_azure_config = QPushButton("🔑 凭据配置")
         self.btn_azure_config.setToolTip("配置/修改 Azure AI Speech 官方 API 密钥与区域")
         self.btn_azure_config.clicked.connect(self._on_azure_config)
-        # 初始化时仅在云端引擎被选中时显示凭据按钮，默认本地引擎无需凭据
         self.btn_azure_config.setVisible("Azure" in self.cmb_tts_engine.currentText())
+
+        engine_box = QHBoxLayout()
+        engine_box.setContentsMargins(0, 0, 0, 0)
+        engine_box.setSpacing(6)
+        engine_box.addWidget(self.cmb_tts_engine, 1)
+        engine_box.addWidget(self.btn_azure_config, 0)
+
+        lbl_voice_profile = QLabel("音色预设:")
+        lbl_voice_profile.setFixedWidth(68)
 
         self.cmb_voice_profile = QComboBox()
         self.cmb_voice_profile.addItems([
@@ -982,10 +1013,16 @@ class MainWindow(QMainWindow):
         self.cmb_voice_profile.currentIndexChanged.connect(self._on_voice_profile_changed)
 
         # 大模型扩散推理步数面板
+        lbl_nfe_step = QLabel("推理步数:")
+        lbl_nfe_step.setFixedWidth(68)
+
         self.spn_nfe_step = QSpinBox()
         self.spn_nfe_step.setRange(8, 64)
         self.spn_nfe_step.setValue(16)
         self.spn_nfe_step.setToolTip("大模型扩散推理步数：默认 16 步（Quadro T1000 推荐 16 步，兼顾速度与发音饱满度）")
+
+        lbl_speed = QLabel("朗读语速:")
+        lbl_speed.setFixedWidth(68)
 
         self.spn_speed = QDoubleSpinBox()
         self.spn_speed.setRange(0.8, 1.5)
@@ -994,28 +1031,38 @@ class MainWindow(QMainWindow):
         self.spn_speed.setSuffix("x")
         self.spn_speed.setToolTip("朗读语速倍率：默认 1.0x 标准语速")
 
-        self.chk_skip_english = QCheckBox("跳过英文")
-        self.chk_skip_english.setChecked(False)
-        self.chk_skip_english.setToolTip(
+        lbl_skip_en = QLabel("跳过英文:")
+        lbl_skip_en.setFixedWidth(60)
+        lbl_skip_en.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+
+        # 【为什么这样设计】
+        # 响应用户需求：取消复选框形式，改为下拉选择，且默认选中“是”。
+        # 与朗读语速在同一行并列对称，结构完全呼应下方单集时长与最小间隔。
+        self.cmb_skip_english = QComboBox()
+        self.cmb_skip_english.addItems(["是", "否"])
+        self.cmb_skip_english.setCurrentIndex(0)  # 默认选中“是”
+        self.cmb_skip_english.setToolTip(
             "智能跳过英文：\n"
-            "• 自动过滤无中文的纯英文段落（如英文版权页、纯英文引文等）；\n"
-            "• 自动清洗中文夹杂的英文括号注释如 (workouts) -> 空；\n"
+            "• 选【是】：自动过滤无中文的纯英文段落，清洗夹杂的英文括号注释；\n"
+            "• 选【否】：完整朗读所有英文字词与字母；\n"
             "• 严格保证：完全不改变任何 TTS 扩散推理参数、步数与音色质量。"
         )
 
-        v_layout.addWidget(QLabel("TTS 引擎:"), 0, 0)
-        v_layout.addWidget(self.cmb_tts_engine, 0, 1)
-        v_layout.addWidget(self.btn_azure_config, 0, 2)
+        # 组装网格：所有长控件跨列 1~3，拉满右边界
+        v_layout.addWidget(lbl_tts_title, 0, 0)
+        v_layout.addLayout(engine_box, 0, 1, 1, 3)
 
-        v_layout.addWidget(QLabel("音色预设:"), 1, 0)
-        v_layout.addWidget(self.cmb_voice_profile, 1, 1, 1, 2)
+        v_layout.addWidget(lbl_voice_profile, 1, 0)
+        v_layout.addWidget(self.cmb_voice_profile, 1, 1, 1, 3)
 
-        v_layout.addWidget(QLabel("推理步数:"), 2, 0)
-        v_layout.addWidget(self.spn_nfe_step, 2, 1)
+        v_layout.addWidget(lbl_nfe_step, 2, 0)
+        v_layout.addWidget(self.spn_nfe_step, 2, 1, 1, 3)
 
-        v_layout.addWidget(QLabel("朗读语速:"), 3, 0)
+        # 行 3: 朗读语速 与 跳过英文 在同一行对称并列
+        v_layout.addWidget(lbl_speed, 3, 0)
         v_layout.addWidget(self.spn_speed, 3, 1)
-        v_layout.addWidget(self.chk_skip_english, 3, 2)
+        v_layout.addWidget(lbl_skip_en, 3, 2)
+        v_layout.addWidget(self.cmb_skip_english, 3, 3)
 
         layout.addWidget(grp_voice)
 
@@ -1023,6 +1070,11 @@ class MainWindow(QMainWindow):
         grp_video = QGroupBox("【视频版式与包装素材】")
         m_layout = QGridLayout(grp_video)
         m_layout.setSpacing(8)
+        # 统一 4 列网格比例，与上方 TTS 引擎配置完全一致
+        m_layout.setColumnStretch(0, 0)
+        m_layout.setColumnStretch(1, 1)
+        m_layout.setColumnStretch(2, 0)
+        m_layout.setColumnStretch(3, 1)
 
         self.cmb_video_layout = QComboBox()
         self.cmb_video_layout.addItems(["竖屏 9:16 (1080x1920, 手机/短视频流)", "横屏 16:9 (1920x1080, 电脑/B站/宽屏)"])
@@ -1102,32 +1154,54 @@ class MainWindow(QMainWindow):
         btn_browse_bgm = QPushButton("选择音乐...")
         btn_browse_bgm.clicked.connect(self._on_browse_bgm)
 
+        bgm_row = QHBoxLayout()
+        bgm_row.setContentsMargins(0, 0, 0, 0)
+        bgm_row.setSpacing(6)
+        bgm_row.addWidget(self.txt_bgm_path, 1)
+        bgm_row.addWidget(btn_browse_bgm, 0)
+
         self.txt_main_title = QLineEdit()
         self.txt_main_title.setPlaceholderText("例如: 《巴菲特致股东的信》精选")
         self.txt_main_title.textChanged.connect(self._refresh_visual_preview)
 
-        m_layout.addWidget(QLabel("视频版式:"), 0, 0)
+        lbl_v_layout = QLabel("视频版式:")
+        lbl_v_layout.setFixedWidth(68)
+        m_layout.addWidget(lbl_v_layout, 0, 0)
         m_layout.addWidget(self.cmb_video_layout, 0, 1, 1, 3)
 
-        m_layout.addWidget(QLabel("分集模式:"), 1, 0)
+        lbl_split_mode = QLabel("分集模式:")
+        lbl_split_mode.setFixedWidth(68)
+        m_layout.addWidget(lbl_split_mode, 1, 0)
         m_layout.addWidget(self.cmb_split_mode, 1, 1, 1, 3)
 
-        m_layout.addWidget(QLabel("单集时长:"), 2, 0)
+        lbl_target_dur = QLabel("单集时长:")
+        lbl_target_dur.setFixedWidth(68)
+        lbl_min_intv = QLabel("最小间隔:")
+        lbl_min_intv.setFixedWidth(60)
+        lbl_min_intv.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        m_layout.addWidget(lbl_target_dur, 2, 0)
         m_layout.addWidget(self.spn_target_duration, 2, 1)
-        m_layout.addWidget(QLabel("最小间隔:"), 2, 2)
+        m_layout.addWidget(lbl_min_intv, 2, 2)
         m_layout.addWidget(self.spn_min_interval, 2, 3)
 
-        m_layout.addWidget(QLabel("运行方式:"), 3, 0)
+        lbl_run_mode = QLabel("运行方式:")
+        lbl_run_mode.setFixedWidth(68)
+        m_layout.addWidget(lbl_run_mode, 3, 0)
         m_layout.addLayout(run_mode_layout, 3, 1, 1, 3)
 
-        m_layout.addWidget(QLabel("封面图片:"), 4, 0)
+        lbl_cover_img = QLabel("封面图片:")
+        lbl_cover_img.setFixedWidth(68)
+        m_layout.addWidget(lbl_cover_img, 4, 0)
         m_layout.addLayout(cover_row, 4, 1, 1, 3)
 
-        m_layout.addWidget(QLabel("背景音乐:"), 5, 0)
-        m_layout.addWidget(self.txt_bgm_path, 5, 1, 1, 2)
-        m_layout.addWidget(btn_browse_bgm, 5, 3)
+        lbl_bgm_title = QLabel("背景音乐:")
+        lbl_bgm_title.setFixedWidth(68)
+        m_layout.addWidget(lbl_bgm_title, 5, 0)
+        m_layout.addLayout(bgm_row, 5, 1, 1, 3)
 
-        m_layout.addWidget(QLabel("视频主标题:"), 6, 0)
+        lbl_main_title = QLabel("视频主标题:")
+        lbl_main_title.setFixedWidth(68)
+        m_layout.addWidget(lbl_main_title, 6, 0)
         m_layout.addWidget(self.txt_main_title, 6, 1, 1, 3)
 
         layout.addWidget(grp_video)
@@ -1178,8 +1252,38 @@ class MainWindow(QMainWindow):
         # ── 1. 封面排版与音频实时工作台 (大方框) ──
         grp_workbench = QGroupBox("【封面排版与音频实时工作台】")
         wb_main_layout = QVBoxLayout(grp_workbench)
-        wb_main_layout.setContentsMargins(8, 10, 8, 8)
-        wb_main_layout.setSpacing(8)
+        wb_main_layout.setContentsMargins(8, 8, 8, 8)
+        wb_main_layout.setSpacing(6)
+
+        # 播放方式选择行 (采纳用户需求：统一设置内置/系统播放器并记住选择)
+        mode_box = QHBoxLayout()
+        mode_box.setContentsMargins(0, 0, 0, 0)
+        mode_box.setSpacing(6)
+
+        lbl_mode = QLabel("播放方式:")
+        lbl_mode.setStyleSheet("font-size: 11px; color: #BBBBCC; font-weight: bold;")
+        self.cmb_playback_mode = QComboBox()
+        self.cmb_playback_mode.addItems(["内置播放器 (推荐)", "系统默认播放器"])
+        self.cmb_playback_mode.setToolTip(
+            "选择音频试听模式：\n"
+            "• 内置播放器 (推荐)：基于 FFmpeg 管道流式解码 + 声卡直推，0.2~0.6s 秒开，零转码等待，支持拖动 Seek；\n"
+            "• 系统默认播放器：调用操作系统默认关联的外部播放器打开音频。"
+        )
+
+        saved_playback_mode = config.get("app.playback_mode", "internal")
+        if saved_playback_mode == "external":
+            self.cmb_playback_mode.setCurrentIndex(1)
+            self.preview_controller.set_playback_mode("external")
+        else:
+            self.cmb_playback_mode.setCurrentIndex(0)
+            self.preview_controller.set_playback_mode("internal")
+
+        self.cmb_playback_mode.currentIndexChanged.connect(self._on_playback_mode_changed)
+
+        mode_box.addWidget(lbl_mode)
+        mode_box.addWidget(self.cmb_playback_mode)
+        mode_box.addStretch()
+        wb_main_layout.addLayout(mode_box)
 
         # 上部：左翼控台 + 中央预览 + 右翼控台
         stage_layout = QHBoxLayout()
@@ -1278,6 +1382,52 @@ class MainWindow(QMainWindow):
         """)
         self.btn_mix_preview.clicked.connect(self._on_test_mix)
         wb_main_layout.addWidget(self.btn_mix_preview)
+
+        # 【为什么这样设计】
+        # 响应用户需求：统一音频试听播放器改造，提供轻量控制栏（播放/暂停、停止、进度条、时间、Seek 拖动），
+        # 仅在内置播放模式下显示，外置模式下自动隐藏，轻巧精炼。
+        self.widget_preview_bar = QWidget()
+        bar_layout = QHBoxLayout(self.widget_preview_bar)
+        bar_layout.setContentsMargins(0, 2, 0, 0)
+        bar_layout.setSpacing(6)
+
+        self.btn_preview_play_pause = QPushButton("▶ 播放")
+        self.btn_preview_play_pause.setFixedWidth(68)
+        self.btn_preview_play_pause.setStyleSheet("""
+            QPushButton { background-color: #2E5B88; color: #FFFFFF; font-weight: bold; border-radius: 4px; padding: 4px 6px; font-size: 11px; }
+            QPushButton:hover { background-color: #3A73AA; }
+            QPushButton:disabled { background-color: #333344; color: #777788; }
+        """)
+        self.btn_preview_play_pause.clicked.connect(self._on_preview_play_pause_clicked)
+
+        self.btn_preview_stop = QPushButton("■ 停止")
+        self.btn_preview_stop.setFixedWidth(56)
+        self.btn_preview_stop.setStyleSheet("""
+            QPushButton { background-color: #3A3A4A; color: #DDDDDD; font-weight: bold; border-radius: 4px; padding: 4px 6px; font-size: 11px; }
+            QPushButton:hover { background-color: #4A4A5A; }
+            QPushButton:disabled { background-color: #2A2A35; color: #666677; }
+        """)
+        self.btn_preview_stop.clicked.connect(self._on_preview_stop_clicked)
+
+        self.sld_preview_progress = QSlider(Qt.Horizontal)
+        self.sld_preview_progress.setRange(0, 1000)
+        self.sld_preview_progress.setValue(0)
+        self.sld_preview_progress.setToolTip("拖动可定位播放进度 (Seek)")
+        self.sld_preview_progress.sliderMoved.connect(self._on_preview_seek)
+
+        self.lbl_preview_time = QLabel("00:00 / 00:00")
+        self.lbl_preview_time.setStyleSheet("font-size: 11px; color: #BBBBCC; font-family: Consolas, monospace;")
+        self.lbl_preview_time.setAlignment(Qt.AlignCenter)
+
+        bar_layout.addWidget(self.btn_preview_play_pause)
+        bar_layout.addWidget(self.btn_preview_stop)
+        bar_layout.addWidget(self.sld_preview_progress, 1)
+        bar_layout.addWidget(self.lbl_preview_time)
+
+        wb_main_layout.addWidget(self.widget_preview_bar)
+
+        # 初始根据当前播放模式决定是否显示控制栏
+        self.widget_preview_bar.setVisible(self.cmb_playback_mode.currentIndex() == 0)
 
         # 【为什么这样设计】
         # 响应用户需求：“将右上角的窗口纵向加1/3的长度，右下的窗口纵向减少1/3的长度”，
@@ -1484,6 +1634,8 @@ class MainWindow(QMainWindow):
         self.lbl_status_led.setStyleSheet(f"font-size: 16px; color: {c}; font-weight: bold;")
 
     def _on_stream_log(self, level: str, msg: str):
+        if not hasattr(self, 'txt_live_logs') or self.txt_live_logs is None:
+            return
         color = "#CCCCCC"
         if level == "ERROR":
             color = "#FF6B6B"
@@ -1737,13 +1889,13 @@ class MainWindow(QMainWindow):
                 self.btn_play_bgm.setStyleSheet("")
                 self.btn_play_bgm.setToolTip("当前未选择背景音乐 (点击左侧'选择音乐'添加)")
 
-        # 2. 联动 BGM 竖向滑块与读数
+        # 2. 联动 BGM 竖向滑块与读数 (采纳用户需求：配置背景音后默认音量为 25%)
         if hasattr(self, 'sld_bgm_preview'):
             self.sld_bgm_preview.setEnabled(has_bgm)
             if not has_bgm:
                 self.sld_bgm_preview.setValue(0)
             elif self.sld_bgm_preview.value() == 0:
-                self.sld_bgm_preview.setValue(15)
+                self.sld_bgm_preview.setValue(25)
 
         # 3. 联动混合试听按钮
         if hasattr(self, 'btn_mix_preview'):
@@ -1764,10 +1916,10 @@ class MainWindow(QMainWindow):
 
     def _on_play_voice_only(self) -> None:
         """
-        单独试听纯人声干音资产 (不含任何伴奏、不含任何淡出衰减)
+        单独试听纯人声干音资产
         【为什么这样设计】
-        用户要求核验纯人声的发音质感与自然电平，直接调用原始参考文件播放，
-        杜绝任何混音污染和末尾自动降低音量。
+        通过统一音频试听控制器播放：内置模式使用 FFmpeg 管道流式秒开播放；
+        外置模式调用系统默认播放器；异常时支持平滑降级。
         """
         try:
             project_root = Path(__file__).resolve().parent.parent.parent
@@ -1779,24 +1931,95 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "试听提示", "未找到对应的纯人声参考音频资产。")
                 return
 
-            logger.info(f"单独试听纯人声原始文件: {voice_sample.resolve()}")
-            os.startfile(str(voice_sample.resolve()))
+            logger.info(f"触发主音频单独试听: {voice_sample.resolve()}")
+            self.preview_controller.play_main_audio(voice_sample)
         except Exception as e:
             logger.exception(f"单独播放纯人声异常: {e}")
             QMessageBox.critical(self, "错误", f"无法播放主音频: {e}")
 
     def _on_play_bgm_only(self) -> None:
-        """单独试听用户选定的背景音乐"""
+        """
+        单独试听用户选定的背景音乐
+        【为什么这样设计】
+        通过统一音频试听控制器播放：内置模式即时管道流式播放，支持快速无缝切歌；
+        外置模式调用系统默认播放器。
+        """
         try:
             bgm_path = self.txt_bgm_path.text().strip() if hasattr(self, 'txt_bgm_path') else ""
             if not bgm_path or not os.path.exists(bgm_path):
                 QMessageBox.information(self, "提示", "当前尚未选择背景音乐。\n（留空则生成纯人声视频，若需伴奏请在左侧点击'选择音乐'）")
                 return
-            logger.info(f"单独试听背景音乐文件: {bgm_path}")
-            os.startfile(str(Path(bgm_path).resolve()))
+            logger.info(f"触发背景音乐试听: {bgm_path}")
+            self.preview_controller.play_bgm(Path(bgm_path))
         except Exception as e:
             logger.exception(f"单独播放背景音乐异常: {e}")
             QMessageBox.critical(self, "错误", f"无法播放背景音乐: {e}")
+
+    def _on_playback_mode_changed(self, idx: int) -> None:
+        """
+        用户切换试听播放方式 (内置播放器 / 系统默认播放器)
+        【为什么这样设计】
+        统一接管三个试听按钮的后端，并将用户偏好持久化保存至本地配置，
+        同时动态显示/隐藏轻量控制条。
+        """
+        is_internal = (idx == 0)
+        mode = "internal" if is_internal else "external"
+        self.preview_controller.set_playback_mode(mode)
+        if hasattr(self, 'widget_preview_bar'):
+            self.widget_preview_bar.setVisible(is_internal)
+        try:
+            config.set("app.playback_mode", mode)
+            config.save()
+        except Exception as e:
+            logger.warning(f"持久化保存播放模式配置失败: {e}")
+
+    def _on_preview_play_pause_clicked(self) -> None:
+        """播放/暂停按钮点击切换"""
+        self.preview_controller.toggle_play_pause()
+
+    def _on_preview_stop_clicked(self) -> None:
+        """停止试听播放"""
+        self.preview_controller.stop()
+
+    def _on_preview_seek(self, value: int) -> None:
+        """用户在进度条拖动定位 Seek"""
+        total_sec = self.preview_controller.current_total_sec
+        if total_sec > 0:
+            target_sec = (value / 1000.0) * total_sec
+            self.preview_controller.seek(target_sec)
+
+    def _on_preview_progress(self, current_ms: int, total_ms: int) -> None:
+        """后台推流汇报播放进度：更新进度条与时间文本"""
+        if hasattr(self, 'sld_preview_progress') and not self.sld_preview_progress.isSliderDown():
+            ratio = current_ms / max(1, total_ms)
+            self.sld_preview_progress.setValue(int(ratio * 1000))
+        if hasattr(self, 'lbl_preview_time'):
+            c_sec = current_ms // 1000
+            t_sec = total_ms // 1000
+            self.lbl_preview_time.setText(f"{c_sec//60:02d}:{c_sec%60:02d} / {t_sec//60:02d}:{t_sec%60:02d}")
+
+    def _on_preview_state_changed(self, is_playing: bool) -> None:
+        """播放状态改变：更新按钮文字与状态"""
+        if hasattr(self, 'btn_preview_play_pause'):
+            self.btn_preview_play_pause.setText("❚❚ 暂停" if is_playing else "▶ 播放")
+
+    def _on_preview_error_fallback(self, err_msg: str) -> None:
+        """
+        内置播放器故障降级处理
+        【为什么这样设计】
+        响应用户红线要求：若内置播放器遇到声卡故障、FFmpeg 管道异常或无法解码，
+        绝不卡死界面，弹窗询问用户是否本次使用系统默认播放器打开，
+        且绝不静默破坏用户的全局永久偏好。
+        """
+        reply = QMessageBox.question(
+            self,
+            "试听播放器提示",
+            f"内置播放器无法播放该音频（原因：{err_msg}）。\n\n是否使用系统默认播放器进行播放？",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes
+        )
+        if reply == QMessageBox.Yes:
+            self.preview_controller.fallback_to_external()
 
     def _refresh_visual_preview(self) -> None:
         """
@@ -1974,7 +2197,7 @@ class MainWindow(QMainWindow):
             "cfg_strength": default_cfg_strength,
             "speech_speed": self.spn_speed.value(),
             "cover_mode": "single" if hasattr(self, 'cmb_cover_mode') and "单层" in self.cmb_cover_mode.currentText() else "dual",
-            "skip_english": self.chk_skip_english.isChecked() if hasattr(self, 'chk_skip_english') else False
+            "skip_english": (self.cmb_skip_english.currentText() == "是") if hasattr(self, 'cmb_skip_english') else True
         }
 
     def _on_generate_plan(self) -> None:
@@ -2043,6 +2266,7 @@ class MainWindow(QMainWindow):
             getattr(self, 'btn_manage_voice', None),
             getattr(self, 'spn_nfe_step', None),
             getattr(self, 'spn_speed', None),
+            getattr(self, 'cmb_skip_english', None),
             getattr(self, 'cmb_video_layout', None),
             getattr(self, 'cmb_split_mode', None),
             getattr(self, 'spn_target_duration', None),
@@ -2082,10 +2306,12 @@ class MainWindow(QMainWindow):
 
     def _on_test_mix(self) -> None:
         """
-        混合试听：使用右侧面板独立音量滑条值进行混音预览。
+        混合试听：通过统一播放控制器进行实时混音预览
         【为什么这样设计】
-        不再自动关联默认BGM，尊重用户选择。
-        音量使用预览面板的独立滑条，而非底部全局音量控制。
+        1. 内置模式：主音频 + 背景音乐通过 FFmpeg 实时滤镜管道混合，输出 PCM 直推声卡秒开，
+           彻底消除以往必须等待生成完整落盘文件的卡顿延迟；
+        2. 外置模式：无缝保留并调用现有 AudioMixer 生成临时试听文件并拉起系统播放器；
+        3. 遵守规则：严格使用右侧面板独立的音量百分比，试听逻辑完全不改动正式生产的混音算法与参数。
         """
         try:
             project_root = Path(__file__).resolve().parent.parent.parent
@@ -2104,12 +2330,9 @@ class MainWindow(QMainWindow):
             if bgm_path and not os.path.exists(bgm_path):
                 bgm_path = ""
 
-            out_preview = (project_root / "output" / "temp_mix_preview.mp3").resolve()
-            out_preview.parent.mkdir(parents=True, exist_ok=True)
-
-            # 3. 使用右侧预览面板的独立音量滑条值
+            # 3. 使用右侧预览面板的独立音量滑条值 (背景音默认 25%)
             voice_vol = self.sld_narr_preview.value() if hasattr(self, 'sld_narr_preview') else 100
-            bgm_vol = self.sld_bgm_preview.value() if hasattr(self, 'sld_bgm_preview') else 30
+            bgm_vol = self.sld_bgm_preview.value() if hasattr(self, 'sld_bgm_preview') else 25
 
             # 4. 计算试听播放时长 = min(BGM长度, 朗读长度)
             voice_dur = self._get_audio_duration(voice_sample)
@@ -2119,22 +2342,14 @@ class MainWindow(QMainWindow):
             else:
                 preview_sec = max(2.0, voice_dur)
 
-            mixer = AudioMixer(
-                voice_volume_percent=float(voice_vol),
-                bgm_volume_percent=float(bgm_vol)
-            )
-
-            success = mixer.generate_preview_mix(
+            logger.info(f"触发混合试听: 朗读={voice_sample.name}({voice_vol}%), BGM={Path(bgm_path).name if bgm_path else '无'}({bgm_vol}%), 时长={preview_sec:.1f}s")
+            self.preview_controller.play_mix(
                 voice_path=voice_sample,
                 bgm_path=Path(bgm_path) if bgm_path else None,
-                output_path=out_preview,
-                preview_seconds=preview_sec
+                voice_vol_percent=float(voice_vol),
+                bgm_vol_percent=float(bgm_vol),
+                preview_sec=preview_sec
             )
-
-            if success and out_preview.exists() and out_preview.stat().st_size > 1000:
-                os.startfile(str(out_preview.absolute()))
-            else:
-                QMessageBox.warning(self, "试听提示", "生成混音试听文件异常。")
         except Exception as e:
             logger.exception(f"混音试听异常: {e}")
             QMessageBox.critical(self, "错误", f"混音试听失败: {e}")
@@ -2261,3 +2476,10 @@ class MainWindow(QMainWindow):
         self.lbl_status_led.setStyleSheet("font-size: 16px; color: #FF6B6B; font-weight: bold;")
         self.tab_widget.setCurrentIndex(2) # 自动跳转到实时日志 Sheet 方便用户排查
         QMessageBox.critical(self, f"生产异常 ({code})", f"发生错误:\n{msg}\n\n详情可查看右侧 [📜 实时日志] 面板。")
+
+    def closeEvent(self, event):
+        """窗口关闭前停止试听推流与清理资源"""
+        if hasattr(self, 'preview_controller') and self.preview_controller:
+            self.preview_controller.stop()
+        super().closeEvent(event)
+
