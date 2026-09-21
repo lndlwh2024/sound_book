@@ -52,6 +52,20 @@ def _get_git_commit_short() -> str:
     return "unknown"
 
 
+def _clean_book_name(title: str) -> str:
+    """
+    清洗书名，去除中文与英文书名号、尖括号、方括号、引号以及文件名非法字符。
+    【为什么这样设计】
+    严格遵循用户规范：“其中书名不要加书名号”，确保在最终生成文件名中不包含《》等符号。
+    """
+    cleaned = title.strip()
+    for ch in ['《', '》', '<', '>', '[', ']', '【', '】', '"', "'"]:
+        cleaned = cleaned.replace(ch, '')
+    import re
+    cleaned = re.sub(r'[\\/:*?"<>|]', '', cleaned).strip()
+    return cleaned or "有声书"
+
+
 class PlanWorker(QThread):
     """
     生产规划专用工作线程。
@@ -181,13 +195,14 @@ class ProductionWorker(QThread):
         cover_mode = str(cfg.get("cover_mode", "single"))
 
         # 彻底锁定绝对物理路径，支持自定义目标输出根目录
+        # 【为什么这样设计】
+        # 响应用户需求 1：不要再自建书名子目录（如 巴菲特致股东的信/），直接在用户指定的输出目录下平铺生成文件
         project_root = Path(__file__).resolve().parent.parent.parent
         custom_out = cfg.get("output_dir")
         if custom_out and Path(custom_out).exists():
-            base_parent = Path(custom_out).resolve()
+            output_base = Path(custom_out).resolve()
         else:
-            base_parent = (project_root / "output").resolve()
-        output_base = (base_parent / book_title).resolve()
+            output_base = (project_root / "output").resolve()
         output_base.mkdir(parents=True, exist_ok=True)
 
         raw_book_id = cfg.get("book_id", f"book_{abs(hash(book_path.name)) % 1000000:06d}")
@@ -271,15 +286,12 @@ class ProductionWorker(QThread):
                 f"【5/8 语音合成 (TTS_GENERATING)】正在生产第 {ep_order:02d} 集: {ep.subtitle}..."
             )
 
-            # 为该分集创建对应产物路径
+            # 为该分集创建对应产物变量与内部工作路径
             commit_hash = _get_git_commit_short()
+            clean_book = _clean_book_name(book_title)
+            clean_ch = f"第{ep_order:02d}集"
             ep_audio_path = book_dir / f"episode_{ep_order:02d}_mixed.m4a"
-            subtitles_dir = output_base / "subtitles"
-            subtitles_dir.mkdir(parents=True, exist_ok=True)
-            ep_srt_path = subtitles_dir / f"Episode_{ep_order:02d}.srt"
-            ep_srt_transcript_path = subtitles_dir / f"Episode_{ep_order:02d}.transcript.srt"
             ep_ass_path = book_dir / f"episode_{ep_order:02d}.ass"
-            ep_mp4_path = output_base / f"Episode_{ep_order:02d}_[{commit_hash}].mp4"
 
             # 对应当前集数的章节段落
             ep_chapters = [c for c in cleaned_structure.chapters if getattr(c, 'chapter_id', c.id) in ep.chapter_ids]
@@ -308,14 +320,19 @@ class ProductionWorker(QThread):
                         u_wav = (ep_units_dir / f"unit_{idx:04d}.wav").resolve()
                         if not u_wav.exists():
                             clean_text = u.text.strip().replace('\n', ' ')
-                            if len(clean_text) > 60:
-                                preview_fmt = f"{clean_text[:45]}...{clean_text[-10:]}(共{len(clean_text)}字)"
+                            tot_chars = len(clean_text)
+                            # 【为什么这样设计】
+                            # 响应用户需求 3：超长状态文字在状态栏右侧容易被截断。
+                            # 按设计：超出的部分展示为 “前文...最后10个字(共X字)”，精简前缀字数，
+                            # 使整条提示长度严格控制在 45~50 字符内，保证末尾省略号、后10个字与总字数完整展示，绝不溢出窗口边界。
+                            if tot_chars > 22:
+                                preview_fmt = f"{clean_text[:10]}...{clean_text[-10:]}(共{tot_chars}字)"
                             else:
-                                preview_fmt = f"{clean_text}(共{len(clean_text)}字)"
+                                preview_fmt = f"{clean_text}(共{tot_chars}字)"
 
                             self.sig_progress_updated.emit(
                                 20.0 + ((idx + 1) / max(1, total_u)) * 45.0,
-                                f"【5/8 语音合成】第 {ep_order:02d} 集 · 正在朗读第 {idx+1}/{total_u} 句 | 原文: \"{preview_fmt}\""
+                                f"【5/8 语音合成】第 {ep_order:02d} 集 · 朗读 {idx+1}/{total_u} 句 | 原文: \"{preview_fmt}\""
                             )
 
                             # 【核心设计：读显分离】
@@ -357,10 +374,21 @@ class ProductionWorker(QThread):
             self.sig_status_changed.emit("ALIGNING_SUBTITLES")
             self.sig_progress_updated.emit(70.0, f"【6/8 字幕对齐 (ALIGNING_SUBTITLES)】正在对齐生成第 {ep_order:02d} 集双语字幕...")
             sub_items = subtitle_engine.align(ep_units)
-            subtitle_engine.export_srt(sub_items, str(ep_srt_path))
-            subtitle_engine.export_srt(sub_items, str(ep_srt_transcript_path))
-            subtitle_engine.export_ass(sub_items, str(ep_ass_path), layout=layout_name)
 
+            # 计算单集物理时长（秒）并换算为分钟（不足 1 分钟四舍五入保底 1m）
+            duration_secs = sub_items[-1].end_time if sub_items else 0.0
+            dur_mins = max(1, int(round(duration_secs / 60.0)))
+
+            # 【为什么这样设计】
+            # 响应用户需求 1：
+            # 1. 取消自建 subtitles 子目录，直接在用户指定的 output_base 根目录平铺输出；
+            # 2. 字幕命名规范：书名_章节_字幕_[commit号].srt（其中书名去除书名号）；
+            # 3. 响应用户技术疑问：彻底删除重复导出的 transcript.srt，仅保留 1 份标准时间轴字幕。
+            ep_srt_path = output_base / f"{clean_book}_{clean_ch}_字幕_[{commit_hash}].srt"
+            subtitle_engine.export_srt(sub_items, str(ep_srt_path))
+
+            # 内部渲染用的 ass 字幕存入内部工程目录 book_dir，不污染用户指定的交付根目录
+            subtitle_engine.export_ass(sub_items, str(ep_ass_path), layout=layout_name)
 
             # 音频拼接与质检
             # 【为什么这样设计】
@@ -386,14 +414,16 @@ class ProductionWorker(QThread):
                 self.sig_error.emit("TTS_SYNTHESIS_FAILED", err_msg)
                 return
 
-
             # 无论是否渲染视频，均将高品质单集音频交付至最终产物目录
-            ep_final_wav = output_base / f"Episode_{ep_order:02d}_[{commit_hash}].wav"
+            # 命名结构：书名_章节_时长_[commit号].wav（其中书名去除书名号，时长按分钟计算）
+            ep_final_wav = output_base / f"{clean_book}_{clean_ch}_{dur_mins}m_[{commit_hash}].wav"
             if ep_voice_tmp.exists():
                 import shutil
                 shutil.copy2(ep_voice_tmp, ep_final_wav)
 
             # 音频混音与视频合成（若封面存在）
+            # 视频命名结构：书名_章节_时长_[commit号].mp4（其中书名去除书名号，时长按分钟计算）
+            ep_mp4_path = output_base / f"{clean_book}_{clean_ch}_{dur_mins}m_[{commit_hash}].mp4"
             if cover_path and Path(cover_path).exists():
                 self.sig_status_changed.emit("AUDIO_MIXING")
                 self.sig_progress_updated.emit(75.0, f"【7/8 混音渲染 (AUDIO_MIXING)】正在执行人声与背景音乐智能侧链混音...")

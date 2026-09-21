@@ -20,7 +20,7 @@ from PySide6.QtWidgets import (
     QProgressBar, QFileDialog, QMessageBox, QGroupBox, QScrollArea,
     QFrame, QTextEdit, QTabWidget, QDialog, QCheckBox, QSizePolicy, QApplication
 )
-from PySide6.QtCore import Qt, QSize, QTimer, Signal, QObject, QPointF, QRectF
+from PySide6.QtCore import Qt, QSize, QTimer, Signal, QObject, QPointF, QRectF, QSettings
 from PySide6.QtGui import QPixmap, QFont, QIcon, QPainter, QColor, QPolygonF, QFontMetrics
 from PySide6.QtWidgets import QStyle, QProxyStyle
 
@@ -613,6 +613,9 @@ class MainWindow(QMainWindow):
         self.preview_controller.sig_error_fallback.connect(self._on_preview_error_fallback)
         self.preview_controller.sig_preparing.connect(self._on_preview_preparing)
         self.preview_controller.sig_duration_resolved.connect(self._on_preview_duration_resolved)
+
+        # 缓存最近一次成功生成的生产计划，供视觉预览图动态提取真实章节名
+        self._last_plan = None
 
         self._init_ui()
         self._connect_signals()
@@ -1220,6 +1223,7 @@ class MainWindow(QMainWindow):
         self.spn_target_chapter.setPrefix("第 ")
         self.spn_target_chapter.setSuffix(" 章")
         self.spn_target_chapter.setToolTip("选择或输入制作的具体自然章节序号（1~9999，支持上下箭头快速微调）")
+        self.spn_target_chapter.valueChanged.connect(lambda _: self._refresh_visual_preview())
         self.lbl_target_chapter.setVisible(False)
         self.spn_target_chapter.setVisible(False)
 
@@ -1263,9 +1267,17 @@ class MainWindow(QMainWindow):
         o_layout.setSpacing(6)
 
         self.txt_output_dir = QLineEdit()
+        # 【为什么这样设计】
+        # 响应用户需求 1：输出目录记住用户上一次的选择，启动时自动加载，绝不再每次重置为默认 output
+        settings = QSettings("SoundBook", "App")
+        saved_out = settings.value("output_dir", "")
         default_out = (Path(__file__).resolve().parent.parent.parent / "output").resolve()
-        self.txt_output_dir.setText(str(default_out))
-        self.txt_output_dir.setToolTip("分集音频、视频与字幕的根输出目录")
+        if saved_out and Path(str(saved_out)).exists():
+            self.txt_output_dir.setText(str(saved_out))
+        else:
+            self.txt_output_dir.setText(str(default_out))
+        self.txt_output_dir.setToolTip("分集音频、视频与字幕的根输出目录（已记忆用户最近配置）")
+        self.txt_output_dir.textChanged.connect(self._on_output_dir_changed)
 
         self.btn_browse_output = QPushButton("更改...")
         self.btn_browse_output.clicked.connect(self._on_browse_output)
@@ -1590,8 +1602,10 @@ class MainWindow(QMainWindow):
         self.lbl_status_led.setStyleSheet("font-size: 16px; color: #555568; font-weight: bold;")
 
         self.lbl_status = QLabel("空闲就绪 (IDLE)")
-        self.lbl_status.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        self.lbl_status.setStyleSheet("color: #E0E0E0; font-size: 14px; font-weight: bold;")
+        # 【为什么这样设计】
+        # 响应用户需求 3：设置水平策略为 Ignored，防止任何未预期的超长文字撑爆右侧界面边界
+        self.lbl_status.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.lbl_status.setStyleSheet("color: #E0E0E0; font-size: 13px; font-weight: bold;")
         self.lbl_status.setToolTip("当前生产流水线状态: 空闲就绪 (IDLE)")
 
         right_status_layout.addWidget(self.lbl_status_led, 0)
@@ -1837,11 +1851,21 @@ class MainWindow(QMainWindow):
         if dlg.exec() == QDialog.Accepted:
             self._refresh_hardware_diag()
 
+    def _on_output_dir_changed(self, text: str) -> None:
+        """【为什么这样设计】监听用户手动输入的输出目录并实时写入注册表持久化"""
+        clean_p = text.strip()
+        if clean_p:
+            settings = QSettings("SoundBook", "App")
+            settings.setValue("output_dir", clean_p)
+
     def _on_browse_output(self):
-        """【新需求 3】选择自定义目标输出目录"""
+        """【新需求 3】选择自定义目标输出目录并实时记忆"""
         d = QFileDialog.getExistingDirectory(self, "选择输出根目录", self.txt_output_dir.text().strip())
         if d:
-            self.txt_output_dir.setText(d.strip())
+            clean_d = d.strip()
+            self.txt_output_dir.setText(clean_d)
+            settings = QSettings("SoundBook", "App")
+            settings.setValue("output_dir", clean_d)
 
     def _on_browse_book(self) -> None:
         file_path, _ = QFileDialog.getOpenFileName(self, "选择电子书文件", "", "Ebooks (*.pdf *.epub)")
@@ -1903,6 +1927,10 @@ class MainWindow(QMainWindow):
                 if w is not None:
                     w.setVisible(not is_by_duration)
                     w.setEnabled(not is_by_duration)
+
+            # 切换分集模式时即刻刷新视觉预览副标题
+            if hasattr(self, '_refresh_visual_preview'):
+                self._refresh_visual_preview()
 
     def _on_run_mode_changed(self, idx: int = 0) -> None:
         """
@@ -2266,10 +2294,40 @@ class MainWindow(QMainWindow):
                     painter.setPen(QColor("#FFFFFF"))
                     painter.drawText(8, bar_y + pad_v, canvas_w - 16, h_title, Qt.AlignCenter | Qt.TextSingleLine, elided_title)
 
-                    # 副标题文字 (示例)
+                    # 【为什么这样设计】
+                    # 响应用户需求 2：预览副标题动态联动章节与生产计划状态。
+                    # - 若分集模式为自然章节：
+                    #   * 未执行生产计划时：显示章节模板，例如 “第02集 · 章节名称”；
+                    #   * 已执行生产计划时：从 _last_plan 提取匹配章节的真实副标题，例如 “第02集 · 1958年”；
+                    # - 若分集模式为按时长：
+                    #   * 未执行生产计划时：显示模板 “第01集 · 正文精选”；
+                    #   * 已执行生产计划时：展示第 1 集的真实规划信息。
+                    is_by_chapter = hasattr(self, 'cmb_split_mode') and "自然章节" in self.cmb_split_mode.currentText()
+                    target_ch = self.spn_target_chapter.value() if hasattr(self, 'spn_target_chapter') else 1
+
+                    preview_sub = ""
+                    if is_by_chapter:
+                        matched_ep = None
+                        if getattr(self, '_last_plan', None) and hasattr(self._last_plan, 'episodes'):
+                            for ep in self._last_plan.episodes:
+                                if getattr(ep, 'episode_order', None) == target_ch:
+                                    matched_ep = ep
+                                    break
+                        if matched_ep and getattr(matched_ep, 'subtitle', None):
+                            preview_sub = matched_ep.subtitle
+                        else:
+                            preview_sub = f"第{target_ch:02d}集 · 章节名称"
+                    else:
+                        if getattr(self, '_last_plan', None) and hasattr(self._last_plan, 'episodes') and self._last_plan.episodes:
+                            preview_sub = getattr(self._last_plan.episodes[0], 'subtitle', "第01集 · 正文精选")
+                        else:
+                            preview_sub = "第01集 · 正文精选"
+
+                    # 绘制副标题文字 (自适应防溢出省略)
                     painter.setFont(sub_font)
+                    elided_sub = fm_sub.elidedText(preview_sub, Qt.ElideRight, canvas_w - 16)
                     painter.setPen(QColor("#CCCCCC"))
-                    painter.drawText(8, bar_y + pad_v + h_title + 3, canvas_w - 16, h_sub, Qt.AlignCenter | Qt.TextSingleLine, "第01集 · 正文精选")
+                    painter.drawText(8, bar_y + pad_v + h_title + 3, canvas_w - 16, h_sub, Qt.AlignCenter | Qt.TextSingleLine, elided_sub)
             finally:
                 if painter.isActive():
                     painter.end()
@@ -2595,6 +2653,10 @@ class MainWindow(QMainWindow):
                 lines.append(f"• 第{ep.episode_order:02d}集 ({ep.subtitle}): {ep_chars:,}字 (约{ep_mins:.1f}分钟)")
 
             self.txt_plan_summary.setText("\n".join(lines))
+            # 缓存最新生产计划，驱动右侧封面排版预览即刻呈现真实的章节信息
+            self._last_plan = plan
+            if hasattr(self, '_refresh_visual_preview'):
+                self._refresh_visual_preview()
         except Exception as e:
             logger.warning(f"渲染生产计划失败: {e}")
 
