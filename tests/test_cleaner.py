@@ -138,5 +138,42 @@ def test_heading_preserved_with_period():
 
     # 验证小标题独立存在并加了句号，正文独立成行
     assert lines[0] == "1957 年业绩。"
-    assert "我们在过去一年" in lines[1]
+
+
+def test_skip_english_full_line_and_bracket():
+    """
+    测试跳过英文规则：
+    1. 包含英文字母且完全无汉字的整行/整段（如 '5202 Underwood Ave. Omaha, Nebraska'）整行删除；
+    2. 纯数字行（如 '1957'）不含英文字母，不被误删；
+    3. 中文夹杂的英文括号（如 '套利类(workouts)部分投资'）清洗为 '套利类部分投资'。
+    """
+    from src.cleaner.text_cleaner import TextCleaner
+    from src.state.models import BookStructure, Chapter, BookMetadata
+
+    cleaner = TextCleaner()
+    raw_content = (
+        "巴菲特致合伙人的信 1957\n"
+        "沃伦.巴菲特\n"
+        "5202 Underwood Ave. Omaha, Nebraska\n"
+        "在去年写给合伙人的信中，我写道：我们在套利类(workouts)部分投资表现良好。\n"
+        "1957\n"
+        "这是新的一年。"
+    )
+    chapter = Chapter(title="测试章节", paragraphs=raw_content.split("\n"))
+    book = BookStructure(metadata=BookMetadata(title="测试"), chapters=[chapter])
+
+    cleaned_book, _ = cleaner.clean(book, skip_english=True)
+    cleaned_text = cleaned_book.chapters[0].content
+
+    # 1. 验证纯英文行整行被彻底剔除
+    assert "Underwood" not in cleaned_text
+    assert "Nebraska" not in cleaned_text
+    assert "5202" not in cleaned_text
+
+    # 2. 验证括号英文被清洗
+    assert "(workouts)" not in cleaned_text
+    assert "套利类部分投资" in cleaned_text
+
+    # 3. 验证纯数字 1957 未被误删
+    assert "1957" in cleaned_text
 

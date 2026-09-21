@@ -293,8 +293,8 @@ class ProductionWorker(QThread):
                         u_wav = (ep_units_dir / f"unit_{idx:04d}.wav").resolve()
                         if not u_wav.exists():
                             clean_text = u.text.strip().replace('\n', ' ')
-                            if len(clean_text) > 20:
-                                preview_fmt = f"{clean_text[:10]}...{clean_text[-10:]}(共{len(clean_text)}字)"
+                            if len(clean_text) > 60:
+                                preview_fmt = f"{clean_text[:45]}...{clean_text[-10:]}(共{len(clean_text)}字)"
                             else:
                                 preview_fmt = f"{clean_text}(共{len(clean_text)}字)"
 
@@ -302,8 +302,15 @@ class ProductionWorker(QThread):
                                 20.0 + ((idx + 1) / max(1, total_u)) * 45.0,
                                 f"【5/8 语音合成】第 {ep_order:02d} 集 · 正在朗读第 {idx+1}/{total_u} 句 | 原文: \"{preview_fmt}\""
                             )
+
+                            # 【核心设计：读显分离】
+                            # u.text 严格保持阿拉伯数字格式，确保 SRT 字幕与画面保持原书排版；
+                            # 送入 F5 大模型推理时使用 normalize_for_tts 转换为标准中文口语词，彻底杜绝英文读音
+                            from ..text.normalizer import normalize_for_tts
+                            spoken_text = normalize_for_tts(u.text)
+
                             res = tts_backend.synthesize(
-                                text=u.text,
+                                text=spoken_text,
                                 output_path=u_wav,
                                 voice=voice_profile,
                                 speed=speech_speed,

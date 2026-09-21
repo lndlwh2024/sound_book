@@ -80,3 +80,28 @@ def test_normalize_bilingual_spacing():
     normalized3 = normalize_text(text3)
     assert "在 workouts 投资" in normalized3
 
+
+def test_normalize_for_tts_spoken_digits():
+    """
+    测试送入 TTS 前的数字口语化转换（读显分离）：
+    1. 年份位读：1957年 -> 一九五七年
+    2. 基数词与点数：499点 -> 四百九十九点，435点 -> 四百三十五点，64点 -> 六十四点，22点 -> 二十二点
+    3. 百分比与小数：8.470% -> 百分之八点四七零
+    """
+    from src.text.normalizer import normalize_for_tts
+
+    sample = "1957年年初，道指为499点，年末为435点，下降64点。买入指数可以获得22点的分红，亏损可以降低到42点，也就是全年亏损8.470%。"
+    spoken = normalize_for_tts(sample)
+
+    assert "一九五七年年初" in spoken
+    assert "四百九十九点" in spoken
+    assert "四百三十五点" in spoken
+    assert "六十四点" in spoken
+    assert "二十二点" in spoken
+    assert "四十二点" in spoken
+    assert "百分之八点四七零" in spoken
+    # 确保没有任何阿拉伯数字遗留
+    import re
+    assert not re.search(r'\d', spoken)
+
+

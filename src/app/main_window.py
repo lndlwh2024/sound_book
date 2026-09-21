@@ -1311,7 +1311,7 @@ class MainWindow(QMainWindow):
 
         self.lbl_status = QLabel("空闲就绪 (IDLE)")
         self.lbl_status.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        self.lbl_status.setStyleSheet("color: #CCCCCC; font-size: 12px; font-weight: bold;")
+        self.lbl_status.setStyleSheet("color: #E0E0E0; font-size: 14px; font-weight: bold;")
         self.lbl_status.setToolTip("当前生产流水线状态: 空闲就绪 (IDLE)")
 
         btn_layout.addWidget(self.lbl_status_led)

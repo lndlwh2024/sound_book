@@ -19,34 +19,52 @@ def digits_to_chinese(num_str: str) -> str:
 
 def int_to_chinese(num: int) -> str:
     """
-    将整数（0-9999）转为口语中文基数词（用于年代、世纪、比例等场景）。
-    例如：20 -> '二十', 21 -> '二十一', 80 -> '八十', 100 -> '一百'
+    将整数（0-99999999）转为标准口语中文基数词。
+    例如：
+    10 -> '十', 15 -> '十五', 22 -> '二十二', 64 -> '六十四'
+    100 -> '一百', 105 -> '一百零五', 115 -> '一百一十五'
+    435 -> '四百三十五', 499 -> '四百九十九'
+    1005 -> '一千零五', 10000 -> '一万'
     """
     if num < 0:
-        return str(num)
+        return '负' + int_to_chinese(-num)
     if num < 10:
         return DIGIT_MAP[str(num)]
+    if num < 20:
+        return '十' + (DIGIT_MAP[str(num % 10)] if num % 10 > 0 else '')
     if num < 100:
         tens = num // 10
         ones = num % 10
-        result = '十' if tens == 1 else DIGIT_MAP[str(tens)] + '十'
-        if ones > 0:
-            result += DIGIT_MAP[str(ones)]
-        return result
+        return DIGIT_MAP[str(tens)] + '十' + (DIGIT_MAP[str(ones)] if ones > 0 else '')
     if num < 1000:
         hundreds = num // 100
         remainder = num % 100
-        result = DIGIT_MAP[str(hundreds)] + '百'
+        res = DIGIT_MAP[str(hundreds)] + '百'
         if remainder == 0:
-            return result
+            return res
         if remainder < 10:
-            return result + '零' + DIGIT_MAP[str(remainder)]
-        tens = remainder // 10
-        ones = remainder % 10
-        result += DIGIT_MAP[str(tens)] + '十'
-        if ones > 0:
-            result += DIGIT_MAP[str(ones)]
-        return result
+            return res + '零' + DIGIT_MAP[str(remainder)]
+        if remainder < 20:
+            return res + '一十' + (DIGIT_MAP[str(remainder % 10)] if remainder % 10 > 0 else '')
+        return res + int_to_chinese(remainder)
+    if num < 10000:
+        thousands = num // 1000
+        remainder = num % 1000
+        res = DIGIT_MAP[str(thousands)] + '千'
+        if remainder == 0:
+            return res
+        if remainder < 100:
+            return res + '零' + int_to_chinese(remainder)
+        return res + int_to_chinese(remainder)
+    if num < 100000000:
+        myriads = num // 10000
+        remainder = num % 10000
+        res = int_to_chinese(myriads) + '万'
+        if remainder == 0:
+            return res
+        if remainder < 1000:
+            return res + '零' + int_to_chinese(remainder)
+        return res + int_to_chinese(remainder)
     return digits_to_chinese(str(num))
 
 def number_to_chinese(num_str: str) -> str:
@@ -177,9 +195,48 @@ class TextNormalizer:
 
         return text
 
+    def normalize_for_tts(self, text: str) -> str:
+        """
+        专门为送入大模型 TTS 发音设计的全量口语化转换（读显分离专用）：
+        在常规文本正规化（年份位读、百分比、比例等）基础上，
+        将正文中剩余的纯阿拉伯数字（浮点数与整数，如 499点、435点、64点、22点）
+        全部确定性转换为标准中文口语基数词，彻底杜绝 F5 大模型将数字误读为英文或发音模糊。
+        """
+        if not text:
+            return ""
+
+        # 1. 先执行通用基础正规化（年份、百分比、比例、金融多音字等）
+        t = self.normalize(text)
+
+        # 2. 转换剩余的小数/浮点数（如 8.47 -> 八点四七，先于整数匹配以防截断）
+        float_pattern = re.compile(r'(?<![\d.])(\d+)\.(\d+)(?![\d.])')
+        def replace_float(m):
+            int_part = int_to_chinese(int(m.group(1)))
+            dec_part = digits_to_chinese(m.group(2))
+            return f"{int_part}点{dec_part}"
+        t = float_pattern.sub(replace_float, t)
+
+        # 3. 转换剩余的所有整数（如 499点 -> 四百九十九点，22点 -> 二十二点，42 -> 四十二）
+        int_pattern = re.compile(r'(?<![\d.])(\d+)(?![\d.])')
+        def replace_int(m):
+            num = int(m.group(1))
+            return int_to_chinese(num)
+        t = int_pattern.sub(replace_int, t)
+
+        # 4. 消除中文数字转换后与后续汉字量词之间的多余空格（如 '四百九十九 点' -> '四百九十九点'）
+        # 循环替换直到所有汉字间多余空格消除干净
+        while re.search(r'([\u4e00-\u9fff])\s+([\u4e00-\u9fff])', t):
+            t = re.sub(r'([\u4e00-\u9fff])\s+([\u4e00-\u9fff])', r'\1\2', t)
+
+        return t
+
 # 全局单例
 _default_normalizer = TextNormalizer()
 
 def normalize_text(text: str) -> str:
-    """便捷公共入口"""
+    """便捷公共入口（用于通用文本规范化）"""
     return _default_normalizer.normalize(text)
+
+def normalize_for_tts(text: str) -> str:
+    """专门供给 TTS 引擎的口语化发音转换入口（实现读显分离，绝不修改原始字幕与正文）"""
+    return _default_normalizer.normalize_for_tts(text)

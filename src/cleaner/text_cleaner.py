@@ -41,7 +41,11 @@ class TextCleaner:
         for chapter in getattr(book_structure, 'chapters', []):
             content = getattr(chapter, 'content', '')
             if not content:
-                continue
+                # 兼容从 paragraphs 派生 content，防止空章节被意外跳过
+                if hasattr(chapter, 'paragraphs') and chapter.paragraphs:
+                    content = '\n'.join(p.text if hasattr(p, 'text') else str(p) for p in chapter.paragraphs)
+                else:
+                    continue
                 
             before_chars += len(content)
             
@@ -55,44 +59,49 @@ class TextCleaner:
             # 3. 删除页码
             lines, p_count = self._remove_page_numbers(lines)
             removed_page_numbers += p_count
-            
-            # 4. 修复换行
-            lines = self._fix_newlines(lines)
-            
-            # 5. 合并连续空白 & 去除排版噪声 & 跳过英文处理
-            cleaned_lines = []
+
+            # 4. 【核心规范】：必须在换行整理前执行整行英文与括号英文过滤
+            # 杜绝无标点结尾的英文地址/版权行被换行修复错误焊接到后续中文句首
+            pre_filtered_lines = []
             for line in lines:
-                # 移除明显的排版控制字符
                 line = self.control_chars_pattern.sub('', line)
-                # 合并多个连续空格为一个
                 line = re.sub(r'[ \t]+', ' ', line)
                 stripped = line.strip()
 
                 if skip_english and stripped:
-                    # 1) 如果整行完全没有汉字，且含有英文字母，认定为纯英文段落/版权页，直接跳过
+                    # 规则一：整行 / 整段纯英文删除
+                    # 判定：至少包含一个英文字母 [A-Za-z]，且完全不包含中文字符
                     has_chinese = any('\u4e00' <= ch <= '\u9fff' for ch in stripped)
-                    has_alpha = any(ch.isalpha() for ch in stripped)
-                    if not has_chinese and has_alpha:
+                    has_alpha = any(('a' <= ch <= 'z') or ('A' <= ch <= 'Z') for ch in stripped)
+                    if has_alpha and not has_chinese:
                         continue
-                    # 2) 清洗中文夹杂的英文括号注释
-                    line = self.en_bracket_pattern.sub('', line)
-                    stripped = line.strip()
 
-                cleaned_lines.append(stripped)
+                    # 规则二：原有局部英文括号过滤 (如 (workouts) -> 移除)
+                    stripped = self.en_bracket_pattern.sub('', stripped).strip()
+
+                pre_filtered_lines.append(stripped)
             
-            # 6. 去掉多余空行
+            # 5. 修复换行（此时纯英文行已先行安全剔除，绝无跨行误缝合隐患）
+            lines = self._fix_newlines(pre_filtered_lines)
+            
+            # 6. 去掉多余空行与规整
             final_lines = []
-            for line in cleaned_lines:
-                if line == '':
+            for line in lines:
+                l_str = line.strip()
+                if l_str == '':
                     if final_lines and final_lines[-1] != '':
-                        final_lines.append(line)
+                        final_lines.append('')
                 else:
-                    final_lines.append(line)
+                    final_lines.append(l_str)
                     
             # 重新拼装回文本
             new_content = '\n'.join(final_lines).strip()
             setattr(chapter, 'content', new_content)
             after_chars += len(new_content)
+
+            # 7. 同步更新 chapter.paragraphs，确保下游 SpeechUnitBuilder 接收清洗后段落
+            cleaned_paras = [l for l in final_lines if l.strip()]
+            setattr(chapter, 'paragraphs', cleaned_paras)
             
         change_ratio = 0.0
         if before_chars > 0:
