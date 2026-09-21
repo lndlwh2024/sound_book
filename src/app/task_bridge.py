@@ -66,6 +66,38 @@ def _clean_book_name(title: str) -> str:
     return cleaned or "有声书"
 
 
+def _query_gpu_temperature() -> Optional[float]:
+    """
+    通过 nvidia-smi 实时查询 GPU 核心温度 (°C)。
+    【为什么这样设计】
+    专为硬件温控闭环提供轻量、低开销的温度探测。
+    在无独立显卡或驱动未就绪时静默返回 None，不干扰普通工作流。
+    """
+    import subprocess
+    try:
+        cmd = [
+            "nvidia-smi",
+            "--query-gpu=temperature.gpu",
+            "--format=csv,noheader,nounits"
+        ]
+        res = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=2,
+            creationflags=0x08000000 if os.name == 'nt' else 0
+        )
+        if res.returncode == 0 and res.stdout.strip():
+            lines = [l.strip() for l in res.stdout.strip().splitlines() if l.strip()]
+            temps = [float(l) for l in lines if l.replace('.', '', 1).isdigit()]
+            if temps:
+                return max(temps)
+    except Exception as e:
+        logger.debug(f"GPU 核心温度查询未执行或失败: {e}")
+    return None
+
+
+
 class PlanWorker(QThread):
     """
     生产规划专用工作线程。
@@ -182,7 +214,12 @@ class ProductionWorker(QThread):
         start_page = int(cfg.get("start_page", 1))
         layout_name = cfg.get("video_layout", "portrait_9_16")
         target_ep_mins = float(cfg.get("target_duration_mins", 15.0))
-        run_mode = cfg.get("run_mode", "RUN_NEXT_EPISODE") # RUN_FULL_BOOK | RUN_NEXT_EPISODE | RUN_DURATION_LIMIT
+        start_ch = int(cfg.get("start_chapter", 1))
+        end_ch = int(cfg.get("end_chapter", 1))
+        gpu_protect_enabled = bool(cfg.get("gpu_protect_enabled", False))
+        gpu_temp_limit = float(cfg.get("gpu_temp_limit", 75.0))
+        gpu_temp_resume = float(cfg.get("gpu_temp_resume", 60.0))
+        gpu_cooling_minutes = float(cfg.get("gpu_cooling_minutes", 1.0))
         cover_path = str(cfg.get("cover_path", "")).strip() if cfg.get("cover_path") else ""
         bgm_path = str(cfg.get("bgm_path", "")).strip() if cfg.get("bgm_path") else ""
         main_title = str(cfg.get("main_title", f"《{book_title}》精选")).strip()
@@ -240,19 +277,18 @@ class ProductionWorker(QThread):
         planner = EpisodePlanner(target_duration_mins=target_ep_mins)
         plan = planner.plan_initial_episodes(book_title, cleaned_structure.chapters, split_mode=split_mode)
 
-        # 响应用户需求：按自然章节时明确指向具体章节开始制作
+        # 【为什么这样设计】
+        # 响应用户需求：按自然章节时支持起始与结尾章节区间（如 1 至 5 或 5 至 5）。
+        # 直接按用户指定的章节范围精确截取待生产分集列表。
         if split_mode == "by_chapter":
-            target_ch = int(cfg.get("target_chapter", 1))
-            if run_mode == "RUN_NEXT_EPISODE":
-                target_eps = [e for e in plan.episodes if e.episode_order == target_ch]
-                if target_eps:
-                    plan.episodes = target_eps
-                    logger.info(f"自然章节单集调试：明确指向生产第 {target_ch} 章 (共 1 集)")
+            if start_ch > end_ch:
+                start_ch, end_ch = end_ch, start_ch
+            target_eps = [e for e in plan.episodes if start_ch <= e.episode_order <= end_ch]
+            if target_eps:
+                plan.episodes = target_eps
+                logger.info(f"自然章节范围生产：已精确指向第 {start_ch} 至第 {end_ch} 章 (共 {len(target_eps)} 集)")
             else:
-                target_eps = [e for e in plan.episodes if e.episode_order >= target_ch]
-                if target_eps:
-                    plan.episodes = target_eps
-                    logger.info(f"自然章节连续生产：从第 {target_ch} 章起算 (剩余 {len(target_eps)} 集)")
+                logger.warning(f"自然章节范围生产：未能匹配到第 {start_ch} 至第 {end_ch} 章，将保持全书规划")
 
         self.sig_plan_ready.emit(plan)
         self.sig_status_changed.emit("PLANNED")
@@ -364,6 +400,47 @@ class ProductionWorker(QThread):
                             info = get_audio_info(u_wav)
                             u.audio_duration = info.get("duration", max(1.5, len(u.text) * 0.2))
                         unit_wavs.append(u_wav)
+
+                        # 【GPU 硬件温控安全挂起与自愈机制】
+                        # 【为什么这样设计】
+                        # 严格落实用户三大温控准则：
+                        # 1. 触发上限后必须等待当前语音切片（Unit）完整落盘，再进入挂起，杜绝半截破损音频；
+                        # 2. 挂起冷却期间，绝不中断整集上下文（处于当前集内循环），无缝衔接下一句，杜绝把一集中断成两半；
+                        # 3. 必须同时满足“冷却时间达到最小冷却时间”与“当前温度降至复工温度以下”，方可自动唤醒恢复流水线！
+                        if gpu_protect_enabled:
+                            cur_temp = _query_gpu_temperature()
+                            if cur_temp is not None and cur_temp >= gpu_temp_limit:
+                                logger.warning(
+                                    f"GPU 核心温度达到 {cur_temp:.1f}°C (>= 上限 {gpu_temp_limit}°C)，"
+                                    f"单句 #{idx+1} 音频已完整落盘，执行安全挂起冷却 (至少 {gpu_cooling_minutes} 分钟且直至 <= {gpu_temp_resume}°C)..."
+                                )
+                                self.sig_status_changed.emit("COOLING")
+                                cool_start_time = time.time()
+                                min_cool_secs = gpu_cooling_minutes * 60.0
+
+                                while not self._pause_requested:
+                                    time.sleep(3)
+                                    now_temp = _query_gpu_temperature() or 0.0
+                                    elapsed_cool = time.time() - cool_start_time
+                                    remain_cool_secs = max(0.0, min_cool_secs - elapsed_cool)
+
+                                    temp_str = f"{now_temp:.1f}°C" if now_temp > 0 else "N/A"
+                                    status_msg = (
+                                        f"【GPU降温保护中】核心温: {temp_str} (目标<={gpu_temp_resume}°C) | "
+                                        f"强制冷却剩余: {int(remain_cool_secs)}秒"
+                                    )
+                                    self.sig_progress_updated.emit(-1.0, status_msg)
+
+                                    if elapsed_cool >= min_cool_secs and (now_temp <= 0 or now_temp <= gpu_temp_resume):
+                                        logger.info(
+                                            f"GPU 温度已降至 {temp_str} 且满足最小冷却时长 {gpu_cooling_minutes} 分钟，"
+                                            f"自动无缝恢复第 {ep_order:02d} 集语音合成！"
+                                        )
+                                        self.sig_status_changed.emit("TTS_GENERATING")
+                                        break
+
+                                if self._pause_requested:
+                                    break
                 finally:
                     tts_backend.stop_session()
             else:
@@ -456,21 +533,6 @@ class ProductionWorker(QThread):
                 video_file=str(ep_mp4_path),
                 subtitle_file=str(ep_srt_path)
             ))
-
-            # 检查运行模式：
-            if run_mode == "RUN_NEXT_EPISODE":
-                logger.info(f"当前运行模式为【仅生成下一集】，第 {ep_order} 集完成后自动安全停机")
-                break
-            elif run_mode in ("RUN_DURATION_LIMIT", "RUN_TIME_LIMIT"):
-                limit_mins = float(cfg.get("limit_duration_mins", 60.0))
-                elapsed_mins = (time.time() - production_start_time) / 60.0
-                if elapsed_mins >= limit_mins:
-                    logger.info(f"当前运行模式为【限时生成】，累计耗时 {elapsed_mins:.1f} 分钟 (>= 限时 {limit_mins} 分钟)，第 {ep_order} 集完成后自动安全休眠")
-                    manifest_mgr.save_episode_manifest(episodes_manifests)
-                    self.sig_status_changed.emit("PAUSED")
-                    self.sig_progress_updated.emit(-1.0, f"【限时休眠】已达到设定运行时长 ({elapsed_mins:.1f}/{limit_mins}分钟)，任务已安全休眠。")
-                    self.sig_task_paused.emit()
-                    return
 
         manifest_mgr.save_episode_manifest(episodes_manifests)
         self.sig_status_changed.emit("COMPLETED")

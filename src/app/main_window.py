@@ -968,10 +968,14 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
 
-        # 分组 1: 书籍与正文
-        grp_book = QGroupBox("【电子书源文件与正文设置】")
+        # 分组 1: 书名与交付版式（聚合书籍源文件、正文起始、视频标题、版式、封面、背景音乐）
+        grp_book = QGroupBox("【书名与交付版式】")
         g_layout = QGridLayout(grp_book)
         g_layout.setSpacing(8)
+        g_layout.setColumnStretch(0, 0)
+        g_layout.setColumnStretch(1, 1)
+        g_layout.setColumnStretch(2, 0)
+        g_layout.setColumnStretch(3, 1)
 
         self.txt_book_path = QLineEdit()
         self.txt_book_path.setPlaceholderText("请选择 PDF 或 EPUB 文件...")
@@ -992,20 +996,83 @@ class MainWindow(QMainWindow):
         self.spn_start_page.setValue(1)
         self.spn_start_page.setToolTip("正文物理起始页（用于跳过前言、目录和版权页）")
 
+        # 视频主标题（从原包装板块挪入）
+        self.txt_main_title = QLineEdit()
+        self.txt_main_title.setPlaceholderText("例如: 《巴菲特致股东的信》精选")
+        self.txt_main_title.textChanged.connect(self._refresh_visual_preview)
+
+        # 视频版式（从原包装板块挪入）
+        self.cmb_video_layout = QComboBox()
+        self.cmb_video_layout.addItems(["竖屏 9:16 (1080x1920, 手机/短视频流)", "横屏 16:9 (1920x1080, 电脑/B站/宽屏)"])
+        self.cmb_video_layout.currentIndexChanged.connect(self._refresh_visual_preview)
+
+        # 封面图片（从原包装板块挪入）
+        self.txt_cover_path = QLineEdit()
+        self.txt_cover_path.setPlaceholderText("留空则使用默认极简书影...")
+        self.txt_cover_path.textChanged.connect(self._refresh_visual_preview)
+        btn_browse_cover = QPushButton("选择封面...")
+        btn_browse_cover.clicked.connect(self._on_browse_cover)
+
+        self.cmb_cover_mode = QComboBox()
+        self.cmb_cover_mode.addItems(["单层极简", "双层毛玻璃"])
+        self.cmb_cover_mode.setToolTip("封面呈现模式切换：\n• 单层极简：科技纯黑底板 + 单层居中原画，纯净无重影\n• 双层毛玻璃：全屏拉伸高斯模糊底层 + 居中清晰原画")
+        self.cmb_cover_mode.currentIndexChanged.connect(self._refresh_visual_preview)
+
+        cover_row = QHBoxLayout()
+        cover_row.setContentsMargins(0, 0, 0, 0)
+        cover_row.setSpacing(6)
+        cover_row.addWidget(self.txt_cover_path, 1)
+        cover_row.addWidget(btn_browse_cover)
+        cover_row.addWidget(self.cmb_cover_mode)
+
+        # 背景音乐（从原包装板块挪入）
+        self.txt_bgm_path = QLineEdit()
+        self.txt_bgm_path.setPlaceholderText("留空则不添加背景音乐 (纯净人声)...")
+        self.txt_bgm_path.textChanged.connect(self._on_bgm_text_changed)
+        btn_browse_bgm = QPushButton("选择音乐...")
+        btn_browse_bgm.clicked.connect(self._on_browse_bgm)
+
+        bgm_row = QHBoxLayout()
+        bgm_row.setContentsMargins(0, 0, 0, 0)
+        bgm_row.setSpacing(6)
+        bgm_row.addWidget(self.txt_bgm_path, 1)
+        bgm_row.addWidget(btn_browse_bgm, 0)
+
+        # 组装第一板块网格
         lbl_book_file = QLabel("书籍文件:")
         lbl_book_file.setFixedWidth(68)
         g_layout.addWidget(lbl_book_file, 0, 0)
-        g_layout.addLayout(book_row, 0, 1, 1, 2)
+        g_layout.addLayout(book_row, 0, 1, 1, 3)
 
         lbl_book_title = QLabel("书籍名称:")
         lbl_book_title.setFixedWidth(68)
         g_layout.addWidget(lbl_book_title, 1, 0)
-        g_layout.addWidget(self.txt_book_title, 1, 1, 1, 2)
+        g_layout.addWidget(self.txt_book_title, 1, 1, 1, 3)
 
         lbl_start_page = QLabel("正文起始页:")
         lbl_start_page.setFixedWidth(68)
         g_layout.addWidget(lbl_start_page, 2, 0)
-        g_layout.addWidget(self.spn_start_page, 2, 1, 1, 2)
+        g_layout.addWidget(self.spn_start_page, 2, 1, 1, 3)
+
+        lbl_main_title = QLabel("视频主标题:")
+        lbl_main_title.setFixedWidth(68)
+        g_layout.addWidget(lbl_main_title, 3, 0)
+        g_layout.addWidget(self.txt_main_title, 3, 1, 1, 3)
+
+        lbl_v_layout = QLabel("视频版式:")
+        lbl_v_layout.setFixedWidth(68)
+        g_layout.addWidget(lbl_v_layout, 4, 0)
+        g_layout.addWidget(self.cmb_video_layout, 4, 1, 1, 3)
+
+        lbl_cover_img = QLabel("封面图片:")
+        lbl_cover_img.setFixedWidth(68)
+        g_layout.addWidget(lbl_cover_img, 5, 0)
+        g_layout.addLayout(cover_row, 5, 1, 1, 3)
+
+        lbl_bgm_title = QLabel("背景音乐:")
+        lbl_bgm_title.setFixedWidth(68)
+        g_layout.addWidget(lbl_bgm_title, 6, 0)
+        g_layout.addLayout(bgm_row, 6, 1, 1, 3)
 
         layout.addWidget(grp_book)
 
@@ -1069,9 +1136,6 @@ class MainWindow(QMainWindow):
         lbl_skip_en.setFixedWidth(60)
         lbl_skip_en.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
 
-        # 【为什么这样设计】
-        # 响应用户需求：取消复选框形式，改为下拉选择，且默认选中“是”。
-        # 与朗读语速在同一行并列对称，结构完全呼应下方单集时长与最小间隔。
         self.cmb_skip_english = QComboBox()
         self.cmb_skip_english.addItems(["是", "否"])
         self.cmb_skip_english.setCurrentIndex(0)  # 默认选中“是”
@@ -1100,163 +1164,149 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(grp_voice)
 
-        # 分组 3: 视频版式与包装素材
-        grp_video = QGroupBox("【视频版式与包装素材】")
-        m_layout = QGridLayout(grp_video)
+        # 分组 3: 执行方式（原视频版式与包装素材板块重构为纯粹的调度与硬件执行控制台）
+        grp_exec = QGroupBox("【执行方式】")
+        m_layout = QGridLayout(grp_exec)
         m_layout.setSpacing(8)
-        # 统一 4 列网格比例，与上方 TTS 引擎配置完全一致
         m_layout.setColumnStretch(0, 0)
         m_layout.setColumnStretch(1, 1)
         m_layout.setColumnStretch(2, 0)
         m_layout.setColumnStretch(3, 1)
 
-        self.cmb_video_layout = QComboBox()
-        self.cmb_video_layout.addItems(["竖屏 9:16 (1080x1920, 手机/短视频流)", "横屏 16:9 (1920x1080, 电脑/B站/宽屏)"])
-        self.cmb_video_layout.currentIndexChanged.connect(self._refresh_visual_preview)
-
-        # 响应用户需求：在单集时长上加入分集模式选项，文案规范化去除'切割'字样
+        # 响应用户需求：按自然章节改为第一推荐项
         self.cmb_split_mode = QComboBox()
-        self.cmb_split_mode.addItems(["按时长 (推荐) (最小分割单元为章节的时长)", "按自然章节 (一章一集)"])
+        self.cmb_split_mode.addItems(["按自然章节 (推荐) (一章一集)", "按固定时长 (最小分割单元为章节的时长)"])
         self.cmb_split_mode.setToolTip(
-            "单集规划逻辑：\n"
-            "• 按时长 (推荐)：按设定的时长预算贪心聚合章节，最小分割单元为章节，尾部残余自动合并；\n"
-            "• 按自然章节：原生 1:1 映射书籍章节，一章一集，无需限定单集时长。"
+            "分集规划逻辑：\n"
+            "• 按自然章节 (推荐)：原生 1:1 映射书籍目录，一章一集，支持指定起始与结束章节范围；\n"
+            "• 按固定时长：按设定的目标时长预算聚合章节，尾部残余自动合并。"
         )
         self.cmb_split_mode.currentIndexChanged.connect(self._on_split_mode_changed)
 
+        lbl_split_mode = QLabel("分集模式:")
+        lbl_split_mode.setFixedWidth(68)
+        m_layout.addWidget(lbl_split_mode, 0, 0)
+        m_layout.addWidget(self.cmb_split_mode, 0, 1, 1, 3)
+
+        # 行 1 (自然章节模式): 指定章节范围 (起始至结束)
+        self.lbl_target_chapter = QLabel("指定章节:")
+        self.lbl_target_chapter.setFixedWidth(68)
+
+        self.spn_start_chapter = QSpinBox()
+        self.spn_start_chapter.setRange(1, 9999)
+        self.spn_start_chapter.setValue(1)
+        self.spn_start_chapter.setPrefix("第 ")
+        self.spn_start_chapter.setSuffix(" 章")
+        self.spn_start_chapter.setToolTip("制作起始章节序号（1 至 9999）")
+        self.spn_start_chapter.valueChanged.connect(self._on_start_chapter_changed)
+
+        self.lbl_chapter_to = QLabel("至")
+        self.lbl_chapter_to.setAlignment(Qt.AlignCenter)
+        self.lbl_chapter_to.setFixedWidth(24)
+
+        self.spn_end_chapter = QSpinBox()
+        self.spn_end_chapter.setRange(1, 9999)
+        self.spn_end_chapter.setValue(1)
+        self.spn_end_chapter.setPrefix("第 ")
+        self.spn_end_chapter.setSuffix(" 章")
+        self.spn_end_chapter.setToolTip("制作结束章节序号（1 至 9999，如 1 至 5 或 5 至 5）")
+        self.spn_end_chapter.valueChanged.connect(self._on_end_chapter_changed)
+
+        self.ch_range_layout = QHBoxLayout()
+        self.ch_range_layout.setContentsMargins(0, 0, 0, 0)
+        self.ch_range_layout.setSpacing(6)
+        self.ch_range_layout.addWidget(self.spn_start_chapter, 1)
+        self.ch_range_layout.addWidget(self.lbl_chapter_to, 0)
+        self.ch_range_layout.addWidget(self.spn_end_chapter, 1)
+
+        m_layout.addWidget(self.lbl_target_chapter, 1, 0)
+        m_layout.addLayout(self.ch_range_layout, 1, 1, 1, 3)
+
+        # 行 1 (固定时长模式): 单集时长与最小间隔（互斥显示，默认隐藏）
+        self.lbl_target_dur = QLabel("单集时长:")
+        self.lbl_target_dur.setFixedWidth(68)
         self.spn_target_duration = QSpinBox()
         self.spn_target_duration.setRange(1, 120)
         self.spn_target_duration.setValue(15)
         self.spn_target_duration.setSuffix(" 分钟")
-        self.spn_target_duration.setToolTip("单集目标时长：支持 1~120 分钟自由设定，满足短视频（1分钟切片）或长篇听书（15~30分钟）")
+        self.spn_target_duration.setToolTip("单集目标时长：支持 1 至 120 分钟自由设定")
 
+        self.lbl_min_intv = QLabel("最小间隔:")
+        self.lbl_min_intv.setFixedWidth(60)
+        self.lbl_min_intv.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         self.spn_min_interval = QDoubleSpinBox()
         self.spn_min_interval.setRange(0.5, 10.0)
         self.spn_min_interval.setSingleStep(0.5)
         self.spn_min_interval.setValue(3.0)
         self.spn_min_interval.setSuffix(" 分钟")
-        self.spn_min_interval.setToolTip("两集合并最小阈值：若尾部残余内容不足此阈值，自动合并到最后一集（支持 0.5~10 分钟）")
+        self.spn_min_interval.setToolTip("两集合并最小阈值：若尾部残余内容不足此阈值，自动合并到最后一集")
 
-        # 【为什么这样设计】
-        # 响应用户需求 5：“运行方式中，仅生成下一集、全书连续生成、限时生成，其中限时生成没有输入限时时间的入口”。
-        # 在运行方式同行右侧放置时间输入框 spn_limit_minutes，默认 60 分钟，仅在限时生成模式下亮起激活。
-        self.cmb_run_mode = QComboBox()
-        self.cmb_run_mode.addItems([
-            "仅生成一次",
-            "全书连续生成 (全部章节连续生产)",
-            "限时生成 (生产指定时长后自动休眠)"
-        ])
-        self.cmb_run_mode.setToolTip("选择生产调度策略：仅生成一次、全书连续批量或限时运行自动休眠")
-        self.cmb_run_mode.currentIndexChanged.connect(self._on_run_mode_changed)
+        self.dur_range_layout = QHBoxLayout()
+        self.dur_range_layout.setContentsMargins(0, 0, 0, 0)
+        self.dur_range_layout.setSpacing(6)
+        self.dur_range_layout.addWidget(self.spn_target_duration, 1)
+        self.dur_range_layout.addWidget(self.lbl_min_intv, 0)
+        self.dur_range_layout.addWidget(self.spn_min_interval, 1)
 
-        self.spn_limit_minutes = QSpinBox()
-        self.spn_limit_minutes.setRange(5, 1440)
-        self.spn_limit_minutes.setSingleStep(10)
-        self.spn_limit_minutes.setValue(60)
-        self.spn_limit_minutes.setSuffix(" 分钟")
-        self.spn_limit_minutes.setToolTip("限时生成运行阈值：累计运行达到设定时长后，自动保存断点并休眠停机")
-        self.spn_limit_minutes.setVisible(False)
-        self.spn_limit_minutes.setEnabled(False)
+        m_layout.addWidget(self.lbl_target_dur, 1, 0)
+        m_layout.addLayout(self.dur_range_layout, 1, 1, 1, 3)
+        self.lbl_target_dur.setVisible(False)
+        self.spn_target_duration.setVisible(False)
+        self.lbl_min_intv.setVisible(False)
+        self.spn_min_interval.setVisible(False)
 
-        run_mode_layout = QHBoxLayout()
-        run_mode_layout.setContentsMargins(0, 0, 0, 0)
-        run_mode_layout.setSpacing(6)
-        run_mode_layout.addWidget(self.cmb_run_mode, 1)
-        run_mode_layout.addWidget(self.spn_limit_minutes, 0)
+        # 行 2: GPU温控配置（严格遵循用户指定的标题格式与使能开关）
+        lbl_gpu_ctrl = QLabel("GPU温控:")
+        lbl_gpu_ctrl.setFixedWidth(68)
 
-        self.txt_cover_path = QLineEdit()
-        self.txt_cover_path.setPlaceholderText("留空则使用默认极简书影...")
-        self.txt_cover_path.textChanged.connect(self._refresh_visual_preview)
-        btn_browse_cover = QPushButton("选择封面...")
-        btn_browse_cover.clicked.connect(self._on_browse_cover)
+        gpu_layout = QHBoxLayout()
+        gpu_layout.setContentsMargins(0, 0, 0, 0)
+        gpu_layout.setSpacing(6)
 
-        self.cmb_cover_mode = QComboBox()
-        self.cmb_cover_mode.addItems(["单层极简", "双层毛玻璃"])
-        self.cmb_cover_mode.setToolTip("封面呈现模式切换：\n• 单层极简：科技纯黑底板 + 单层居中原画，纯净无重影\n• 双层毛玻璃：全屏拉伸高斯模糊底层 + 居中清晰原画")
-        self.cmb_cover_mode.currentIndexChanged.connect(self._refresh_visual_preview)
+        self.chk_gpu_enable = QCheckBox("开启")
+        self.chk_gpu_enable.setChecked(False)
+        self.chk_gpu_enable.setToolTip("开启/关闭 GPU 硬件温控保护策略（默认关闭，开启后才执行温控）")
+        self.chk_gpu_enable.toggled.connect(self._on_gpu_protect_toggled)
 
-        cover_row = QHBoxLayout()
-        cover_row.setContentsMargins(0, 0, 0, 0)
-        cover_row.setSpacing(6)
-        cover_row.addWidget(self.txt_cover_path, 1)
-        cover_row.addWidget(btn_browse_cover)
-        cover_row.addWidget(self.cmb_cover_mode)
+        self.lbl_gpu_temp_limit = QLabel("温控上限:")
+        self.spn_gpu_temp_limit = QSpinBox()
+        self.spn_gpu_temp_limit.setRange(75, 80)
+        self.spn_gpu_temp_limit.setValue(75)
+        self.spn_gpu_temp_limit.setSuffix(" °C")
+        self.spn_gpu_temp_limit.setToolTip("触发安全挂起的 GPU 核心温度上限（75 至 80°C）")
+        self.spn_gpu_temp_limit.setEnabled(False)
+        self.lbl_gpu_temp_limit.setEnabled(False)
 
-        self.txt_bgm_path = QLineEdit()
-        self.txt_bgm_path.setPlaceholderText("留空则不添加背景音乐 (纯净人声)...")
-        self.txt_bgm_path.textChanged.connect(self._on_bgm_text_changed)
-        btn_browse_bgm = QPushButton("选择音乐...")
-        btn_browse_bgm.clicked.connect(self._on_browse_bgm)
+        self.lbl_gpu_temp_resume = QLabel("复工温度:")
+        self.spn_gpu_temp_resume = QSpinBox()
+        self.spn_gpu_temp_resume.setRange(55, 65)
+        self.spn_gpu_temp_resume.setValue(60)
+        self.spn_gpu_temp_resume.setSuffix(" °C")
+        self.spn_gpu_temp_resume.setToolTip("冷却完成后允许恢复生产的 GPU 温度下限（55 至 65°C）")
+        self.spn_gpu_temp_resume.setEnabled(False)
+        self.lbl_gpu_temp_resume.setEnabled(False)
 
-        bgm_row = QHBoxLayout()
-        bgm_row.setContentsMargins(0, 0, 0, 0)
-        bgm_row.setSpacing(6)
-        bgm_row.addWidget(self.txt_bgm_path, 1)
-        bgm_row.addWidget(btn_browse_bgm, 0)
+        self.lbl_gpu_cooling_min = QLabel("最小冷却时间:")
+        self.spn_gpu_cooling_minutes = QSpinBox()
+        self.spn_gpu_cooling_minutes.setRange(1, 60)
+        self.spn_gpu_cooling_minutes.setValue(1)
+        self.spn_gpu_cooling_minutes.setSuffix(" 分钟")
+        self.spn_gpu_cooling_minutes.setToolTip("进入温控休眠后的最小强制冷却时长（1 至 60 分钟）")
+        self.spn_gpu_cooling_minutes.setEnabled(False)
+        self.lbl_gpu_cooling_min.setEnabled(False)
 
-        self.txt_main_title = QLineEdit()
-        self.txt_main_title.setPlaceholderText("例如: 《巴菲特致股东的信》精选")
-        self.txt_main_title.textChanged.connect(self._refresh_visual_preview)
+        gpu_layout.addWidget(self.chk_gpu_enable, 0)
+        gpu_layout.addWidget(self.lbl_gpu_temp_limit, 0)
+        gpu_layout.addWidget(self.spn_gpu_temp_limit, 1)
+        gpu_layout.addWidget(self.lbl_gpu_temp_resume, 0)
+        gpu_layout.addWidget(self.spn_gpu_temp_resume, 1)
+        gpu_layout.addWidget(self.lbl_gpu_cooling_min, 0)
+        gpu_layout.addWidget(self.spn_gpu_cooling_minutes, 1)
 
-        lbl_v_layout = QLabel("视频版式:")
-        lbl_v_layout.setFixedWidth(68)
-        m_layout.addWidget(lbl_v_layout, 0, 0)
-        m_layout.addWidget(self.cmb_video_layout, 0, 1, 1, 3)
+        m_layout.addWidget(lbl_gpu_ctrl, 2, 0)
+        m_layout.addLayout(gpu_layout, 2, 1, 1, 3)
 
-        lbl_split_mode = QLabel("分集模式:")
-        lbl_split_mode.setFixedWidth(68)
-        m_layout.addWidget(lbl_split_mode, 1, 0)
-        m_layout.addWidget(self.cmb_split_mode, 1, 1, 1, 3)
-
-        self.lbl_target_dur = QLabel("单集时长:")
-        self.lbl_target_dur.setFixedWidth(68)
-        self.lbl_min_intv = QLabel("最小间隔:")
-        self.lbl_min_intv.setFixedWidth(60)
-        self.lbl_min_intv.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-
-        # 响应用户需求：按自然章节（一章一集）选中时，显示第几章，支持上下箭头微调
-        self.lbl_target_chapter = QLabel("指定章节:")
-        self.lbl_target_chapter.setFixedWidth(68)
-        self.spn_target_chapter = QSpinBox()
-        self.spn_target_chapter.setRange(1, 9999)
-        self.spn_target_chapter.setValue(1)
-        self.spn_target_chapter.setPrefix("第 ")
-        self.spn_target_chapter.setSuffix(" 章")
-        self.spn_target_chapter.setToolTip("选择或输入制作的具体自然章节序号（1~9999，支持上下箭头快速微调）")
-        self.spn_target_chapter.valueChanged.connect(lambda _: self._refresh_visual_preview())
-        self.lbl_target_chapter.setVisible(False)
-        self.spn_target_chapter.setVisible(False)
-
-        # 默认行 2 网格：按时长模式控件
-        m_layout.addWidget(self.lbl_target_dur, 2, 0)
-        m_layout.addWidget(self.spn_target_duration, 2, 1)
-        m_layout.addWidget(self.lbl_min_intv, 2, 2)
-        m_layout.addWidget(self.spn_min_interval, 2, 3)
-        # 自然章节模式控件（重叠在同一行，动态互斥显示）
-        m_layout.addWidget(self.lbl_target_chapter, 2, 0)
-        m_layout.addWidget(self.spn_target_chapter, 2, 1, 1, 3)
-
-        lbl_run_mode = QLabel("运行方式:")
-        lbl_run_mode.setFixedWidth(68)
-        m_layout.addWidget(lbl_run_mode, 3, 0)
-        m_layout.addLayout(run_mode_layout, 3, 1, 1, 3)
-
-        lbl_cover_img = QLabel("封面图片:")
-        lbl_cover_img.setFixedWidth(68)
-        m_layout.addWidget(lbl_cover_img, 4, 0)
-        m_layout.addLayout(cover_row, 4, 1, 1, 3)
-
-        lbl_bgm_title = QLabel("背景音乐:")
-        lbl_bgm_title.setFixedWidth(68)
-        m_layout.addWidget(lbl_bgm_title, 5, 0)
-        m_layout.addLayout(bgm_row, 5, 1, 1, 3)
-
-        lbl_main_title = QLabel("视频主标题:")
-        lbl_main_title.setFixedWidth(68)
-        m_layout.addWidget(lbl_main_title, 6, 0)
-        m_layout.addWidget(self.txt_main_title, 6, 1, 1, 3)
-
-        layout.addWidget(grp_video)
+        layout.addWidget(grp_exec)
 
         # 【为什么这样设计】
         # 响应用户需求 1：“输出目录要缩到左侧栏目下，省出的空间由 生产计划全景的框向下拉 并与左框对齐下沿”。
@@ -1902,13 +1952,35 @@ class MainWindow(QMainWindow):
                 except Exception as e:
                     logger.warning(f"自动提取 PDF 封面失败: {e}")
 
+    def _on_start_chapter_changed(self, val: int) -> None:
+        """起始章节调整：确保结束章节不倒挂，并刷新视觉预览"""
+        if hasattr(self, 'spn_end_chapter') and self.spn_end_chapter.value() < val:
+            self.spn_end_chapter.setValue(val)
+        if hasattr(self, '_refresh_visual_preview'):
+            self._refresh_visual_preview()
+
+    def _on_end_chapter_changed(self, val: int) -> None:
+        """结束章节调整：确保起始章节不倒挂"""
+        if hasattr(self, 'spn_start_chapter') and self.spn_start_chapter.value() > val:
+            self.spn_start_chapter.setValue(val)
+
+    def _on_gpu_protect_toggled(self, checked: bool) -> None:
+        """GPU 温控使能切换：开启时激活微调框，关闭时置灰不可用"""
+        for w in (getattr(self, 'lbl_gpu_temp_limit', None),
+                  getattr(self, 'spn_gpu_temp_limit', None),
+                  getattr(self, 'lbl_gpu_temp_resume', None),
+                  getattr(self, 'spn_gpu_temp_resume', None),
+                  getattr(self, 'lbl_gpu_cooling_min', None),
+                  getattr(self, 'spn_gpu_cooling_minutes', None)):
+            if w is not None:
+                w.setEnabled(checked)
+
     def _on_split_mode_changed(self, idx: int = 0) -> None:
         """
         分集模式联动处理。
         【为什么这样设计】
-        响应用户需求：按自然章节（一章一集）选中时，下方的选项单集时长和最小间隔时间都要隐藏，
-        改为显示“指定章节: 第 [ 1 ▲▼ ] 章”，使用户明确指向具体章节开始制作；
-        当切回按时长模式时，恢复显示单集时长和最小间隔，隐藏指定章节。
+        - 选【按自然章节 (推荐)】时：显示指定章节起始与结束范围（如 1 至 5 或 5 至 5），隐藏单集时长与最小间隔；
+        - 选【按固定时长】时：恢复显示单集时长和最小间隔，隐藏指定章节范围。
         """
         if hasattr(self, 'cmb_split_mode'):
             is_by_duration = "时长" in self.cmb_split_mode.currentText()
@@ -1921,9 +1993,11 @@ class MainWindow(QMainWindow):
                     w.setVisible(is_by_duration)
                     w.setEnabled(is_by_duration)
 
-            # 自然章节“指定第几章”项的显示/隐藏与可用性
+            # 自然章节“指定章节范围”项的显示/隐藏与可用性
             for w in (getattr(self, 'lbl_target_chapter', None),
-                      getattr(self, 'spn_target_chapter', None)):
+                      getattr(self, 'spn_start_chapter', None),
+                      getattr(self, 'lbl_chapter_to', None),
+                      getattr(self, 'spn_end_chapter', None)):
                 if w is not None:
                     w.setVisible(not is_by_duration)
                     w.setEnabled(not is_by_duration)
@@ -1931,18 +2005,6 @@ class MainWindow(QMainWindow):
             # 切换分集模式时即刻刷新视觉预览副标题
             if hasattr(self, '_refresh_visual_preview'):
                 self._refresh_visual_preview()
-
-    def _on_run_mode_changed(self, idx: int = 0) -> None:
-        """
-        运行方式联动处理。
-        【设计规范】：
-        - 当选择“限时生成”时，限时分钟微调框显示 (setVisible(True)) 并激活可用；
-        - 其他模式（仅生成下一集、全书连续生成）时，彻底隐藏 (setVisible(False))。
-        """
-        if hasattr(self, 'cmb_run_mode') and hasattr(self, 'spn_limit_minutes'):
-            is_limit = "限时" in self.cmb_run_mode.currentText()
-            self.spn_limit_minutes.setVisible(is_limit)
-            self.spn_limit_minutes.setEnabled(is_limit)
 
     def _on_browse_cover(self) -> None:
         file_path, _ = QFileDialog.getOpenFileName(self, "选择封面图像", "", "Images (*.jpg *.jpeg *.png *.webp)")
@@ -2303,7 +2365,8 @@ class MainWindow(QMainWindow):
                     #   * 未执行生产计划时：显示模板 “第01集 · 正文精选”；
                     #   * 已执行生产计划时：展示第 1 集的真实规划信息。
                     is_by_chapter = hasattr(self, 'cmb_split_mode') and "自然章节" in self.cmb_split_mode.currentText()
-                    target_ch = self.spn_target_chapter.value() if hasattr(self, 'spn_target_chapter') else 1
+                    # 【方案 A】：首章预览 + 动态联动。预览以选定范围的起始章节为基准动态呈现副标题
+                    target_ch = self.spn_start_chapter.value() if hasattr(self, 'spn_start_chapter') else 1
 
                     preview_sub = ""
                     if is_by_chapter:
@@ -2363,14 +2426,16 @@ class MainWindow(QMainWindow):
     def _get_current_config(self) -> Dict[str, Any]:
         """获取当前界面的全部配置参数"""
         layout_name = "landscape_16_9" if "16:9" in self.cmb_video_layout.currentText() else "portrait_9_16"
-        run_mode = "RUN_NEXT_EPISODE"
-        if "全书连续" in self.cmb_run_mode.currentText():
-            run_mode = "RUN_FULL_BOOK"
-        elif "限时" in self.cmb_run_mode.currentText():
-            run_mode = "RUN_DURATION_LIMIT"
 
         # 【新需求 4】CFG 引导从 config.yaml 静默读取，无需界面配置
         default_cfg_strength = float(config.get("tts.f5.cfg_strength", 2.0))
+
+        start_ch = int(self.spn_start_chapter.value()) if hasattr(self, 'spn_start_chapter') else 1
+        end_ch = int(self.spn_end_chapter.value()) if hasattr(self, 'spn_end_chapter') else 1
+        gpu_protect_enabled = bool(self.chk_gpu_enable.isChecked()) if hasattr(self, 'chk_gpu_enable') else False
+        gpu_temp_limit = int(self.spn_gpu_temp_limit.value()) if hasattr(self, 'spn_gpu_temp_limit') else 75
+        gpu_temp_resume = int(self.spn_gpu_temp_resume.value()) if hasattr(self, 'spn_gpu_temp_resume') else 60
+        gpu_cooling_minutes = int(self.spn_gpu_cooling_minutes.value()) if hasattr(self, 'spn_gpu_cooling_minutes') else 1
 
         return {
             "book_path": self.txt_book_path.text().strip(),
@@ -2381,9 +2446,12 @@ class MainWindow(QMainWindow):
             "split_mode": "by_chapter" if hasattr(self, 'cmb_split_mode') and "自然章节" in self.cmb_split_mode.currentText() else "by_duration",
             "target_duration_mins": float(self.spn_target_duration.value()),
             "min_interval_mins": float(self.spn_min_interval.value()),
-            "target_chapter": int(self.spn_target_chapter.value()) if hasattr(self, 'spn_target_chapter') else 1,
-            "run_mode": run_mode,
-            "limit_duration_mins": float(self.spn_limit_minutes.value()) if hasattr(self, 'spn_limit_minutes') else 60.0,
+            "start_chapter": start_ch,
+            "end_chapter": end_ch,
+            "gpu_protect_enabled": gpu_protect_enabled,
+            "gpu_temp_limit": gpu_temp_limit,
+            "gpu_temp_resume": gpu_temp_resume,
+            "gpu_cooling_minutes": gpu_cooling_minutes,
             "cover_path": self.txt_cover_path.text().strip(),
             "bgm_path": self.txt_bgm_path.text().strip(),
             "main_title": self.txt_main_title.text().strip(),
@@ -2469,9 +2537,12 @@ class MainWindow(QMainWindow):
             getattr(self, 'cmb_split_mode', None),
             getattr(self, 'spn_target_duration', None),
             getattr(self, 'spn_min_interval', None),
-            getattr(self, 'spn_target_chapter', None),
-            getattr(self, 'cmb_run_mode', None),
-            getattr(self, 'spn_limit_minutes', None),
+            getattr(self, 'spn_start_chapter', None),
+            getattr(self, 'spn_end_chapter', None),
+            getattr(self, 'chk_gpu_enable', None),
+            getattr(self, 'spn_gpu_temp_limit', None),
+            getattr(self, 'spn_gpu_temp_resume', None),
+            getattr(self, 'spn_gpu_cooling_minutes', None),
             getattr(self, 'txt_cover_path', None),
             getattr(self, 'btn_browse_cover', None),
             getattr(self, 'cmb_cover_mode', None),
@@ -2490,8 +2561,8 @@ class MainWindow(QMainWindow):
         if enabled:
             if hasattr(self, '_on_split_mode_changed'):
                 self._on_split_mode_changed()
-            if hasattr(self, '_on_run_mode_changed'):
-                self._on_run_mode_changed()
+            if hasattr(self, '_on_gpu_protect_toggled') and hasattr(self, 'chk_gpu_enable'):
+                self._on_gpu_protect_toggled(self.chk_gpu_enable.isChecked())
             if hasattr(self, '_on_bgm_text_changed') and hasattr(self, 'txt_bgm_path'):
                 self._on_bgm_text_changed(self.txt_bgm_path.text())
 
@@ -2584,6 +2655,7 @@ class MainWindow(QMainWindow):
             "AUDIO_MIXING": ("🟢", "【7/8】正在进行人声与背景音乐侧链混音 (AUDIO_MIXING)"),
             "VIDEO_RENDERING": ("🟢", "【7/8】正在进行 GPU 加速视频压制 (VIDEO_RENDERING)"),
             "COMPLETED": ("🎉", "【8/8】生产完成！全部视频与音频已就绪 (COMPLETED)"),
+            "COOLING": ("❄️", "【GPU温控保护中】核心温度超标，正在冷却休眠 (COOLING)..."),
             "PAUSING": ("🟠", "【安全暂停中】等待当前切片落盘后停机 (PAUSING)..."),
             "PAUSED": ("⏸️", "任务已安全暂停 (PAUSED)，支持随时断点续跑"),
             "FAILED": ("🔴", "生产任务异常终止 (FAILED)")
@@ -2597,7 +2669,10 @@ class MainWindow(QMainWindow):
         else:
             self._timer_breathing.stop()
             self.lbl_status_led.setText(icon)
-            self.lbl_status_led.setStyleSheet("font-size: 14px;")
+            if status == "COOLING":
+                self.lbl_status_led.setStyleSheet("font-size: 16px; color: #00E5FF; font-weight: bold;")
+            else:
+                self.lbl_status_led.setStyleSheet("font-size: 14px;")
 
         self.lbl_status.setText(desc)
         self.lbl_status.setToolTip(desc)
