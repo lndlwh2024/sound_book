@@ -243,7 +243,6 @@ class ResourceMonitorBar(QFrame):
         layout.addWidget(icon_lbl)
 
         self.lbl_cpu = QLabel("CPU: --%")
-        self.lbl_cpu_temp = QLabel("CPU温度: --°C")
         self.lbl_mem = QLabel("内存: --/-- GB (--%)")
         self.lbl_cuda_status = QLabel("CUDA: --")
         self.lbl_gpu_load = QLabel("GPU: --%")
@@ -251,7 +250,6 @@ class ResourceMonitorBar(QFrame):
         self.lbl_gpu_mem = QLabel("显存: --/-- GB (--%)")
 
         layout.addWidget(self.lbl_cpu)
-        layout.addWidget(self.lbl_cpu_temp)
         layout.addWidget(self.lbl_mem)
         layout.addWidget(self.lbl_cuda_status)
         layout.addWidget(self.lbl_gpu_load)
@@ -326,21 +324,6 @@ class ResourceMonitorBar(QFrame):
 
         c_color = "#FF6B6B" if cpu_pct > 85 else ("#FFD93D" if cpu_pct > 60 else "#70DB93")
         self.lbl_cpu.setText(f'CPU: <span style="color:{c_color}; font-weight:bold;">{cpu_pct:.1f}%</span>')
-
-        # CPU 温度探测 (尝试 WMI 查询)
-        try:
-            if not hasattr(self, '_wmi_client'):
-                import wmi
-                self._wmi_client = wmi.WMI(namespace="root\\wmi")
-            if self._wmi_client:
-                tzs = self._wmi_client.MSAcpi_ThermalZoneTemperature()
-                if tzs:
-                    ct_c = int(tzs[0].CurrentTemperature / 10.0 - 273.15)
-                    if 0 < ct_c < 120:
-                        ct_col = "#FF6B6B" if ct_c > 80 else "#70DB93"
-                        self.lbl_cpu_temp.setText(f'CPU温度: <span style="color:{ct_col};">{ct_c}°C</span>')
-        except Exception:
-            pass
 
         # 2. 内存 (RAM)
         try:
@@ -1427,16 +1410,18 @@ class MainWindow(QMainWindow):
         self.pipeline_flow = PipelineFlowWidget()
         layout.addWidget(self.pipeline_flow)
 
-        # ── 第 3 层：硬件负载实时监控条 与 全局任务进度条（76:24 并列） ──
+        # ── 第 3 层：硬件负载实时监控条 与 全局任务进度条（紧凑包裹 + 进度条充分舒展） ──
         bottom_monitor_layout = QHBoxLayout()
         bottom_monitor_layout.setSpacing(12)
 
-        # 左侧：硬件监控条 (76% 占比，宽敞容纳 7 项监控指标)
+        # 左侧：硬件监控条 (自适应紧凑包裹 6 项核心指标，右侧绝无闲置空白)
         self.resource_monitor_bar = ResourceMonitorBar()
-        bottom_monitor_layout.addWidget(self.resource_monitor_bar, 76)
+        self.resource_monitor_bar.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Preferred)
+        bottom_monitor_layout.addWidget(self.resource_monitor_bar, 0)
 
-        # 右侧：进度条与本次任务执行耗时指示 (24% 占比，适度收拢)
+        # 右侧：进度条与本次任务执行耗时指示 (Expanding 充分延展，饱满修长)
         prog_widget = QWidget()
+        prog_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         prog_layout = QHBoxLayout(prog_widget)
         prog_layout.setContentsMargins(0, 0, 0, 0)
         prog_layout.setSpacing(8)
