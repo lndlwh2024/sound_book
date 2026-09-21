@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QLabel, QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox, QSlider, QPushButton,
     QProgressBar, QFileDialog, QMessageBox, QGroupBox, QScrollArea,
-    QFrame, QTextEdit, QTabWidget, QDialog, QCheckBox, QSizePolicy
+    QFrame, QTextEdit, QTabWidget, QDialog, QCheckBox, QSizePolicy, QApplication
 )
 from PySide6.QtCore import Qt, QSize, QTimer, Signal, QObject, QPointF
 from PySide6.QtGui import QPixmap, QFont, QIcon, QPainter, QColor, QPolygonF, QFontMetrics
@@ -64,7 +64,7 @@ class AzureConfigDialog(QDialog):
         self.setStyleSheet("""
             QDialog { background-color: #202028; border: 1px solid #444455; border-radius: 6px; }
             QLabel { color: #DDDDDD; font-size: 12px; }
-            QLineEdit { background-color: #16161C; border: 1px solid #444455; border-radius: 4px; padding: 6px 10px; color: #FFFFFF; font-size: 12px; }
+            QLineEdit { background-color: #16161C; border: 1px solid #444455; border-radius: 4px; padding: 3px 8px; min-height: 28px; color: #FFFFFF; font-size: 12px; }
             QLineEdit:focus { border: 1px solid #007ACC; }
             QPushButton { background-color: #2E5B88; border-radius: 4px; padding: 7px 16px; color: #FFFFFF; font-weight: bold; }
             QPushButton:hover { background-color: #3A73AA; }
@@ -502,8 +502,16 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.bridge = bridge or TaskManagerBridge()
         self.setWindowTitle("书声 (ShuSheng) v2.0 - 自动化有声视频生产工具")
-        self.resize(1280, 880)
-        self.setMinimumSize(1100, 760)
+        # 【自适应屏幕工作区】检测当前主显示器可用区域，确保默认打开时窗口舒展且绝不被 Windows 任务栏挤压
+        screen = QApplication.primaryScreen()
+        if screen:
+            avail = screen.availableGeometry()
+            init_w = max(1120, min(1360, int(avail.width() * 0.90)))
+            init_h = max(740, min(900, int(avail.height() * 0.92)))
+            self.resize(init_w, init_h)
+        else:
+            self.resize(1280, 840)
+        self.setMinimumSize(1024, 680)
         # 应用自定义箭头绘制样式，确保 QSpinBox 箭头在所有 Qt 版本下正确渲染三角形
         self._arrow_style = SpinBoxArrowStyle()
         self.setStyle(self._arrow_style)
@@ -566,23 +574,47 @@ class MainWindow(QMainWindow):
                 padding: 0 8px;
                 color: #4DA6FF;
             }
+            /* 【根治文字截断】输入框与下拉框：提供最小高度 28px 保护与 3px 垂直安全内边距，确保各种屏幕缩放下汉字完整展示不被截断 */
             QLineEdit, QComboBox {
                 background-color: #16161C;
                 border: 1px solid #444455;
                 border-radius: 4px;
-                padding: 7px 10px;
+                padding: 3px 8px;
+                min-height: 28px;
                 font-size: 12px;
                 color: #FFFFFF;
             }
             QLineEdit:focus, QComboBox:focus {
                 border: 1px solid #007ACC;
             }
-            /* 【关键修复 - 杜绝微调框上下箭头不可用】采用绝对路径高质量矢量图标渲染 */
+            QComboBox::drop-down {
+                subcontrol-origin: padding;
+                subcontrol-position: top right;
+                width: 24px;
+                border-left: 1px solid #333345;
+                border-top-right-radius: 4px;
+                border-bottom-right-radius: 4px;
+                background-color: #222230;
+            }
+            QComboBox::down-arrow {
+                image: url("@@DN_ICON@@");
+                width: 12px;
+                height: 8px;
+            }
+            QComboBox QAbstractItemView {
+                background-color: #1B1B24;
+                border: 1px solid #444455;
+                selection-background-color: #2E5B88;
+                color: #FFFFFF;
+                padding: 4px;
+            }
+            /* 【根治文字截断】微调框：设置 28px 最小高度，右侧预留箭头按钮宽度，文字上下充分留白 */
             QSpinBox, QDoubleSpinBox {
                 background-color: #16161C;
                 border: 1px solid #444455;
                 border-radius: 4px;
-                padding: 6px 24px 6px 8px;
+                padding: 3px 26px 3px 8px;
+                min-height: 28px;
                 font-size: 12px;
                 color: #FFFFFF;
             }
@@ -593,7 +625,6 @@ class MainWindow(QMainWindow):
                 subcontrol-origin: border;
                 subcontrol-position: top right;
                 width: 24px;
-                height: 16px;
                 border-left: 1px solid #444455;
                 border-bottom: 1px solid #444455;
                 background-color: #252535;
@@ -604,8 +635,8 @@ class MainWindow(QMainWindow):
             }
             QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {
                 image: url("@@UP_ICON@@");
-                width: 14px;
-                height: 10px;
+                width: 12px;
+                height: 8px;
             }
             QSpinBox::up-arrow:hover, QDoubleSpinBox::up-arrow:hover {
                 image: url("@@UP_HOV@@");
@@ -614,7 +645,6 @@ class MainWindow(QMainWindow):
                 subcontrol-origin: border;
                 subcontrol-position: bottom right;
                 width: 24px;
-                height: 16px;
                 border-left: 1px solid #444455;
                 background-color: #252535;
                 border-bottom-right-radius: 4px;
@@ -624,11 +654,34 @@ class MainWindow(QMainWindow):
             }
             QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {
                 image: url("@@DN_ICON@@");
-                width: 14px;
-                height: 10px;
+                width: 12px;
+                height: 8px;
             }
             QSpinBox::down-arrow:hover, QDoubleSpinBox::down-arrow:hover {
                 image: url("@@DN_HOV@@");
+            }
+            /* 自适应滚动容器与深色纤细滚动条 */
+            QScrollArea {
+                border: none;
+                background-color: transparent;
+            }
+            QScrollBar:vertical {
+                border: none;
+                background: #181822;
+                width: 8px;
+                margin: 0px 0px 0px 0px;
+                border-radius: 4px;
+            }
+            QScrollBar::handle:vertical {
+                background: #3A3A4E;
+                min-height: 24px;
+                border-radius: 4px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background: #50506E;
+            }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                height: 0px;
             }
             /* 竖向专业音量滑条样式 */
             QSlider::groove:vertical {
@@ -852,11 +905,19 @@ class MainWindow(QMainWindow):
         main_layout.addWidget(bottom_panel, 3)
 
     def _build_left_config_panel(self) -> QWidget:
-        """构建左侧参数配置区"""
+        """构建左侧参数配置区（包裹在自适应 QScrollArea 中，确保各种屏幕分辨率与缩放比例下表单字体绝不被纵向挤压截断）"""
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setFrameShape(QFrame.NoFrame)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        scroll_area.setStyleSheet("QScrollArea { background-color: transparent; border: none; }")
+
         panel = QWidget()
+        panel.setStyleSheet("QWidget { background-color: transparent; }")
         layout = QVBoxLayout(panel)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(8)
+        layout.setContentsMargins(0, 0, 4, 0)
+        layout.setSpacing(6)
 
         # 分组 1: 书籍与正文
         grp_book = QGroupBox("【电子书源文件与正文设置】")
@@ -1085,7 +1146,8 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(grp_output)
         layout.addStretch()
-        return panel
+        scroll_area.setWidget(panel)
+        return scroll_area
 
     def _build_right_preview_panel(self) -> QWidget:
         """
