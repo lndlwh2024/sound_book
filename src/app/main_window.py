@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-书声 (ShuSheng) v2.0 PySide6 桌面主窗口
+书声 (ShuSheng) v3.0.0 PySide6 桌面主窗口
 遵循 PRD 与详细设计规范：三栏直观布局、非阻塞后台线程隔离、实时封面排版与混音试听预览。
 包含多Sheet生产监控面板、硬件负载实时指示条、任务动态计时器与云端API凭据管理。
 """
@@ -565,12 +565,12 @@ class AudioPlayButton(QPushButton):
 
 
 class MainWindow(QMainWindow):
-    """书声 (ShuSheng) v2.0 PySide6 桌面主窗口"""
+    """书声 (ShuSheng) v3.0.0 PySide6 桌面主窗口"""
 
     def __init__(self, bridge: Optional[TaskManagerBridge] = None):
         super().__init__()
         self.bridge = bridge or TaskManagerBridge()
-        self.setWindowTitle("书声 (ShuSheng) v2.0 - 自动化有声视频生产工具")
+        self.setWindowTitle("书声 (ShuSheng) v3.0.0 - 自动化有声视频生产工具")
         # 【自适应屏幕工作区】检测当前主显示器可用区域，动态计算最佳默认尺寸，保证初始开机与最大化排版一致且完全舒展
         screen = QApplication.primaryScreen()
         if screen:
