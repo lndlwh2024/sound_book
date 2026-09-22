@@ -115,5 +115,35 @@ def test_table_aware_text_extractor_on_real_pdf():
     assert "备注：(1)" not in clean_41
     assert "登普斯特风车制造公司" in clean_41
     
+    # 4. 第 47 页：本身无表格但接收跨页附注传递，断言 had_filtering 正常返回无 NameError
+    p47 = doc[46]
+    clean_47, had_47, _ = TableAwareTextExtractor.extract_clean_page_text(p47, pending_footnote=True)
+    assert had_47 is True
+    
     doc.close()
+
+def test_table_aware_text_extractor_mock_absorbed_extra():
+    """测试 mock 页面无物理表格但触发独立单位声明行吸收时的返回值安全性"""
+    import unittest.mock as mock
+    import pymupdf as fitz
+    from src.parser.pdf_parser import TableAwareTextExtractor
+    
+    mock_page = mock.MagicMock()
+    mock_page.number = 99
+    # 模拟 find_tables 返回空
+    mock_tabs = mock.MagicMock()
+    mock_tabs.tables = []
+    mock_page.find_tables.return_value = mock_tabs
+    
+    # 模拟包含一个独立单位声明短行和一个普通正文行
+    mock_page.get_text.return_value = [
+        (100.0, 750.0, 300.0, 760.0, "（单位：千美金）\n", 0, 0),
+        (100.0, 100.0, 500.0, 200.0, "这是正常的投资分析正文段落。\n", 1, 0)
+    ]
+    
+    clean_text, had_filtering, has_footnote = TableAwareTextExtractor.extract_clean_page_text(mock_page)
+    assert had_filtering is True
+    assert "（单位：千美金）" not in clean_text
+    assert "这是正常的投资分析正文段落。" in clean_text
+
 

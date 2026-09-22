@@ -152,7 +152,10 @@ class TableAwareTextExtractor:
 
         kept_blocks.sort(key=lambda x: (x[1], x[0]))
         clean_text = "\n".join(b[4].strip() for b in kept_blocks if b[4].strip())
-        had_filtering = has_tables or absorbed_cross_page
+        # 【为什么这样设计】
+        # absorbed_extra 统筹覆盖跨页附注吸收与独立单位声明行吸收两类扩展场景，
+        # 与 has_tables 结合准确反映本页是否存在过滤行为，杜绝未定义变量异常。
+        had_filtering = has_tables or absorbed_extra
         return clean_text, had_filtering, has_numbered_footnote
 
 
