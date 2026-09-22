@@ -79,6 +79,17 @@ class TextCleaner:
                     # 规则二：原有局部英文括号过滤 (如 (workouts) -> 移除)
                     stripped = self.en_bracket_pattern.sub('', stripped).strip()
 
+                    # 规则三：行首外文路名/街道/地址精准剥离
+                    # 【为什么这样设计】
+                    # 用户明确指定规则：仅剥离行首纯英文路名与地址（如 "5202 Underwood Ave.内布拉斯加州奥马哈" -> "内布拉斯加州奥马哈"），
+                    # 坚决不加入句首无括号孤立英文词组清洗，彻底杜绝误伤正文合法中文、数字与年份。
+                    stripped = re.sub(
+                        r'^[0-9\s]*[A-Za-z\s,.\'-]+(?:Ave|St|Rd|Blvd|Street|Avenue|Lane|Plaza|Court|Square|Drive|Way|Bldg)\.?\s*',
+                        '',
+                        stripped,
+                        flags=re.IGNORECASE
+                    ).strip()
+
                 pre_filtered_lines.append(stripped)
             
             # 5. 修复换行（此时纯英文行已先行安全剔除，绝无跨行误缝合隐患）

@@ -92,6 +92,13 @@ class SpeechUnitBuilder:
                     continue
                 # 清洗中文中的英文括号注释 (如 (workouts))
                 text = re.sub(r'[\(（]\s*[A-Za-z0-9\s,.\'\"-_/]+\s*[\)）]', '', text).strip()
+                # 规则三：行首外文路名/街道/地址精准剥离
+                text = re.sub(
+                    r'^[0-9\s]*[A-Za-z\s,.\'-]+(?:Ave|St|Rd|Blvd|Street|Avenue|Lane|Plaza|Court|Square|Drive|Way|Bldg)\.?\s*',
+                    '',
+                    text,
+                    flags=re.IGNORECASE
+                ).strip()
                 if not text:
                     continue
 
@@ -102,6 +109,15 @@ class SpeechUnitBuilder:
                     s_has_zh = any('\u4e00' <= ch <= '\u9fff' for ch in s)
                     s_has_alpha = any(ch.isalpha() for ch in s)
                     if not s_has_zh and s_has_alpha:
+                        continue
+                    # 剥离单句句首外文路名
+                    s = re.sub(
+                        r'^[0-9\s]*[A-Za-z\s,.\'-]+(?:Ave|St|Rd|Blvd|Street|Avenue|Lane|Plaza|Court|Square|Drive|Way|Bldg)\.?\s*',
+                        '',
+                        s,
+                        flags=re.IGNORECASE
+                    ).strip()
+                    if not s:
                         continue
 
                 s_len = len(s)

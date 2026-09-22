@@ -449,6 +449,15 @@ class PipelineFlowWidget(QWidget):
         stage_order = [s[0] for s in self.STAGES]
         normalized_stage = "AUDIO_MIXING" if stage == "VIDEO_RENDERING" else stage
 
+        # 【为什么这样设计】
+        # 响应问题一：连续生产多集时，当工序由后面的阶段（例如 6.字幕对齐、7.混音渲染）
+        # 回退到第 5 阶段（TTS_GENERATING 语音合成）时，表明系统已进入新的一集；
+        # 此时前 4 阶段（1.结构解析、2.正文清洗、3.质量校验、4.规划就绪）为全书共享就绪状态，应保持已完成；
+        # 而第 5 至 7 阶段为单集专属生命周期，必须重置为待执行状态，使第 5 阶段重新高亮激活，消除卡在上一集混音渲染的问题！
+        if normalized_stage == "TTS_GENERATING":
+            for ep_stage in ["TTS_GENERATING", "ALIGNING_SUBTITLES", "AUDIO_MIXING", "COMPLETED"]:
+                self.completed_stages.discard(ep_stage)
+
         if normalized_stage in stage_order:
             curr_idx = stage_order.index(normalized_stage)
             for i in range(curr_idx):
@@ -570,7 +579,9 @@ class MainWindow(QMainWindow):
     def __init__(self, bridge: Optional[TaskManagerBridge] = None):
         super().__init__()
         self.bridge = bridge or TaskManagerBridge()
-        self.setWindowTitle("书声 (ShuSheng) v3.0.0 - 自动化有声视频生产工具")
+        self.setWindowTitle("书声 (ShuSheng) v3.0.1 - 自动化有声视频生产工具")
+        self._raw_status_text = "空闲就绪 (IDLE)"
+        self._is_producing = False
         # 【自适应屏幕工作区】检测当前主显示器可用区域，动态计算最佳默认尺寸，保证初始开机与最大化排版一致且完全舒展
         screen = QApplication.primaryScreen()
         if screen:
@@ -2499,12 +2510,12 @@ class MainWindow(QMainWindow):
         if not cfg["book_path"] or not os.path.exists(cfg["book_path"]):
             QMessageBox.warning(self, "提示", "请先选择有效的电子书文件！")
             return
-        self.btn_gen_plan.setEnabled(False)
+        self._is_producing = False
+        self._apply_button_lock_state("PLANNING")
         self.lbl_status_led.setText("●")
         self.lbl_status_led.setStyleSheet("font-size: 16px; color: #FFD93D; font-weight: bold;")
         plan_msg = "正在分析全书章节与生成生产计划 (PLANNING)..."
-        self.lbl_status.setText(plan_msg)
-        self.lbl_status.setToolTip(plan_msg)
+        self._update_status_display(plan_msg)
         self.pipeline_flow.reset_pipeline()
         self.tab_widget.setCurrentIndex(0) # 切换到分集规划 Sheet
         self.bridge.generate_plan(cfg)
@@ -2524,12 +2535,11 @@ class MainWindow(QMainWindow):
                 if not os.environ.get("AZURE_SPEECH_KEY"):
                     return
 
-        self.btn_start.setEnabled(False)
-        self.btn_pause.setEnabled(True)
-        self.btn_resume.setEnabled(False)
+        self._is_producing = True
+        self._apply_button_lock_state("PRODUCING")
         self.lbl_status_led.setText("●")
         self.lbl_status_led.setStyleSheet("font-size: 16px; color: #33FF99; font-weight: bold;")
-        self.lbl_status.setText("正式生产流水线已启动 (PRODUCING)...")
+        self._update_status_display("正式生产流水线已启动 (PRODUCING)...")
 
         # 启动计时器与状态灯呼吸动画
         self._elapsed_seconds = 0
@@ -2708,38 +2718,128 @@ class MainWindow(QMainWindow):
             else:
                 self.lbl_status_led.setStyleSheet("font-size: 14px;")
 
-        self.lbl_status.setText(desc)
-        self.lbl_status.setToolTip(desc)
+        self._update_status_display(desc)
+        self._apply_button_lock_state(status)
 
-        if status == "PLANNED":
+    def _update_status_display(self, text: Optional[str] = None) -> None:
+        """
+        【为什么这样设计】
+        响应问题二：状态栏文案右侧留白过大、提前截断衰退问题。
+        底层逻辑解耦：
+        1. 缓存完整无损的原始状态文本 self._raw_status_text，并在 ToolTip 中永远完整展示；
+        2. 利用 Qt 原生 QFontMetrics 动态测量当前状态栏可用的真实物理像素宽度 avail_w；
+        3. 只要窗口放宽、最大化或可用宽度能够容纳全部字数，100% 完整平铺展开，绝不出现任何省略号；
+        4. 仅当用户主动将窗口严重缩窄、物理像素实在容纳不下时，才使用 ElideMiddle 优雅居中省略，并在 resize 时自适应重算！
+        """
+        if text is not None:
+            self._raw_status_text = text
+            if hasattr(self, 'lbl_status') and self.lbl_status:
+                self.lbl_status.setToolTip(text)
+
+        raw = getattr(self, "_raw_status_text", "")
+        if not raw or not hasattr(self, 'lbl_status') or not self.lbl_status:
+            return
+
+        avail_w = self.lbl_status.width()
+        # 若界面尚未绘制或宽度极小，直接展示
+        if avail_w <= 60:
+            self.lbl_status.setText(raw)
+            return
+
+        fm = QFontMetrics(self.lbl_status.font())
+        text_w = fm.horizontalAdvance(raw)
+        # 预留 8px 安全缓冲边距防抖
+        if text_w <= avail_w - 8:
+            self.lbl_status.setText(raw)
+        else:
+            elided = fm.elidedText(raw, Qt.ElideMiddle, avail_w - 8)
+            self.lbl_status.setText(elided)
+
+    def _apply_button_lock_state(self, state: str) -> None:
+        """
+        【为什么这样设计】
+        响应问题三：建立 4 个操作按钮（生成计划、开始生产、安全暂停、继续生产）全生命周期权威统一互锁状态机。
+        严格区分独立规划阶段与正式批量生产阶段，彻底根治生产中错误激活【开始生产】、置灰【安全暂停】的致命漏洞：
+        1. 批量生产进行中（包括生产内的解析、清洗、规划就绪、TTS生成、字幕、混音、压制与硬件温控冷却）：
+           严格互锁，仅允许【安全暂停】可用，其他一切按钮绝对置灰锁死，杜绝误触与竞态；
+        2. 独立规划进行中：唯独【生成计划】置灰锁死，其他一切按钮置灰，杜绝双线程冲突；
+        3. 生产安全暂停后：【继续生产】高亮，【安全暂停】置灰，【生成计划】根据断点状态互锁；
+        4. 任务完成或异常停机：统一解除生产态并恢复就绪态，【生成计划】与【开始生产】重新激活，【安全暂停】与【继续生产】置灰。
+        """
+        if not hasattr(self, 'btn_gen_plan') or not hasattr(self, 'btn_start'):
+            return
+
+        # 1. 处于正式生产流水线全生命周期中
+        if getattr(self, "_is_producing", False):
+            if state in ["PAUSED"]:
+                self._is_producing = False
+                self.btn_gen_plan.setEnabled(True)
+                self.btn_start.setEnabled(False)
+                self.btn_pause.setEnabled(False)
+                self.btn_resume.setEnabled(True)
+                self._set_config_inputs_enabled(True)
+            elif state in ["COMPLETED", "FAILED", "ERROR"]:
+                self._is_producing = False
+                self.btn_gen_plan.setEnabled(True)
+                self.btn_start.setEnabled(True)
+                self.btn_pause.setEnabled(False)
+                self.btn_resume.setEnabled(False)
+                self._set_config_inputs_enabled(True)
+            else:
+                # 生产流水线内部所有流转节点（含中间 PLANNED 与 COOLING 温控冷却）：坚决锁定，仅安全暂停激活！
+                self.btn_gen_plan.setEnabled(False)
+                self.btn_start.setEnabled(False)
+                self.btn_pause.setEnabled(True)
+                self.btn_resume.setEnabled(False)
+                self._set_config_inputs_enabled(False)
+            return
+
+        # 2. 独立规划中
+        if state in ["PLANNING"]:
+            self.btn_gen_plan.setEnabled(False)
+            self.btn_start.setEnabled(False)
+            self.btn_pause.setEnabled(False)
+            self.btn_resume.setEnabled(False)
+            self._set_config_inputs_enabled(False)
+        # 3. 独立规划完成（就绪态）
+        elif state in ["PLANNED"]:
             self.btn_gen_plan.setEnabled(True)
             self.btn_start.setEnabled(True)
             self.btn_pause.setEnabled(False)
             self.btn_resume.setEnabled(False)
             self._set_config_inputs_enabled(True)
-        elif status == "PAUSED":
+        # 4. 暂停态
+        elif state in ["PAUSED"]:
+            self.btn_gen_plan.setEnabled(True)
             self.btn_start.setEnabled(False)
             self.btn_pause.setEnabled(False)
             self.btn_resume.setEnabled(True)
-            self._timer_elapsed.stop()
             self._set_config_inputs_enabled(True)
-        elif status in ["COMPLETED", "FAILED"]:
+        # 5. 生产完成、报错或异常
+        elif state in ["COMPLETED", "FAILED", "ERROR"]:
             self.btn_gen_plan.setEnabled(True)
             self.btn_start.setEnabled(True)
             self.btn_pause.setEnabled(False)
             self.btn_resume.setEnabled(False)
-            self._timer_elapsed.stop()
-            self._timer_breathing.stop()
             self._set_config_inputs_enabled(True)
-        elif status == "IDLE":
+        # 6. 空闲初始态
+        elif state in ["IDLE"]:
+            self.btn_gen_plan.setEnabled(True)
+            self.btn_start.setEnabled(True)
+            self.btn_pause.setEnabled(False)
+            self.btn_resume.setEnabled(False)
             self._set_config_inputs_enabled(True)
+
+    def resizeEvent(self, event):
+        """窗口缩放与全屏切换事件：自动触发状态栏物理像素重新测量自适应展开"""
+        super().resizeEvent(event)
+        self._update_status_display()
 
     def _on_worker_progress_updated(self, pct: float, msg: str) -> None:
         if pct >= 0:
             self.progress_bar.setValue(int(pct))
         if msg:
-            self.lbl_status.setText(msg)
-            self.lbl_status.setToolTip(msg)
+            self._update_status_display(msg)
 
     def _on_worker_plan_ready(self, plan: Any) -> None:
         try:
@@ -2772,7 +2872,8 @@ class MainWindow(QMainWindow):
     def _on_worker_task_completed(self, output_path: str) -> None:
         self._timer_elapsed.stop()
         self._timer_breathing.stop()
-        self._set_config_inputs_enabled(True)
+        self._is_producing = False
+        self._apply_button_lock_state("COMPLETED")
         self.lbl_status_led.setText("●")
         self.lbl_status_led.setStyleSheet("font-size: 16px; color: #00E676; font-weight: bold;")
         QMessageBox.information(
@@ -2784,7 +2885,8 @@ class MainWindow(QMainWindow):
     def _on_worker_task_paused(self) -> None:
         self._timer_elapsed.stop()
         self._timer_breathing.stop()
-        self._set_config_inputs_enabled(True)
+        self._is_producing = False
+        self._apply_button_lock_state("PAUSED")
         self.lbl_status_led.setText("●")
         self.lbl_status_led.setStyleSheet("font-size: 16px; color: #CD853F; font-weight: bold;")
         QMessageBox.information(self, "暂停提示", "当前分集切片已安全落盘并持久化记录，任务已暂停。您可以点击 [继续生产] 随时断点续跑。")
@@ -2792,7 +2894,8 @@ class MainWindow(QMainWindow):
     def _on_worker_error(self, code: str, msg: str) -> None:
         self._timer_elapsed.stop()
         self._timer_breathing.stop()
-        self._set_config_inputs_enabled(True)
+        self._is_producing = False
+        self._apply_button_lock_state("ERROR")
         self.lbl_status_led.setText("●")
         self.lbl_status_led.setStyleSheet("font-size: 16px; color: #FF6B6B; font-weight: bold;")
         self.tab_widget.setCurrentIndex(2) # 自动跳转到实时日志 Sheet 方便用户排查

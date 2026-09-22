@@ -316,6 +316,11 @@ class ProductionWorker(QThread):
                 self.sig_task_paused.emit()
                 return
 
+            # 【为什么这样设计】
+            # 响应问题一：连续多集生产时，每一集进入语音合成必须向前端显式广播 TTS_GENERATING 状态，
+            # 驱动前端管线图从上一集完成的“混音渲染”或“视频合成”状态精准回退重置至“语音合成”高亮状态。
+            self.sig_status_changed.emit("TTS_GENERATING")
+
             ep_order = ep.episode_order
             self.sig_progress_updated.emit(
                 20.0 + (ep_order / max(1, len(plan.episodes))) * 50.0,
@@ -358,11 +363,11 @@ class ProductionWorker(QThread):
                             clean_text = u.text.strip().replace('\n', ' ')
                             tot_chars = len(clean_text)
                             # 【为什么这样设计】
-                            # 响应用户需求 3：超长状态文字在状态栏右侧容易被截断。
-                            # 按设计：超出的部分展示为 “前文...最后10个字(共X字)”，精简前缀字数，
-                            # 使整条提示长度严格控制在 45~50 字符内，保证末尾省略号、后10个字与总字数完整展示，绝不溢出窗口边界。
-                            if tot_chars > 22:
-                                preview_fmt = f"{clean_text[:10]}...{clean_text[-10:]}(共{tot_chars}字)"
+                            # 响应问题二：移除 22 字的源头硬编码腰斩截断，
+                            # 后端对外发射完整的正文文本（仅保留 200 字极端超长兜底保护），
+                            # 状态栏在右侧拥有 800~1100px 广阔空间，由前端通过 QFontMetrics 动态测量与自适应展开。
+                            if tot_chars > 200:
+                                preview_fmt = f"{clean_text[:90]}...{clean_text[-90:]}(共{tot_chars}字)"
                             else:
                                 preview_fmt = f"{clean_text}(共{tot_chars}字)"
 
