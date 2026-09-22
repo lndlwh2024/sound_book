@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-书声 (ShuSheng) v3.1.1 PySide6 桌面主窗口
+书声 (ShuSheng) v3.2.0 PySide6 桌面主窗口
 遵循 PRD 与详细设计规范：三栏直观布局、非阻塞后台线程隔离、实时封面排版与混音试听预览。
 包含多Sheet生产监控面板、硬件负载实时指示条、任务动态计时器与云端API凭据管理。
 """
@@ -574,12 +574,12 @@ class AudioPlayButton(QPushButton):
 
 
 class MainWindow(QMainWindow):
-    """书声 (ShuSheng) v3.1.1 PySide6 桌面主窗口"""
+    """书声 (ShuSheng) v3.2.0 PySide6 桌面主窗口"""
 
     def __init__(self, bridge: Optional[TaskManagerBridge] = None):
         super().__init__()
         self.bridge = bridge or TaskManagerBridge()
-        self.setWindowTitle("书声 (ShuSheng) v3.1.1 - 自动化有声视频生产工具")
+        self.setWindowTitle("书声 (ShuSheng) v3.2.0 - 自动化有声视频生产工具")
         self._raw_status_text = "空闲就绪 (IDLE)"
         self._is_producing = False
         # 【自适应屏幕工作区】检测当前主显示器可用区域，动态计算最佳默认尺寸，保证初始开机与最大化排版一致且完全舒展
@@ -2751,9 +2751,67 @@ class MainWindow(QMainWindow):
         # 预留 8px 安全缓冲边距防抖
         if text_w <= avail_w - 8:
             self.lbl_status.setText(raw)
-        else:
-            elided = fm.elidedText(raw, Qt.ElideMiddle, avail_w - 8)
-            self.lbl_status.setText(elided)
+            return
+
+        # 【为什么这样设计】
+        # 响应用户明确交互规则：
+        # 1. 只有物理宽度容纳不下时才截断；
+        # 2. 严禁从句首截断！阅读者最关注朗读句子的开头语义；
+        # 3. 截断算法重构为：固定展示【原文开头】（尽可能多展现）+【...】+【后10个字】+【总字数】；
+        # 4. 彻底抛弃盲目中间折半截断的 Qt.ElideMiddle。
+        import re
+        target_avail = avail_w - 8
+        m = re.search(r'^(.*?原文:\s*")(.*?)((?:\(共\d+字\))?"\s*)$', raw)
+        if m:
+            prefix = m.group(1)
+            body = m.group(2)
+            suffix = m.group(3)
+            if len(body) > 10:
+                tail = f"...{body[-10:]}{suffix}"
+                tail_w = fm.horizontalAdvance(prefix + tail)
+                remain_w = target_avail - tail_w
+                if remain_w > 0:
+                    low = 0
+                    high = len(body) - 10
+                    best_head = ""
+                    while low <= high:
+                        mid = (low + high) // 2
+                        cand = body[:mid]
+                        if fm.horizontalAdvance(cand) <= remain_w:
+                            best_head = cand
+                            low = mid + 1
+                        else:
+                            high = mid - 1
+                    self.lbl_status.setText(f"{prefix}{best_head}{tail}")
+                    return
+                else:
+                    self.lbl_status.setText(f"{prefix}{tail}")
+                    return
+
+        # 通用兜底截断：句首尽可能多展示 + ... + 尾部 10 个字
+        if len(raw) > 15:
+            tail = f"...{raw[-10:]}"
+            tail_w = fm.horizontalAdvance(tail)
+            remain_w = target_avail - tail_w
+            if remain_w > 0:
+                low = 0
+                high = len(raw) - 10
+                best_head = ""
+                while low <= high:
+                    mid = (low + high) // 2
+                    cand = raw[:mid]
+                    if fm.horizontalAdvance(cand) <= remain_w:
+                        best_head = cand
+                        low = mid + 1
+                    else:
+                        high = mid - 1
+                self.lbl_status.setText(f"{best_head}{tail}")
+                return
+            else:
+                self.lbl_status.setText(tail)
+                return
+
+        self.lbl_status.setText(raw)
 
     def _apply_button_lock_state(self, state: str) -> None:
         """

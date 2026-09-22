@@ -146,4 +146,21 @@ def test_table_aware_text_extractor_mock_absorbed_extra():
     assert "（单位：千美金）" not in clean_text
     assert "这是正常的投资分析正文段落。" in clean_text
 
+def test_table_aware_text_extractor_fast_path():
+    """测试无矢量图元且无单位标识的页面极速短路跳步"""
+    import unittest.mock as mock
+    from src.parser.pdf_parser import TableAwareTextExtractor
+
+    mock_page = mock.MagicMock()
+    mock_page.number = 10
+    mock_page.get_drawings.return_value = []
+    mock_page.get_text.return_value = "巴菲特致股东的信纯文本正文。\n"
+
+    clean_text, had_filtering, has_footnote = TableAwareTextExtractor.extract_clean_page_text(mock_page)
+    assert had_filtering is False
+    assert clean_text == "巴菲特致股东的信纯文本正文。"
+    # 验证未调用耗时巨大的 find_tables
+    mock_page.find_tables.assert_not_called()
+
+
 
