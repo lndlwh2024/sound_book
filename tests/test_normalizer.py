@@ -104,4 +104,41 @@ def test_normalize_for_tts_spoken_digits():
     import re
     assert not re.search(r'\d', spoken)
 
+def test_normalize_for_tts_thousands_and_currency():
+    """
+    测试千分位逗号消除与货币口语化转换：
+    1. '25,000 美元' -> '两万五千美元'，彻底杜绝切断误读为'二十五零美元'
+    2. 前置货币符号 '$25,000' -> '两万五千美元'，'¥10,000' -> '一万元'
+    3. 多重千分位 '1,000,000' -> '一百万'，'25,000,000 美元' -> '两千五百万美元'
+    4. 带千分位浮点数 '1,234.56 元' -> '一千二百三十四点五六元'
+    """
+    from src.text.normalizer import normalize_for_tts
+
+    # 1. 用户反馈核心缺陷测试用例：25,000 美元
+    t1 = normalize_for_tts("投资了 25,000 美元")
+    assert "两万五千美元" in t1
+    assert "二十五" not in t1
+    assert "零" not in t1
+
+    # 2. 前置美元与人民币符号
+    t2 = normalize_for_tts("账面资金达 $25,000，合伙人出资 ¥10,000")
+    assert "两万五千美元" in t2
+    assert "一万元" in t2
+
+    # 3. 多重千分位与大数口语
+    t3 = normalize_for_tts("总资产已达到 1,000,000 元，净利润突破 25,000,000 美元")
+    assert "一百万元" in t3
+    assert "两千五百万美元" in t3
+
+    # 4. 带千分位的小数
+    t4 = normalize_for_tts("单笔分红 1,234.56 元")
+    assert "一千二百三十四点五六元" in t4
+
+    # 5. 确保没有多余的数字和逗号残留
+    import re
+    assert not re.search(r'\d', t1)
+    assert not re.search(r'\d', t2)
+    assert not re.search(r'\d', t3)
+    assert not re.search(r'\d', t4)
+
 

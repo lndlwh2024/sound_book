@@ -50,7 +50,10 @@ def int_to_chinese(num: int) -> str:
     if num < 10000:
         thousands = num // 1000
         remainder = num % 1000
-        res = DIGIT_MAP[str(thousands)] + '千'
+        # 【为什么这样设计】
+        # 在普通话口语中，千位为 2 且作为首位时习惯读作“两千”（如 2000人 -> 两千人，2500 -> 两千五百）。
+        # 相比“二千”，更贴合现代听书自然朗读语感。
+        res = ('两' if thousands == 2 else DIGIT_MAP[str(thousands)]) + '千'
         if remainder == 0:
             return res
         if remainder < 100:
@@ -59,7 +62,13 @@ def int_to_chinese(num: int) -> str:
     if num < 100000000:
         myriads = num // 10000
         remainder = num % 10000
-        res = int_to_chinese(myriads) + '万'
+        myriad_str = int_to_chinese(myriads)
+        # 【为什么这样设计】
+        # 当万位数值恰为 2 时（即 20000 至 29999 区间），口语标准发音为“两万”（如 25,000 -> 两万五千）。
+        # 当更高位（如 20万/22万）时 myriad_str 为“二十”/“二十二”，保持“二”不作替换。
+        if myriad_str == '二':
+            myriad_str = '两'
+        res = myriad_str + '万'
         if remainder == 0:
             return res
         if remainder < 1000:
@@ -208,7 +217,22 @@ class TextNormalizer:
         # 1. 先执行通用基础正规化（年份、百分比、比例、金融多音字等）
         t = self.normalize(text)
 
-        # 2. 转换剩余的小数/浮点数（如 8.47 -> 八点四七，先于整数匹配以防截断）
+        # 2. 货币前缀符号口语化转换（如 $25,000 -> 25,000美元，¥100 -> 100元）
+        # 【为什么这样设计】
+        # 货币符号前置是英文习惯，但中文发音需转换为后置量词（“美元”、“元”）。
+        # 若直接将美元符号送入大模型 TTS，极易造成吞字、报乱码或读成英文读音，
+        # 在口语转换层统一转换为后置汉字，确保发音稳定性。
+        t = re.sub(r'\$\s*([\d,]+(?:\.\d+)?)', r'\1美元', t)
+        t = re.sub(r'[¥￥]\s*([\d,]+(?:\.\d+)?)', r'\1元', t)
+
+        # 3. 消除西式千分位逗号（如 25,000 -> 25000，1,000,000 -> 1000000，1,234.56 -> 1234.56）
+        # 【为什么这样设计】
+        # 西式财务数字广泛采用逗号作为千分位分隔符。
+        # 若未提前清除千分位，后续纯数字基数词正则会将 25,000 误切分为“25”和“000”，
+        # 导致“二十五零美元”的严重朗读缺陷。先剥离千分位逗号，确保后续完整进位计算。
+        t = re.sub(r'(?<=\d),(?=\d{3}(?!\d)|\d{3}[,\.])', '', t)
+
+        # 4. 转换剩余的小数/浮点数（如 8.47 -> 八点四七，先于整数匹配以防截断）
         float_pattern = re.compile(r'(?<![\d.])(\d+)\.(\d+)(?![\d.])')
         def replace_float(m):
             int_part = int_to_chinese(int(m.group(1)))
@@ -216,14 +240,14 @@ class TextNormalizer:
             return f"{int_part}点{dec_part}"
         t = float_pattern.sub(replace_float, t)
 
-        # 3. 转换剩余的所有整数（如 499点 -> 四百九十九点，22点 -> 二十二点，42 -> 四十二）
+        # 5. 转换剩余的所有整数（如 499点 -> 四百九十九点，22点 -> 二十二点，42 -> 四十二）
         int_pattern = re.compile(r'(?<![\d.])(\d+)(?![\d.])')
         def replace_int(m):
             num = int(m.group(1))
             return int_to_chinese(num)
         t = int_pattern.sub(replace_int, t)
 
-        # 4. 消除中文数字转换后与后续汉字量词之间的多余空格（如 '四百九十九 点' -> '四百九十九点'）
+        # 6. 消除中文数字转换后与后续汉字量词之间的多余空格（如 '四百九十九 点' -> '四百九十九点'）
         # 循环替换直到所有汉字间多余空格消除干净
         while re.search(r'([\u4e00-\u9fff])\s+([\u4e00-\u9fff])', t):
             t = re.sub(r'([\u4e00-\u9fff])\s+([\u4e00-\u9fff])', r'\1\2', t)
