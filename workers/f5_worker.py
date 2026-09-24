@@ -42,6 +42,104 @@ except ImportError:
         def normalize_text(t: str) -> str:
             return t
 
+# ==============================================================================
+# 跨引擎高精度多音字声学校准钩子 (Acoustic Pinyin Disambiguation Hook)
+# 【为什么这样设计】
+# F5-TTS 底层采用 rjieba + pypinyin 将文本转换为带调拼音。
+# 1. '的'字误读 dì 缺陷：rjieba 词典收录'目的 (mù dì)'，但未收录条目/细目/税目/品目/纲目/篇目/刺目等词汇，
+#    导致“条目的内容”被错切为“条 + 目的 (dì)”，强行将轻声结构助词'的'误读为四声'dì'；
+# 2. '得'字误读 de2 缺陷：pypinyin 单字'得'默认返回二声'de2'，导致“你得小心”误读为'de2'（应为三声 děi），
+#    “跑得飞快”误读为'de2'（应为轻声 de）。
+# 本钩子在字符音素层建立白名单和形态素解耦防御，彻底根除有声书长难句中的多音字语病。
+# ==============================================================================
+PSEUDO_MUDI_PREFIXES = set("条篇细税名品纲刺盲醒瞩悦夺触侧项科账题栏节耳眩耀曲剧")
+
+def enhanced_convert_char_to_pinyin(text_list, polyphone=True):
+    import rjieba
+    from pypinyin import lazy_pinyin, Style
+
+    final_text_list = []
+    custom_trans = str.maketrans(
+        {";": ",", "“": '"', "”": '"', "‘": "'", "’": "'"}
+    )
+
+    def is_chinese(c):
+        return "\u3100" <= c <= "\u9fff"
+
+    for text in text_list:
+        char_list = []
+        text = text.translate(custom_trans)
+        segs = list(rjieba.cut(text))
+
+        for seg_idx, seg in enumerate(segs):
+            prev_seg = segs[seg_idx - 1] if seg_idx > 0 else ""
+            next_seg = segs[seg_idx + 1] if seg_idx < len(segs) - 1 else ""
+            seg_byte_len = len(bytes(seg, "UTF-8"))
+
+            if seg_byte_len == len(seg):  # pure alphabets and symbols
+                if char_list and seg_byte_len > 1 and char_list[-1] not in " :'\"":
+                    char_list.append(" ")
+                char_list.extend(seg)
+            elif polyphone and seg_byte_len == 3 * len(seg):  # pure east asian characters
+                seg_ = lazy_pinyin(seg, style=Style.TONE3, tone_sandhi=True)
+
+                for i, c in enumerate(seg):
+                    py = seg_[i]
+                    prev_char = seg[i - 1] if i > 0 else (prev_seg[-1] if prev_seg else "")
+                    next_char = seg[i + 1] if i < len(seg) - 1 else (next_seg[0] if next_seg else "")
+
+                    # 1. 汉字'的'的多音纠偏
+                    if c == "的":
+                        if seg == "目的":
+                            char_before_mu = prev_seg[-1] if prev_seg else ""
+                            if char_before_mu in PSEUDO_MUDI_PREFIXES:
+                                py = "de"
+                        elif py in ("di4", "di2", "di1"):
+                            is_whitelist = False
+                            if any(k in seg for k in ("标的", "有的放矢", "众矢之的", "的确", "的确良", "打的", "的士", "中的", "的当")):
+                                is_whitelist = True
+                            elif next_char in ("物", "资") or (next_seg and next_seg in ("资产", "物")):
+                                is_whitelist = True
+                            elif seg == "目的":
+                                char_before_mu = prev_seg[-1] if prev_seg else ""
+                                if char_before_mu not in PSEUDO_MUDI_PREFIXES:
+                                    is_whitelist = True
+
+                            if not is_whitelist:
+                                py = "de"
+
+                    # 2. 汉字'得'的多音纠偏
+                    elif c == "得":
+                        is_verb_acquire = False
+                        if any(k in seg for k in ("获得", "取得", "得到", "心得", "得失", "得分", "不得", "未得")):
+                            is_verb_acquire = True
+                        elif prev_char in "获取取占多未" or next_char in "到失分益":
+                            is_verb_acquire = True
+
+                        if not is_verb_acquire:
+                            # 补语结构：跑得快、显得尤为重要、算得上
+                            if prev_char in "跑走做飞看听吃穿痛累红好快慢显算过谈显觉懂舍搞弄跌摔" or next_char in "很不真太格外尤为十分快慢出下起好上":
+                                py = "de"
+                            # 能愿动词（必须、需要）：你得小心、我得走、这得花钱、总得、还得、可得
+                            elif prev_char in "你我他她咱总还可非这那谁'\"" or next_char in "去走做来买卖花选找看等小心注意努力办用":
+                                py = "dei3"
+
+                    if is_chinese(c):
+                        char_list.append(" ")
+                    char_list.append(py)
+            else:
+                for c in seg:
+                    if ord(c) < 256:
+                        char_list.extend(c)
+                    elif is_chinese(c):
+                        char_list.append(" ")
+                        char_list.extend(lazy_pinyin(c, style=Style.TONE3, tone_sandhi=True))
+                    else:
+                        char_list.append(c)
+
+        final_text_list.append(char_list)
+    return final_text_list
+
 def trim_audio_silence(audio, sr: int = 24000, thresh_ratio: float = 0.002):
     """
     自适应短时能量静音剥离算法（Trim Silence Engine）。
@@ -320,6 +418,18 @@ def main():
                         f5_model.ema_model.to(torch.float32)
 
                     current_device = device
+
+                    # 注入增强版 G2P 拼音转换钩子，彻底消灭“的”误读为 di4、“得”误读为 de2 的多音字缺陷
+                    try:
+                        import f5_tts.model.utils as model_utils
+                        import f5_tts.infer.utils_infer as utils_infer
+                        model_utils.convert_char_to_pinyin = enhanced_convert_char_to_pinyin
+                        utils_infer.convert_char_to_pinyin = enhanced_convert_char_to_pinyin
+                        sys.stderr.write("Enhanced Pinyin Disambiguation Hook injected successfully\n")
+                        sys.stderr.flush()
+                    except Exception as _e_hook:
+                        sys.stderr.write(f"Warning: Failed to inject pinyin hook: {_e_hook}\n")
+                        sys.stderr.flush()
 
                 # 跨模型通用文本正规化（年份位读、多音字校准）
                 text = normalize_text(text)

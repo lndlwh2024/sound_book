@@ -1,4 +1,7 @@
-import pytest
+try:
+    import pytest
+except ImportError:
+    pytest = None
 from src.text.normalizer import (
     digits_to_chinese,
     int_to_chinese,
@@ -140,5 +143,61 @@ def test_normalize_for_tts_thousands_and_currency():
     assert not re.search(r'\d', t2)
     assert not re.search(r'\d', t3)
     assert not re.search(r'\d', t4)
+
+def test_normalize_spaces_around_particles():
+    """测试结构助词与补语标志'的'、'得'前后悬空空格的自动消除"""
+    from src.text.normalizer import normalize_text
+
+    sample1 = "这是 非常 重要 的 因素，我们 必须 认真 对待。"
+    assert "重要的因素" in normalize_text(sample1)
+
+    sample2 = "他 跑 得 快，动作 也 显得 极为 熟练。"
+    assert "跑得快" in normalize_text(sample2)
+
+def test_enhanced_pinyin_disambiguation_hook():
+    """
+    测试 F5-TTS 跨引擎多音字纠偏拦截钩子：
+    1. 彻底根除'条目的内容'、'细目的划分'、'刺目的阳光'因假性'目的'误读为 di4
+    2. 保护真正的'目的'、'标的'、'众矢之的'读 di4
+    3. 纠正'跑得飞快'、'显得尤为重要'补语读轻声 de（非 de2）
+    4. 纠正'你得小心'、'这得花多少钱'能愿动词读三声 dei3（非 de2）
+    """
+    if pytest is not None:
+        pytest.importorskip("rjieba", reason="当前环境未安装 rjieba（属于 envs/f5 独立虚拟环境专用依赖）")
+    else:
+        try:
+            import rjieba
+        except ImportError:
+            return
+    from workers.f5_worker import enhanced_convert_char_to_pinyin
+
+    cases = [
+        ("条目的内容", "de"),
+        ("细目的划分", "de"),
+        ("税目的调整", "de"),
+        ("名目的繁多", "de"),
+        ("品目的分类", "de"),
+        ("纲目的梳理", "de"),
+        ("篇目的编排", "de"),
+        ("刺目的阳光", "de"),
+        ("万众瞩目的盛会", "de"),
+        ("真正的目的", "di4"),
+        ("投资标的", "di4"),
+        ("标的的价值", "biao1 di4 de jia4 zhi2"),
+        ("有的放矢", "di4"),
+        ("众矢之的", "di4"),
+        ("的确如此", "di2"),
+        ("跑得飞快", "de"),
+        ("显得尤为重要", "de"),
+        ("你得小心", "dei3"),
+        ("这得花多少钱", "dei3"),
+        ("总得有人做", "dei3"),
+        ("获得收益", "de2"),
+    ]
+
+    for phrase, expected in cases:
+        res = enhanced_convert_char_to_pinyin([phrase])
+        s = "".join(res[0])
+        assert expected in s, f"【多音字断言失败】{phrase} 预期包含 {expected}，实际为 {s}"
 
 

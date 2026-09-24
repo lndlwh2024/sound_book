@@ -202,6 +202,13 @@ class TextNormalizer:
         text = re.sub(r'([a-zA-Z])([\u4e00-\u9fa5])', r'\1 \2', text)
         text = re.sub(r'[ \t]+', ' ', text)
 
+        # 10. 消除结构助词与补语标志'的'、'得'前后的孤立空白字符
+        # 【为什么这样设计】
+        # 排版经常遗留中英文混排或OCR识别产生的悬空空格（如“重要 的 因素”或“跑 得 快”）。
+        # 空格会导致分词器将单字'的'与'得'切分为独立孤立词，不仅容易引发声调漂移（如误读为四声 dì），
+        # 还会破坏语法连贯性。在此消除前后孤立空格，确保词界完整。
+        text = re.sub(r'([\u4e00-\u9fa5A-Za-z0-9])\s*([的的得])\s*([\u4e00-\u9fa5A-Za-z0-9])', r'\1\2\3', text)
+
         return text
 
     def normalize_for_tts(self, text: str) -> str:
