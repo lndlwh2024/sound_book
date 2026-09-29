@@ -578,3 +578,83 @@ def plan_initial_episodes(chapters: list[dict], target_mins: float = 30.0, speed
 | `AUDIO_NAN_DETECTED` | 质量类 | F5 扩散解算溢出，触发自动重试或参数降级。 |
 | `FFMPEG_RENDER_ERROR` | 合成类 | FFmpeg 滤镜参数错误或编码器不可用。 |
 | `MANIFEST_SAVE_FAILED` | 存储类 | 磁盘空间不足或权限受限，原子写入失败。 |
+
+---
+
+## 17. 小人书沉浸式图文同步详细设计与实现规范 [v3.3.0 新增]
+
+### 17.1 核心数据模型规范
+
+```python
+@dataclass
+class ScenePlan:
+    """小人书单场景分镜数据模型"""
+    scene_index: int              # 分镜序号 (1-indexed)
+    scene_id: str                 # 场景标识 (如: scene_001)
+    start_unit_index: int         # 覆盖的起始 SpeechUnit 索引
+    end_unit_index: int           # 覆盖的结束 SpeechUnit 索引
+    start_time: float             # 起始绝对秒数 (纳秒级物理累加)
+    end_time: float               # 结束绝对秒数 (无缝贴合下一镜)
+    duration: float               # 该分镜持续总秒数 (end_time - start_time)
+    full_text: str                # 该场景内全部段落文本汇集
+    unit_ids: List[str]           # 包含的 SpeechUnit ID 列表
+    prompt: str = ""              # Qwen 提炼后的英文生成提示词
+    image_path: Optional[str] = None # 本地渲染/超分后的高清插画绝对路径
+```
+
+### 17.2 场景切分算法 (SceneSplitter) 规范
+* **聚类原则**：
+  1. 默认参数：`paragraphs_per_scene = 5`（用户可在 UI 或配置中设定 2~20 段）；
+  2. 保护区间：最小停留时长 `min_duration_seconds = 12.0s`（防止高频换图眼花）；最大停留时长 `max_duration_seconds = 45.0s`（防止单图长久静止视觉疲劳）；
+  3. **严格连续性约束**：`scenes[i].end_time == scenes[i+1].start_time`，浮点误差 $< 10^{-4}$ 秒，严禁时钟裂隙。
+
+### 17.3 视觉提示词工程 (Qwen2.5-1.5B CPU 引擎)
+* **运行机制**：
+  * 模型载入宿主 40GB 内存，绑定 6 核 12 线程并发，显存消耗 0MB；
+  * System Prompt 约束：
+    ```text
+    You are an expert art director. Given the following Chinese literary paragraphs, ignore abstract thoughts and philosophical metaphors. Extract the single most iconic, visual, and cinematic scene happening right now. Output ONLY a concise English image prompt describing the subject, costume, environment, and lighting.
+    ```
+  * 注入画风母版前缀与后缀（如水墨风格注入宣纸质感、留白构图、毛笔飞白；复古连环画注入 80 年代白描线条与网点阴影）。
+
+### 17.4 SD Worker 独立子进程与动态 CPU Offload
+* **通信协议**：基于 `stdin`/`stdout` JSON Lines 协议，单任务单应答；
+* **显存自愈防爆逻辑**：
+  ```python
+  free_vram, total_vram = torch.cuda.mem_get_info()
+  if free_vram >= 3.2 * 1024**3:
+      # 全速满血模式 (5~7s / 张)
+      pipe.to("cuda")
+  else:
+      # 动态 CPU Offload 模式 (8~9s / 张，利用 40G 宿主内存防爆)
+      pipe.enable_model_cpu_offload()
+  ```
+* **生命周期隔离**：分集所有插画批量出图完毕后，立即发送 `{"action": "stop"}` 注销 Worker，显存彻底归还系统。
+
+### 17.5 Real-ESRGAN x2 级超分辨率无损放大规范
+* **执行时机**：SD 产出 512×768 基础图后触发；
+* **模型选型**：`RealESRGAN_x2plus`（FP16 半精度）；
+* **资源消耗**：显存峰值约 800MB，耗时约 1.5 秒/张；
+* **交付规格**：将 512×768 无损提升至 **1024×1536**，线条与工笔笔触在 1080P 画布上达到印刷级锐利度。
+
+### 17.6 FFmpeg Concat Demuxer 80/20 单通道直通压制规范
+* **80/20 几何分割**：
+  * 竖屏 9:16（1080×1920）：顶部画面 `1080×1536`，底部文字 `1080×384`，字幕底边距 `MarginV=120px`；
+  * 横屏 16:9（1920×1080）：顶部画面 `1920×864`，底部文字 `1920×216`，字幕底边距 `MarginV=65px`。
+* **FFmpeg 单通道命令模板**：
+  ```bash
+  ffmpeg -y \
+    -f concat -safe 0 -i concat_scenes.txt \
+    -i episode_mixed.m4a \
+    -filter_complex "[0:v]scale=1080:1536:force_original_aspect_ratio=increase,crop=1080:1536[img]; \
+                     color=c=0x0D0D12:s=1080x384:d=1[txtbg]; \
+                     [img][txtbg]vstack[stacked]; \
+                     [stacked]drawbox=x=0:y=1533:w=1080:h=3:color=0xD4AF37@0.8:t=fill[comp1]; \
+                     [comp1]subtitles='episode_storybook.ass'[vout]" \
+    -map [vout] -map 1:a \
+    -pix_fmt yuv420p -c:a copy -shortest \
+    -c:v h264_nvenc -preset p4 -b:v 3500k \
+    episode_final.mp4
+  ```
+  零中间临时分段，单次流式封装，绝对消除音画延迟与拼接痕迹。
+
