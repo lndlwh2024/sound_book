@@ -12,24 +12,23 @@ from typing import Optional, Dict, Any, List
 logger = logging.getLogger(__name__)
 
 class ModelDownloadError(Exception):
-    """?????????????"""
+    """模型下载异常"""
     pass
 
 class ModelManager:
     """
-    ????????
-    ?? Kokoro ? F5-TTS ??????????????????????????
-    ????????????????
+    模型管理器
+    负责 Kokoro、F5-TTS 以及 SD 1.5 + LCM-LoRA 插画模型的本地缓存检测与离线生命周期管理。
     """
 
-    # ?????????????????? checkpoint
+    # 官方推荐并经过工程验证的稳定模型 checkpoint
     OFFICIAL_MODELS: Dict[str, Dict[str, Any]] = {
         "kokoro": {
             "default_repo": "hexgrad/Kokoro-82M-v1.1-zh",
             "official_url": "https://huggingface.co/hexgrad/Kokoro-82M-v1.1-zh",
             "subfolder": "",
             "key_files": ["kokoro-v1_1-zh.pth", "config.json"],
-            "description": "Kokoro 82M v1.1 ????????????",
+            "description": "Kokoro 82M v1.1 轻量快速语音模型",
             "estimated_size_mb": 85.0
         },
         "f5": {
@@ -39,6 +38,22 @@ class ModelManager:
             "key_files": ["model_1250000.safetensors", "model_1200000.safetensors"],
             "description": "F5-TTS v1 Base 扩散语音生成模型",
             "estimated_size_mb": 1300.0
+        },
+        "sd15": {
+            "default_repo": "runwayml/stable-diffusion-v1-5",
+            "official_url": "https://huggingface.co/runwayml/stable-diffusion-v1-5",
+            "subfolder": "",
+            "key_files": ["v1-5-pruned-emaonly.safetensors", "model_index.json"],
+            "description": "Stable Diffusion 1.5 小人书插画文生图大模型",
+            "estimated_size_mb": 4200.0
+        },
+        "lcm_lora": {
+            "default_repo": "latent-consistency/lcm-lora-sdv1-5",
+            "official_url": "https://huggingface.co/latent-consistency/lcm-lora-sdv1-5",
+            "subfolder": "",
+            "key_files": ["pytorch_lora_weights.safetensors"],
+            "description": "LCM-LoRA 4步极速采样加速模块",
+            "estimated_size_mb": 135.0
         }
     }
 
