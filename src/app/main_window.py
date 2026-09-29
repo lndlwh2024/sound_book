@@ -601,7 +601,7 @@ class MainWindow(QMainWindow):
     def __init__(self, bridge: Optional[TaskManagerBridge] = None):
         super().__init__()
         self.bridge = bridge or TaskManagerBridge()
-        self.setWindowTitle("书声 (ShuSheng) v3.3.4 - 自动化有声视频生产工具 (小人书 AI 连环画增强版)")
+        self.setWindowTitle("书声 (ShuSheng) v3.3.5 - 自动化有声视频生产工具 (小人书 AI 连环画增强版)")
         self._raw_status_text = "空闲就绪 (IDLE)"
         self._is_producing = False
         # 【自适应屏幕工作区】检测当前主显示器可用区域，动态计算最佳默认尺寸，保证初始开机与最大化排版一致且完全舒展
@@ -1034,6 +1034,8 @@ class MainWindow(QMainWindow):
         self.txt_book_path = QLineEdit()
         self.txt_book_path.setPlaceholderText("请选择 PDF 或 EPUB 文件...")
         btn_browse_book = QPushButton("浏览...")
+        btn_browse_book.setFixedWidth(64)
+        btn_browse_book.setStyleSheet("padding: 4px 6px; font-size: 11px;")
         btn_browse_book.clicked.connect(self._on_browse_book)
 
         book_row = QHBoxLayout()
@@ -1060,15 +1062,18 @@ class MainWindow(QMainWindow):
         self.cmb_video_layout.addItems(["竖屏 9:16 (1080x1920, 手机/短视频流)", "横屏 16:9 (1920x1080, 电脑/B站/宽屏)"])
         self.cmb_video_layout.currentIndexChanged.connect(self._refresh_visual_preview)
 
-        # 封面图片
+        # 封面图片（设置按钮与模式固定宽度，彻底杜绝重叠截断）
         self.txt_cover_path = QLineEdit()
         self.txt_cover_path.setPlaceholderText("留空则使用默认极简书影...")
         self.txt_cover_path.textChanged.connect(self._refresh_visual_preview)
         btn_browse_cover = QPushButton("选择封面...")
+        btn_browse_cover.setFixedWidth(76)
+        btn_browse_cover.setStyleSheet("padding: 4px 6px; font-size: 11px;")
         btn_browse_cover.clicked.connect(self._on_browse_cover)
 
         self.cmb_cover_mode = QComboBox()
         self.cmb_cover_mode.addItems(["单层极简", "双层毛玻璃"])
+        self.cmb_cover_mode.setFixedWidth(86)
         self.cmb_cover_mode.setToolTip("封面呈现模式切换：\n• 单层极简：科技纯黑底板 + 单层居中原画，纯净无重影\n• 双层毛玻璃：全屏拉伸高斯模糊底层 + 居中清晰原画")
         self.cmb_cover_mode.currentIndexChanged.connect(self._refresh_visual_preview)
 
@@ -1076,14 +1081,16 @@ class MainWindow(QMainWindow):
         cover_row.setContentsMargins(0, 0, 0, 0)
         cover_row.setSpacing(6)
         cover_row.addWidget(self.txt_cover_path, 1)
-        cover_row.addWidget(btn_browse_cover)
-        cover_row.addWidget(self.cmb_cover_mode)
+        cover_row.addWidget(btn_browse_cover, 0)
+        cover_row.addWidget(self.cmb_cover_mode, 0)
 
         # 背景音乐
         self.txt_bgm_path = QLineEdit()
         self.txt_bgm_path.setPlaceholderText("留空则不添加背景音乐 (纯净人声)...")
         self.txt_bgm_path.textChanged.connect(self._on_bgm_text_changed)
         btn_browse_bgm = QPushButton("选择音乐...")
+        btn_browse_bgm.setFixedWidth(76)
+        btn_browse_bgm.setStyleSheet("padding: 4px 6px; font-size: 11px;")
         btn_browse_bgm.clicked.connect(self._on_browse_bgm)
 
         bgm_row = QHBoxLayout()
@@ -1091,6 +1098,35 @@ class MainWindow(QMainWindow):
         bgm_row.setSpacing(6)
         bgm_row.addWidget(self.txt_bgm_path, 1)
         bgm_row.addWidget(btn_browse_bgm, 0)
+
+        # 小人书模式（完全还原第一版设计，合并入书籍与基础版式，节省垂直空间）
+        self.chk_storybook_mode = QCheckBox("启用小人书沉浸模式")
+        self.chk_storybook_mode.setStyleSheet("font-weight: bold; color: #4CAF50;")
+        self.chk_storybook_mode.setToolTip("开启后，系统将按句子/段落聚类为分镜场景，AI 自动生成专属插画并随语音同步播放（上图80% + 下文20%）")
+        self.chk_storybook_mode.setChecked(True)
+        self.chk_storybook_mode.stateChanged.connect(self._on_storybook_mode_changed)
+
+        self.spn_paras_per_scene = QSpinBox()
+        self.spn_paras_per_scene.setRange(1, 20)
+        self.spn_paras_per_scene.setValue(5)
+        self.spn_paras_per_scene.setSuffix(" 段/镜")
+        self.spn_paras_per_scene.setToolTip("每隔多少个句子/段落自动切换一张插画（默认 5 段/镜）")
+        self.spn_paras_per_scene.valueChanged.connect(self._refresh_visual_preview)
+
+        self.cmb_storybook_style = QComboBox()
+        self.cmb_storybook_style.addItem("中国传统水墨风", "chinese_ink")
+        self.cmb_storybook_style.addItem("经典复古连环画风", "comic_strip")
+        self.cmb_storybook_style.addItem("唯美动漫插画风", "anime")
+        self.cmb_storybook_style.addItem("欧洲古典油画风", "oil_painting")
+        self.cmb_storybook_style.addItem("写实电影画质风", "realistic")
+        self.cmb_storybook_style.currentIndexChanged.connect(self._refresh_visual_preview)
+
+        storybook_row = QHBoxLayout()
+        storybook_row.setContentsMargins(0, 0, 0, 0)
+        storybook_row.setSpacing(6)
+        storybook_row.addWidget(self.chk_storybook_mode, 0)
+        storybook_row.addWidget(self.spn_paras_per_scene, 0)
+        storybook_row.addWidget(self.cmb_storybook_style, 1)
 
         # 组装第一板块网格（恢复原生标准独立行排版，彻底解决遮挡与挤压）
         lbl_book_file = QLabel("书籍文件:")
@@ -1128,51 +1164,12 @@ class MainWindow(QMainWindow):
         g_layout.addWidget(lbl_bgm_title, 6, 0)
         g_layout.addLayout(bgm_row, 6, 1, 1, 3)
 
+        lbl_storybook = QLabel("小人书模式:")
+        lbl_storybook.setFixedWidth(68)
+        g_layout.addWidget(lbl_storybook, 7, 0)
+        g_layout.addLayout(storybook_row, 7, 1, 1, 3)
+
         layout.addWidget(grp_book)
-
-        # 分组 1.5: 【小人书沉浸模式（保留分镜与画风，临时参数挪至右侧工作台）】
-        grp_storybook = QGroupBox("【小人书沉浸模式】")
-        sb_layout = QGridLayout(grp_storybook)
-        sb_layout.setSpacing(8)
-        sb_layout.setColumnStretch(0, 0)
-        sb_layout.setColumnStretch(1, 1)
-        sb_layout.setColumnStretch(2, 0)
-        sb_layout.setColumnStretch(3, 1)
-
-        self.chk_storybook_mode = QCheckBox("启用小人书沉浸模式（AI 连环画图文同步）")
-        self.chk_storybook_mode.setStyleSheet("font-weight: bold; color: #4CAF50;")
-        self.chk_storybook_mode.setToolTip("开启后，系统将按段落聚类为分镜场景，AI 自动生成专属插画并随语音同步播放（上图80% + 下文20%）")
-        self.chk_storybook_mode.setChecked(True)
-        self.chk_storybook_mode.stateChanged.connect(self._on_storybook_mode_changed)
-        sb_layout.addWidget(self.chk_storybook_mode, 0, 0, 1, 4)
-
-        # 仅保留分镜节奏 与 插画画风（其他 4 个临时测试参数挪至右侧工作台视窗下沿）
-        lbl_scene_tempo = QLabel("分镜节奏:")
-        lbl_scene_tempo.setFixedWidth(68)
-        self.spn_paras_per_scene = QSpinBox()
-        self.spn_paras_per_scene.setRange(1, 20)
-        self.spn_paras_per_scene.setValue(5)
-        self.spn_paras_per_scene.setSuffix(" 段/镜")
-        self.spn_paras_per_scene.setToolTip("每隔多少个句子/段落自动切换一张插画（默认 5 段/镜）")
-        self.spn_paras_per_scene.valueChanged.connect(self._refresh_visual_preview)
-
-        lbl_style = QLabel("插画画风:")
-        lbl_style.setFixedWidth(60)
-        lbl_style.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        self.cmb_storybook_style = QComboBox()
-        self.cmb_storybook_style.addItem("中国传统水墨风", "chinese_ink")
-        self.cmb_storybook_style.addItem("经典复古连环画风", "comic_strip")
-        self.cmb_storybook_style.addItem("唯美动漫插画风", "anime")
-        self.cmb_storybook_style.addItem("欧洲古典油画风", "oil_painting")
-        self.cmb_storybook_style.addItem("写实电影画质风", "realistic")
-        self.cmb_storybook_style.currentIndexChanged.connect(self._refresh_visual_preview)
-
-        sb_layout.addWidget(lbl_scene_tempo, 1, 0)
-        sb_layout.addWidget(self.spn_paras_per_scene, 1, 1)
-        sb_layout.addWidget(lbl_style, 1, 2)
-        sb_layout.addWidget(self.cmb_storybook_style, 1, 3)
-
-        layout.addWidget(grp_storybook)
 
         # 分组 2: 声音与引擎 (解耦体系)
         grp_voice = QGroupBox("【TTS 引擎与音色配置】")
@@ -1519,12 +1516,90 @@ class MainWindow(QMainWindow):
 
         stage_layout.addLayout(col_voice, 0)
 
+        # 【为什么这样设计】
+        # 响应用户最新需求：“4个临时配置位置移到图像两侧的空白位置，不要减小右上框的高度”。
+        # 视频视窗采用 9:16 竖屏渲染时，左右两侧天然存在大面积 Letterbox 黑色留白空间。
+        # [左翼配置区：对应截图 2 画框左侧两项临时参数，利用左侧留白，文字完整呈现无截断]
+        self.widget_sb_left = QWidget()
+        col_sb_left = QVBoxLayout(self.widget_sb_left)
+        col_sb_left.setContentsMargins(2, 0, 2, 8)
+        col_sb_left.setSpacing(6)
+        col_sb_left.addStretch(1) # 下沉到底部与字幕区平齐
+
+        row_sd = QHBoxLayout()
+        row_sd.setContentsMargins(0, 0, 0, 0)
+        row_sd.setSpacing(4)
+        lbl_sd_model = QLabel("绘图模型:")
+        lbl_sd_model.setFixedWidth(68)
+        lbl_sd_model.setStyleSheet("font-size: 11px; color: #BBBBCC; font-weight: bold;")
+        self.cmb_sd_model = QComboBox()
+        self.cmb_sd_model.addItem("SD 1.5 + LCM (4步极速/首选)", "sd15_lcm")
+        self.cmb_sd_model.addItem("SD 1.5 标准版 (Euler a 20步)", "sd15_standard")
+        self.cmb_sd_model.currentIndexChanged.connect(self._refresh_visual_preview)
+        row_sd.addWidget(lbl_sd_model, 0)
+        row_sd.addWidget(self.cmb_sd_model, 1)
+        col_sb_left.addLayout(row_sd)
+
+        row_ratio = QHBoxLayout()
+        row_ratio.setContentsMargins(0, 0, 0, 0)
+        row_ratio.setSpacing(4)
+        lbl_ratio = QLabel("图文比例:")
+        lbl_ratio.setFixedWidth(68)
+        lbl_ratio.setStyleSheet("font-size: 11px; color: #BBBBCC; font-weight: bold;")
+        self.cmb_image_ratio = QComboBox()
+        self.cmb_image_ratio.addItem("80/20 经典连环画 (首选)", 0.80)
+        self.cmb_image_ratio.addItem("70/30 大字幕版式", 0.70)
+        self.cmb_image_ratio.currentIndexChanged.connect(self._refresh_visual_preview)
+        row_ratio.addWidget(lbl_ratio, 0)
+        row_ratio.addWidget(self.cmb_image_ratio, 1)
+        col_sb_left.addLayout(row_ratio)
+
+        stage_layout.addWidget(self.widget_sb_left, 1)
+
         # [中央] 封面与标题排版预览
         self.lbl_preview_image = QLabel()
         self.lbl_preview_image.setAlignment(Qt.AlignCenter)
-        self.lbl_preview_image.setMinimumSize(240, 280)
+        self.lbl_preview_image.setMinimumSize(220, 260)
         self.lbl_preview_image.setStyleSheet("border: 1px dashed #555566; background-color: #121216; border-radius: 6px;")
-        stage_layout.addWidget(self.lbl_preview_image, 1)
+        stage_layout.addWidget(self.lbl_preview_image, 0)
+
+        # [右翼配置区：对应截图 2 画框右侧两项临时参数，利用右侧留白，文字完整呈现无截断]
+        self.widget_sb_right = QWidget()
+        col_sb_right = QVBoxLayout(self.widget_sb_right)
+        col_sb_right.setContentsMargins(2, 0, 2, 8)
+        col_sb_right.setSpacing(6)
+        col_sb_right.addStretch(1) # 下沉到底部与字幕区平齐
+
+        row_director = QHBoxLayout()
+        row_director.setContentsMargins(0, 0, 0, 0)
+        row_director.setSpacing(4)
+        lbl_director = QLabel("意象导演:")
+        lbl_director.setFixedWidth(68)
+        lbl_director.setStyleSheet("font-size: 11px; color: #BBBBCC; font-weight: bold;")
+        self.cmb_prompt_director = QComboBox()
+        self.cmb_prompt_director.addItem("Qwen2.5-1.5B (纯CPU/首选)", "Qwen/Qwen2.5-1.5B-Instruct")
+        self.cmb_prompt_director.addItem("Qwen2.5-0.5B (轻量CPU)", "Qwen/Qwen2.5-0.5B-Instruct")
+        self.cmb_prompt_director.addItem("rjieba 离线词典提取", "rjieba")
+        self.cmb_prompt_director.currentIndexChanged.connect(self._refresh_visual_preview)
+        row_director.addWidget(lbl_director, 0)
+        row_director.addWidget(self.cmb_prompt_director, 1)
+        col_sb_right.addLayout(row_director)
+
+        row_upscale = QHBoxLayout()
+        row_upscale.setContentsMargins(0, 0, 0, 0)
+        row_upscale.setSpacing(4)
+        lbl_upscale = QLabel("画质超分:")
+        lbl_upscale.setFixedWidth(68)
+        lbl_upscale.setStyleSheet("font-size: 11px; color: #BBBBCC; font-weight: bold;")
+        self.cmb_upscale_policy = QComboBox()
+        self.cmb_upscale_policy.addItem("Real-ESRGAN x2 智能超分 (首选)", "real_esrgan")
+        self.cmb_upscale_policy.addItem("Lanczos 双三次超采样", "lanczos")
+        self.cmb_upscale_policy.currentIndexChanged.connect(self._refresh_visual_preview)
+        row_upscale.addWidget(lbl_upscale, 0)
+        row_upscale.addWidget(self.cmb_upscale_policy, 1)
+        col_sb_right.addLayout(row_upscale)
+
+        stage_layout.addWidget(self.widget_sb_right, 1)
 
         # [右翼] 背景音乐控制柱：顶部标签 -> 中间滑块与读数 -> 底部圆形播放按钮
         col_bgm = QVBoxLayout()
@@ -1558,76 +1633,6 @@ class MainWindow(QMainWindow):
         stage_layout.addLayout(col_bgm, 0)
 
         wb_main_layout.addLayout(stage_layout)
-
-        # 【为什么这样设计】
-        # 响应用户最新需求：“在右侧上框内的下沿放置截图 2 的 4 个临时测试参数”。
-        # 将绘图模型、意象导演、图文比例、画质超分等测试矩阵收纳在工作台下沿，
-        # 既直观方便测试切换，又彻底解放左侧配置卡片空间，杜绝遮挡。
-        self.frame_storybook_params = QFrame()
-        self.frame_storybook_params.setStyleSheet("""
-            QFrame {
-                background-color: #161622;
-                border: 1px solid #333348;
-                border-radius: 5px;
-                padding: 2px 6px;
-            }
-            QLabel {
-                font-size: 11px;
-                color: #BBBBCC;
-                font-weight: bold;
-            }
-        """)
-        sb_param_grid = QGridLayout(self.frame_storybook_params)
-        sb_param_grid.setContentsMargins(6, 4, 6, 4)
-        sb_param_grid.setHorizontalSpacing(10)
-        sb_param_grid.setVerticalSpacing(4)
-        sb_param_grid.setColumnStretch(0, 0)
-        sb_param_grid.setColumnStretch(1, 1)
-        sb_param_grid.setColumnStretch(2, 0)
-        sb_param_grid.setColumnStretch(3, 1)
-
-        lbl_sd_model = QLabel("绘图模型:")
-        lbl_sd_model.setFixedWidth(56)
-        self.cmb_sd_model = QComboBox()
-        self.cmb_sd_model.addItem("SD 1.5 + LCM (4步极速/首选)", "sd15_lcm")
-        self.cmb_sd_model.addItem("SD 1.5 标准版 (Euler a 20步)", "sd15_standard")
-        self.cmb_sd_model.currentIndexChanged.connect(self._refresh_visual_preview)
-
-        lbl_director = QLabel("意象导演:")
-        lbl_director.setFixedWidth(56)
-        lbl_director.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        self.cmb_prompt_director = QComboBox()
-        self.cmb_prompt_director.addItem("Qwen2.5-1.5B (纯CPU/首选)", "Qwen/Qwen2.5-1.5B-Instruct")
-        self.cmb_prompt_director.addItem("Qwen2.5-0.5B (轻量CPU)", "Qwen/Qwen2.5-0.5B-Instruct")
-        self.cmb_prompt_director.addItem("rjieba 离线词典提取", "rjieba")
-        self.cmb_prompt_director.currentIndexChanged.connect(self._refresh_visual_preview)
-
-        lbl_ratio = QLabel("图文比例:")
-        lbl_ratio.setFixedWidth(56)
-        self.cmb_image_ratio = QComboBox()
-        self.cmb_image_ratio.addItem("80/20 经典连环画 (首选)", 0.80)
-        self.cmb_image_ratio.addItem("70/30 大字幕版式", 0.70)
-        self.cmb_image_ratio.currentIndexChanged.connect(self._refresh_visual_preview)
-
-        lbl_upscale = QLabel("画质超分:")
-        lbl_upscale.setFixedWidth(56)
-        lbl_upscale.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        self.cmb_upscale_policy = QComboBox()
-        self.cmb_upscale_policy.addItem("Real-ESRGAN x2 智能超分 (首选)", "real_esrgan")
-        self.cmb_upscale_policy.addItem("Lanczos 双三次超采样", "lanczos")
-        self.cmb_upscale_policy.currentIndexChanged.connect(self._refresh_visual_preview)
-
-        sb_param_grid.addWidget(lbl_sd_model, 0, 0)
-        sb_param_grid.addWidget(self.cmb_sd_model, 0, 1)
-        sb_param_grid.addWidget(lbl_director, 0, 2)
-        sb_param_grid.addWidget(self.cmb_prompt_director, 0, 3)
-
-        sb_param_grid.addWidget(lbl_ratio, 1, 0)
-        sb_param_grid.addWidget(self.cmb_image_ratio, 1, 1)
-        sb_param_grid.addWidget(lbl_upscale, 1, 2)
-        sb_param_grid.addWidget(self.cmb_upscale_policy, 1, 3)
-
-        wb_main_layout.addWidget(self.frame_storybook_params)
 
         # 下部：【混合试听】主控制按钮 — 三态切换（播放/暂停/继续）
         # 【为什么这样设计】
@@ -2189,7 +2194,8 @@ class MainWindow(QMainWindow):
         """响应小人书沉浸图文模式勾选变动"""
         is_enabled = bool(state)
         for w in (
-            getattr(self, 'frame_storybook_params', None),
+            getattr(self, 'widget_sb_left', None),
+            getattr(self, 'widget_sb_right', None),
             getattr(self, 'cmb_sd_model', None),
             getattr(self, 'cmb_prompt_director', None),
             getattr(self, 'cmb_image_ratio', None),
