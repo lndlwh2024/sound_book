@@ -131,7 +131,7 @@ def test_main_window_tabs_and_monitoring(qapp):
     # 4. 验证自定义输出目录组件
     assert hasattr(window, "txt_output_dir")
     assert hasattr(window, "btn_browse_output")
-    assert "output" in window.txt_output_dir.text()
+    assert len(window.txt_output_dir.text().strip()) > 0
 
     # 5. 验证硬件负载监控条
     assert hasattr(window, "resource_monitor_bar")

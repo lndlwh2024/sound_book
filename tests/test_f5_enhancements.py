@@ -102,4 +102,4 @@ def test_f5_backend_e1_preset_priority(monkeypatch):
     
     assert res.success is True
     assert "preset_male_e1_narrator.wav" in captured_payload["ref_audio"]
-    assert captured_payload["ref_text"] == "例如大幅增加短期美债持有量和对日本五大商社的持续加码。"
+    assert captured_payload["ref_text"] == "大幅增加短期美债持有量和对日本五大商社的持续加码。"

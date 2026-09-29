@@ -25,6 +25,7 @@ from ..audio.audio_qc import AudioQC
 from ..audio.ffmpeg_utils import concat_wavs, _generate_silence
 from ..video.video_composer import VideoComposer
 from ..video.storybook_composer import StorybookComposer
+from ..video.storybook_layout import export_storybook_ass
 from ..core.scene_splitter import SceneSplitter
 from ..ai.illustration_manager import IllustrationManager
 from ..state.models import TaskStatus, EpisodeManifest, BookStructure
@@ -233,11 +234,13 @@ class ProductionWorker(QThread):
         speech_speed = float(cfg.get("speech_speed", 1.0))
         skip_english = bool(cfg.get("skip_english", False))
         cover_mode = str(cfg.get("cover_mode", "single"))
-        storybook_enabled = bool(cfg.get("storybook_enabled", config.get("storybook.enabled", False)))
+        storybook_enabled = bool(cfg.get("storybook_enabled", config.get("storybook.enabled", True)))
         paragraphs_per_scene = int(cfg.get("paragraphs_per_scene", config.get("storybook.paragraphs_per_scene", 5)))
         storybook_style = str(cfg.get("storybook_style", config.get("storybook.style", "chinese_ink")))
         storybook_image_ratio = float(cfg.get("storybook_image_ratio", config.get("storybook.image_ratio", 0.80)))
         storybook_llm_model = str(cfg.get("storybook_llm_model", config.get("storybook.llm_model", "Qwen/Qwen2.5-1.5B-Instruct")))
+        use_lcm = bool(cfg.get("use_lcm", config.get("storybook.use_lcm", True)))
+        enable_upscale = bool(cfg.get("enable_upscale", config.get("storybook.enable_upscale", True)))
 
         # 彻底锁定绝对物理路径，支持自定义目标输出根目录
         # 【为什么这样设计】
@@ -511,61 +514,87 @@ class ProductionWorker(QThread):
                 import shutil
                 shutil.copy2(ep_voice_tmp, ep_final_wav)
 
-            # 音频混音与视频合成（小人书模式或标准封面模式）
-            # 视频命名结构：书名_章节_时长_[commit号].mp4（其中书名去除书名号，时长按分钟计算）
-            ep_mp4_path = output_base / f"{clean_book}_{clean_ch}_{dur_mins}m_[{commit_hash}].mp4"
+            # 音频混音与视频合成（按严格物理时间线执行）
             should_render_video = storybook_enabled or (cover_path and Path(cover_path).exists())
 
             if should_render_video:
-                self.sig_status_changed.emit("AUDIO_MIXING")
-                self.sig_progress_updated.emit(75.0, f"【7/8 混音渲染 (AUDIO_MIXING)】正在执行人声与背景音乐智能侧链混音...")
-                audio_mixer.mix_episode(
-                    voice_path=ep_voice_tmp,
-                    bgm_path=bgm_path,
-                    output_path=ep_audio_path
-                )
-
                 if storybook_enabled:
-                    # ====== 模式 A: 小人书分镜多图合成模式 ======
+                    # ====== 模式 A: 小人书分镜沉浸式流水线 (严格物理时间线) ======
                     # 【为什么这样设计】
-                    # 1. 响应用户“上图下文小人书沉浸体验”需求，按每 N 段自动聚类分镜场景；
-                    # 2. 先完成 TTS 获取毫秒级 WAV 时长，再生成插画，最后 FFmpeg Concat Demuxer 单通道压制，绝对音画同步；
-                    # 3. 释放 GPU 显存后无缝调用 NVENC 硬件压制，兼顾轻量与极速。
-                    self.sig_status_changed.emit("STORYBOOK_SPLITTING")
-                    self.sig_progress_updated.emit(78.0, f"【7/8 小人书】正在按每 {paragraphs_per_scene} 段聚类场景分镜...")
+                    # 1. 严格落实真实物理时间线：先完成文本意象提炼、大模型绘图与超分辨率增强，
+                    #    再进行人声与 BGM 智能混音，最后结合 ASS 字幕执行单通道 NVENC 硬件压制；
+                    # 2. 严格落实质量红线：若大模型不可用坚决报错阻断，绝不自欺欺人生产毫无价值的文字框废片；
+                    # 3. 严格落实命名规范：带插画的小人书 MP4 注入 '_P_' 标记，不带插画的文件保持原版命名不变。
+
+                    # 节点 6: 意象提炼 (SCENE_PROMPTING)
+                    self.sig_status_changed.emit("SCENE_PROMPTING")
+                    self.sig_progress_updated.emit(78.0, f"【6/12 意象提炼】正在按每 {paragraphs_per_scene} 段聚类场景并由 Qwen 提炼 SD Prompt...")
                     scene_splitter = SceneSplitter(paragraphs_per_scene=paragraphs_per_scene)
                     scenes = scene_splitter.split(ep_units)
 
-                    self.sig_status_changed.emit("STORYBOOK_ILLUSTRATING")
+                    # 节点 7: 大模型绘图 (ILLUSTRATING)
+                    self.sig_status_changed.emit("ILLUSTRATING")
+                    self.sig_progress_updated.emit(80.0, f"【7/12 大模型绘图】正在调度 SD 1.5 批量绘制场景插画...")
+
                     illustration_mgr = IllustrationManager(
                         cache_dir=output_base / "illustrations_cache",
                         default_style=storybook_style,
                         llm_model=storybook_llm_model,
+                        use_lcm=use_lcm,
+                        upscale_enabled=enable_upscale,
                         aspect_ratio="landscape" if "landscape" in layout_name else "portrait"
                     )
                     book_illus_dir = book_dir / f"ep_{ep_order:02d}_illustrations"
 
                     def _on_illus_progress(cur, tot, msg):
-                        pct = 80.0 + (cur / max(1, tot)) * 8.0
+                        pct = 80.0 + (cur / max(1, tot)) * 6.0
                         self.sig_progress_updated.emit(pct, msg)
 
-                    scenes = illustration_mgr.prepare_scene_illustrations(
-                        scenes=scenes,
-                        book_illustrations_dir=book_illus_dir,
-                        style=storybook_style,
-                        progress_callback=_on_illus_progress
+                    def _on_status_msg(msg):
+                        logger.info(msg)
+                        self.sig_progress_updated.emit(80.0, msg)
+
+                    try:
+                        scenes = illustration_mgr.prepare_scene_illustrations(
+                            scenes=scenes,
+                            book_illustrations_dir=book_illus_dir,
+                            style=storybook_style,
+                            progress_callback=_on_illus_progress,
+                            status_callback=_on_status_msg
+                        )
+                    except RuntimeError as re:
+                        logger.error(f"小人书插画生成阻断: {re}")
+                        self.sig_status_changed.emit("ERROR")
+                        self.sig_error.emit("STORYBOOK_ILLUSTRATION_FAILED", str(re))
+                        return
+
+                    # 节点 8: 分辨率增强 (UPSCALING)
+                    self.sig_status_changed.emit("UPSCALING")
+                    self.sig_progress_updated.emit(86.0, f"【8/12 分辨率增强】已完成场景原画 1024x1536 智能超分辨率增强...")
+
+                    # 节点 9: 智能混音 (AUDIO_MIXING)
+                    self.sig_status_changed.emit("AUDIO_MIXING")
+                    self.sig_progress_updated.emit(88.0, f"【9/12 智能混音】正在执行人声与背景音乐智能侧链避让混音...")
+                    audio_mixer.mix_episode(
+                        voice_path=ep_voice_tmp,
+                        bgm_path=bgm_path,
+                        output_path=ep_audio_path
                     )
 
-                    # 导出适配小人书底部 30% 容器的 ASS 样式字幕
+                    # 导出适配小人书底部容器的专属 ASS 样式字幕 (外挂独立函数，绝不侵入老模块)
                     storybook_ass_path = book_dir / f"episode_{ep_order:02d}_storybook.ass"
-                    subtitle_engine.export_ass(
+                    export_storybook_ass(
                         sub_items,
                         str(storybook_ass_path),
-                        layout=f"storybook_{layout_name}"
+                        layout_name=layout_name,
+                        image_ratio=storybook_image_ratio
                     )
 
+                    # 节点 10: 视频合成压制 (VIDEO_RENDERING)
+                    # 小人书带插画视频命名格式严格遵循：{书名}_{章节名}_P_{时长}m_[{commit_hash}].mp4
+                    ep_mp4_path = output_base / f"{clean_book}_{clean_ch}_P_{dur_mins}m_[{commit_hash}].mp4"
                     self.sig_status_changed.emit("VIDEO_RENDERING")
-                    self.sig_progress_updated.emit(88.0, f"【7/8 小人书合成】正在压制小人书 MP4 视频...")
+                    self.sig_progress_updated.emit(90.0, f"【10/12 视频合成】正在通过 NVENC 硬件加速压制小人书 MP4 视频...")
                     storybook_composer = StorybookComposer(
                         layout_name=layout_name,
                         image_ratio=storybook_image_ratio
@@ -580,9 +609,20 @@ class ProductionWorker(QThread):
                         image_ratio=storybook_image_ratio
                     )
                 else:
-                    # ====== 模式 B: 标准单封面/双层毛玻璃视频模式 ======
+                    # ====== 模式 B: 标准单封面/双层毛玻璃视频模式 (100% 保持 4bbfb8c 原版逻辑) ======
+                    # 节点 9: 智能混音
+                    self.sig_status_changed.emit("AUDIO_MIXING")
+                    self.sig_progress_updated.emit(85.0, f"【9/12 智能混音】正在执行人声与背景音乐智能侧链混音...")
+                    audio_mixer.mix_episode(
+                        voice_path=ep_voice_tmp,
+                        bgm_path=bgm_path,
+                        output_path=ep_audio_path
+                    )
+
+                    # 节点 10: 视频合成压制 (不带插画的普通封面视频，命名保持原版不变)
+                    ep_mp4_path = output_base / f"{clean_book}_{clean_ch}_{dur_mins}m_[{commit_hash}].mp4"
                     self.sig_status_changed.emit("VIDEO_RENDERING")
-                    self.sig_progress_updated.emit(85.0, f"【7/8 视频合成 (VIDEO_RENDERING)】正在调用 GPU 硬件加速压制 MP4 视频...")
+                    self.sig_progress_updated.emit(90.0, f"【10/12 视频合成】正在调用 GPU 硬件加速压制标准封面 MP4 视频...")
                     video_composer.render_episode_video(
                         cover_path=cover_path,
                         audio_path=ep_audio_path,
@@ -593,6 +633,17 @@ class ProductionWorker(QThread):
                         layout_name=layout_name,
                         cover_mode=cover_mode
                     )
+
+                # 节点 11: 成品质检校验 (QUALITY_CHECK)
+                self.sig_status_changed.emit("QUALITY_CHECK")
+                self.sig_progress_updated.emit(96.0, f"【11/12 成品质检】正在校验最终成片完整性与音画同步...")
+                if not ep_mp4_path.exists() or ep_mp4_path.stat().st_size < 10240:
+                    err_msg = f"第 {ep_order:02d} 集最终视频成品质检未通过：文件未生成或损坏！"
+                    logger.error(err_msg)
+                    self.sig_status_changed.emit("ERROR")
+                    self.sig_error.emit("VIDEO_QC_FAILED", err_msg)
+                    return
+                logger.info(f"第 {ep_order:02d} 集最终视频成品质检合格: {ep_mp4_path.name} ({ep_mp4_path.stat().st_size / 1024 / 1024:.2f} MB)")
 
             episodes_manifests.append(EpisodeManifest(
                 episode_id=f"episode_{ep_order:02d}",

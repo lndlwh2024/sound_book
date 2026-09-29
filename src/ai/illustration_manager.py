@@ -1,21 +1,26 @@
 # -*- coding: utf-8 -*-
 """
 小人书插画管理器 (Illustration Manager)
-负责场景插画的生命周期调度、独立 SD Worker 子进程托管、增量磁盘缓存与优雅降级兜底。
+负责场景插画的生命周期调度、独立 SD Worker 子进程托管、增量磁盘缓存与严格质量准入。
 
 【为什么这样设计】
-1. 增量哈希缓存：以场景提示词与艺术风格的 SHA256 哈希作为文件名。重新生成或调试时，已存在的插画直接复用，杜绝重复调用 GPU 算力；
-2. 零中断优雅兜底：若本地 SD Worker 尚未就绪或显存不足，自动调度 PIL 生成高雅古风水墨渐变背景与场景意象牌，保证生产管线 100% 成功交付，杜绝任何阶段崩溃；
-3. 子进程生命周期守护：在分集视频合成前拉起 SD Worker 批量产图，产图完毕后立即主动发送 stop 命令注销进程，100% 归还 4GB 显存给下游 FFmpeg。
+1. 算力层真实兜底：针对 Quadro T1000 4GB 显存限制，启用 enable_model_cpu_offload()，将 40GB 超大内存作为后盾，显存峰值压低至 1.8~2.5GB；
+2. 严肃质量红线：坚决贯彻用户指示，彻底废除 PIL 纯文字底板冒充插画的设计！若模型未就绪或生成失败，坚决报错阻断，绝不自欺欺人生产毫无价值的废片；
+3. 状态透明提示：首次执行或大模型载入时，通过回调在日志框中明确展示“正在检查/下载本地大模型”，防止用户误以为软件卡死假死；
+4. 增量哈希缓存：以场景提示词与艺术风格的 SHA256 哈希作为文件名。重新生成或调试时，已存在的插画直接复用，杜绝重复调用 GPU 算力；
+5. 子进程生命周期守护：在分集视频合成前拉起 SD Worker 批量产图，产图完毕后立即主动发送 stop 命令注销进程，100% 归还 4GB 显存给下游 FFmpeg。
 """
 import os
 import sys
 import json
+import time
+import queue
 import hashlib
 import logging
+import threading
 import subprocess
 from pathlib import Path
-from typing import List, Dict, Any, Optional, Callable
+from typing import List, Dict, Any, Optional, Callable, Tuple
 
 from .prompt_generator import PromptGenerator
 from ..core.scene_splitter import ScenePlan
@@ -34,6 +39,8 @@ class IllustrationManager:
         default_style: str = "chinese_ink",
         llm_model: Optional[str] = "Qwen/Qwen2.5-1.5B-Instruct",
         sd_model_id: Optional[str] = None,
+        use_lcm: bool = True,
+        upscale_enabled: bool = True,
         aspect_ratio: str = "portrait"
     ):
         self.cache_dir = Path(cache_dir) if cache_dir else Path("output/illustrations_cache")
@@ -41,9 +48,11 @@ class IllustrationManager:
         self.prompt_generator = PromptGenerator(default_style=default_style, llm_model=llm_model)
         self.default_style = default_style
         self.sd_model_id = sd_model_id or "runwayml/stable-diffusion-v1-5"
+        self.use_lcm = use_lcm
+        self.upscale_enabled = upscale_enabled
         self.aspect_ratio = aspect_ratio
 
-        # 确定生图基础与超分放大尺寸
+        # 确定生图基础与超分放大尺寸 (80% 黄金画面比例)
         if aspect_ratio == "landscape":
             self.base_width, self.base_height = 768, 512
             self.target_width, self.target_height = 1536, 1024
@@ -64,25 +73,39 @@ class IllustrationManager:
         self._worker_process: Optional[subprocess.Popen] = None
         self._worker_ready = False
 
-    def _compute_cache_key(self, prompt: str, style: str, width: int = 1024, height: int = 1536) -> str:
-        """根据提示词、风格与尺寸生成确定性哈希缓存键"""
-        raw = f"{prompt}|{style}|{width}x{height}"
+    def _compute_cache_key(self, prompt: str, style: str, w: int, h: int) -> str:
+        """基于提示词、画风与目标分辨率生成唯一定位哈希"""
+        raw = f"{prompt}|{style}|{w}x{h}|lcm={self.use_lcm}"
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
-    def _ensure_worker_started(self, device: str = "cuda", enable_cpu_offload: bool = True) -> bool:
+    def _ensure_worker_started(
+        self,
+        device: str = "cuda",
+        enable_cpu_offload: bool = True,
+        status_callback: Optional[Callable[[str], None]] = None
+    ) -> Tuple[bool, str]:
         """
-        按需拉起 SD Worker 子进程。
+        按需拉起 SD Worker 子进程并载入模型。
+        【为什么这样设计】
+        1. 允许最多 180 秒以支持大模型从本地磁盘载入（或首次下载权重）；
+        2. 流式监听 Worker 日志，通过 status_callback 实时输出至前端日志框，杜绝用户假死感；
+        3. 若模型缺失或加载失败，返回详细错误原因，由主流程决定严肃阻断。
         """
         if self._worker_process and self._worker_process.poll() is None and self._worker_ready:
-            return True
+            return True, "SD Worker 已经在运行"
 
         worker_script = Path(__file__).resolve().parent.parent.parent / "workers" / "sd_worker.py"
         if not worker_script.exists():
-            logger.warning(f"未找到 SD Worker 脚本: {worker_script}，将使用本地优雅降级底板")
-            return False
+            err = f"未找到 SD Worker 独立脚本: {worker_script}"
+            logger.error(err)
+            return False, err
+
+        msg = "【小人书大模型】正在启动绘图工作进程并加载 SD 1.5 权重 (首次运行约需 15~40 秒，请稍候)..."
+        logger.info(msg)
+        if status_callback:
+            status_callback(msg)
 
         try:
-            logger.info(f"正在拉起 SD Worker 进程: {self.python_exe} {worker_script.name}")
             self._worker_process = subprocess.Popen(
                 [self.python_exe, str(worker_script)],
                 stdin=subprocess.PIPE,
@@ -93,21 +116,34 @@ class IllustrationManager:
                 bufsize=1
             )
 
-            # 发送 init 指令
+            # 启动 stderr 监听线程，将子进程的下载与载入日志打到主程序日志中
+            def _log_stderr():
+                while self._worker_process and self._worker_process.poll() is None:
+                    line = self._worker_process.stderr.readline()
+                    if line:
+                        s_line = line.strip()
+                        if "download" in s_line.lower() or "loading" in s_line.lower() or "progress" in s_line.lower():
+                            logger.info(f"[SD Worker 进度] {s_line}")
+                            if status_callback:
+                                status_callback(f"【模型加载/下载中】{s_line}")
+                        else:
+                            logger.debug(f"[SD Worker] {s_line}")
+
+            stderr_thread = threading.Thread(target=_log_stderr, daemon=True)
+            stderr_thread.start()
+
+            # 发送 init 初始化指令
             init_cmd = {
                 "action": "init",
                 "model_id": self.sd_model_id,
                 "device": device,
                 "enable_cpu_offload": enable_cpu_offload,
-                "use_lcm": True
+                "use_lcm": self.use_lcm
             }
             self._worker_process.stdin.write(json.dumps(init_cmd) + "\n")
             self._worker_process.stdin.flush()
 
-            # 使用超时保护读取子进程响应，杜绝模型未下载或网络阻塞导致主线程死锁
-            import queue
-            import threading
-
+            # 使用守护队列读取 stdout 应答（最长等待 180 秒）
             resp_queue = queue.Queue()
 
             def _read_stdout():
@@ -121,36 +157,48 @@ class IllustrationManager:
             reader_thread.start()
 
             try:
-                raw_line = resp_queue.get(timeout=5.0)
+                # 预留 180 秒充裕时间供磁盘读取或网络下载
+                raw_line = resp_queue.get(timeout=180.0)
                 if isinstance(raw_line, Exception):
                     raise raw_line
                 resp_line = (raw_line or "").strip()
             except queue.Empty:
-                logger.info("SD Worker 未在 5 秒内就绪（本地权重未预置或离线），无缝熔断切换至本地优雅艺术底板")
+                err = "SD Worker 启动超时 (超过 180 秒未响应，可能因网络阻塞或显存耗尽)"
+                logger.error(err)
                 self._terminate_worker()
-                return False
+                return False, err
 
             if resp_line:
                 try:
                     resp = json.loads(resp_line)
                     if resp.get("status") == "ready":
                         self._worker_ready = True
-                        logger.info("SD Worker 成功就绪！")
-                        return True
+                        succ_msg = "【小人书大模型】SD 1.5 绘图大模型与 LCM-LoRA 插件已成功就绪！"
+                        logger.info(succ_msg)
+                        if status_callback:
+                            status_callback(succ_msg)
+                        return True, "就绪"
+                    else:
+                        err = resp.get("error", f"初始化异常返回: {resp_line}")
+                        logger.error(f"SD Worker 初始化失败: {err}")
+                        self._terminate_worker()
+                        return False, err
                 except json.JSONDecodeError:
                     pass
 
-            logger.info(f"SD Worker 未就绪 ({resp_line})，自动启用本地高雅艺术底板")
+            err = f"SD Worker 返回未知数据: {resp_line}"
+            logger.error(err)
             self._terminate_worker()
-            return False
+            return False, err
 
         except Exception as e:
-            logger.warning(f"拉起 SD Worker 失败 ({e})，将无缝降级为本地优雅艺术底板")
+            err = f"拉起 SD Worker 异常: {e}"
+            logger.error(err, exc_info=True)
             self._terminate_worker()
-            return False
+            return False, err
 
     def _terminate_worker(self) -> None:
-        """安全注销 SD Worker 进程并释放显存"""
+        """安全注销 SD Worker 进程并释放全部显存"""
         if self._worker_process:
             try:
                 if self._worker_process.poll() is None:
@@ -167,89 +215,47 @@ class IllustrationManager:
                 self._worker_ready = False
                 logger.info("SD Worker 进程已退出，显存已全部归还操作系统")
 
-    def _generate_stylized_placeholder(
-        self,
-        scene: ScenePlan,
-        output_path: Path,
-        style_name: str,
-        width: Optional[int] = None,
-        height: Optional[int] = None
-    ) -> Path:
-        """
-        优雅艺术底板生成器（零依赖纯本地保底）。
-        利用 Pillow 绘制高雅古风水墨/深蓝渐变纹理与意象题签。
-        """
-        from PIL import Image, ImageDraw, ImageFont
-
-        w = width or self.target_width
-        h = height or self.target_height
-
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        img = Image.new("RGB", (w, h), color=(18, 22, 28))
-        draw = ImageDraw.Draw(img)
-
-        # 绘制古典水墨雅致渐变条纹
-        for y in range(h):
-            ratio = y / max(1, h)
-            r = int(18 + ratio * 15)
-            g = int(24 + ratio * 20)
-            b = int(32 + ratio * 28)
-            draw.line([(0, y), (w, y)], fill=(r, g, b))
-
-        # 绘制优雅外边框
-        pad = int(min(w, h) * 0.04)
-        draw.rectangle(
-            [(pad, pad), (w - pad, h - pad)],
-            outline=(60, 75, 95),
-            width=2
-        )
-        draw.rectangle(
-            [(pad + 8, pad + 8), (w - pad - 8, h - pad - 8)],
-            outline=(45, 55, 70),
-            width=1
-        )
-
-        # 尝试使用 Windows 微软雅黑写入场景题注
-        font_path = "C:/Windows/Fonts/msyh.ttc"
-        try:
-            font_title = ImageFont.truetype(font_path, int(min(w, h) * 0.04))
-            font_body = ImageFont.truetype(font_path, int(min(w, h) * 0.026))
-        except Exception:
-            font_title = ImageFont.load_default()
-            font_body = ImageFont.load_default()
-
-        # 场景标题
-        title_text = f"—— 第 {scene.scene_index} 幕 · {style_name} ——"
-        draw.text((w // 2, h // 2 - 50), title_text, fill=(212, 175, 55), font=font_title, anchor="mm")
-
-        # 场景核心摘录
-        snippet = scene.full_text[:40] + ("..." if len(scene.full_text) > 40 else "")
-        draw.text((w // 2, h // 2 + 30), snippet, fill=(180, 195, 210), font=font_body, anchor="mm")
-
-        img.save(str(output_path), format="PNG")
-        logger.debug(f"已生成艺术降级底板: {output_path}")
-        return output_path
-
     def prepare_scene_illustrations(
         self,
         scenes: List[ScenePlan],
         book_illustrations_dir: Path,
         style: Optional[str] = None,
-        progress_callback: Optional[Callable[[int, int, str], None]] = None
+        progress_callback: Optional[Callable[[int, int, str], None]] = None,
+        status_callback: Optional[Callable[[str], None]] = None
     ) -> List[ScenePlan]:
         """
-        批量为分集的所有场景准备插画。
-        优先检索磁盘缓存；若无缓存则尝试 SD 生成；若模型不可用则调度艺术降级底板。
+        批量为分集的所有场景绘制真实插画。
+        【为什么这样设计】
+        1. 优先复用磁盘哈希缓存，避免重复耗费算力；
+        2. 若本地未命中缓存且 SD Worker 无法就绪，坚决抛出 RuntimeError 阻断流水线，
+           绝不自欺欺人生成毫无价值的文字框废片；
+        3. 单张插画生成后无损通过超分辨率放大输出 1024x1536 细腻大图。
         """
         book_illustrations_dir.mkdir(parents=True, exist_ok=True)
         chosen_style = style or self.default_style
         total = len(scenes)
 
-        worker_available = False
-        try:
-            worker_available = self._ensure_worker_started()
-        except Exception as e:
-            logger.warning(f"检查 SD Worker 异常: {e}")
+        # 检查是否全部已存在缓存
+        all_cached = True
+        for scene in scenes:
+            prompt_info = self.prompt_generator.build_prompt(scene.full_text, style_key=chosen_style)
+            scene.prompt = prompt_info["positive_prompt"]
+            cache_key = self._compute_cache_key(scene.prompt, chosen_style, self.target_width, self.target_height)
+            target_file = book_illustrations_dir / f"{scene.scene_id}_{cache_key}.png"
+            cache_file = self.cache_dir / f"art_{cache_key}.png"
+            if not target_file.exists() and not cache_file.exists():
+                all_cached = False
+                break
+
+        # 若未全部缓存，必须拉起真实 SD Worker 进行绘图
+        if not all_cached:
+            worker_ok, err_msg = self._ensure_worker_started(status_callback=status_callback)
+            if not worker_ok:
+                raise RuntimeError(
+                    f"【小人书大模型阻断】无法启动 SD 1.5 绘图大模型 ({err_msg})。\n"
+                    f"请检查网络或确认本地 models/stable-diffusion-v1-5 权重是否就绪。\n"
+                    f"已严格终止生产，杜绝产出毫无插画的废片。"
+                )
 
         try:
             for idx, scene in enumerate(scenes, start=1):
@@ -265,7 +271,7 @@ class IllustrationManager:
                 if target_file.exists():
                     scene.image_path = str(target_file)
                     if progress_callback:
-                        progress_callback(idx, total, f"【小人书插画】第 {idx}/{total} 幕命中缓存")
+                        progress_callback(idx, total, f"【小人书插画】第 {idx}/{total} 幕命中当前分集缓存")
                     continue
 
                 if cache_file.exists():
@@ -273,58 +279,52 @@ class IllustrationManager:
                     shutil.copy2(cache_file, target_file)
                     scene.image_path = str(target_file)
                     if progress_callback:
-                        progress_callback(idx, total, f"【小人书插画】第 {idx}/{total} 幕从全局缓存复用")
+                        progress_callback(idx, total, f"【小人书插画】第 {idx}/{total} 幕从全局插画库秒级复用")
                     continue
 
-                # 3. 尝试调用 SD Worker 生成 (带超分放大)
-                generated = False
-                if worker_available and self._worker_process and self._worker_process.poll() is None:
-                    try:
-                        if progress_callback:
-                            progress_callback(idx, total, f"【小人书插画】正在调用 GPU 渲染与超分第 {idx}/{total} 幕...")
-                        gen_cmd = {
-                            "action": "generate",
-                            "prompt": prompt_info["positive_prompt"],
-                            "negative_prompt": prompt_info["negative_prompt"],
-                            "output_path": str(target_file),
-                            "width": self.base_width,
-                            "height": self.base_height,
-                            "num_inference_steps": 4,
-                            "guidance_scale": 1.5,
-                            "upscale": True,
-                            "target_width": self.target_width,
-                            "target_height": self.target_height
-                        }
-                        self._worker_process.stdin.write(json.dumps(gen_cmd) + "\n")
-                        self._worker_process.stdin.flush()
+                # 3. 必须调用 SD Worker 绘制真实插画
+                if not self._worker_process or self._worker_process.poll() is not None:
+                    raise RuntimeError(f"SD Worker 进程异常崩溃退出，无法继续生成第 {idx}/{total} 幕插画！")
 
-                        resp_line = self._worker_process.stdout.readline().strip()
-                        if resp_line:
-                            resp = json.loads(resp_line)
-                            if resp.get("success"):
-                                import shutil
-                                shutil.copy2(target_file, cache_file)
-                                scene.image_path = str(target_file)
-                                generated = True
-                    except Exception as e:
-                        logger.warning(f"SD Worker 渲染第 {idx} 幕失败: {e}")
+                if progress_callback:
+                    progress_callback(idx, total, f"【小人书插画】正在调度 SD 1.5 绘制第 {idx}/{total} 幕插画并超分...")
 
-                # 4. 优雅降级保底
-                if not generated:
-                    if progress_callback:
-                        progress_callback(idx, total, f"【小人书插画】第 {idx}/{total} 幕启用艺术底板")
-                    self._generate_stylized_placeholder(
-                        scene,
-                        target_file,
-                        prompt_info["style_name"],
-                        width=self.target_width,
-                        height=self.target_height
-                    )
-                    scene.image_path = str(target_file)
+                steps = 4 if self.use_lcm else 20
+                guidance = 1.5 if self.use_lcm else 7.5
+
+                gen_cmd = {
+                    "action": "generate",
+                    "prompt": prompt_info["positive_prompt"],
+                    "negative_prompt": prompt_info["negative_prompt"],
+                    "output_path": str(target_file),
+                    "width": self.base_width,
+                    "height": self.base_height,
+                    "num_inference_steps": steps,
+                    "guidance_scale": guidance,
+                    "upscale": self.upscale_enabled,
+                    "target_width": self.target_width,
+                    "target_height": self.target_height
+                }
+                self._worker_process.stdin.write(json.dumps(gen_cmd) + "\n")
+                self._worker_process.stdin.flush()
+
+                resp_line = self._worker_process.stdout.readline().strip()
+                if not resp_line:
+                    raise RuntimeError(f"SD Worker 未响应第 {idx}/{total} 幕插画生成指令！")
+
+                resp = json.loads(resp_line)
+                if not resp.get("success"):
+                    fail_err = resp.get("error", "未知绘画失败")
+                    raise RuntimeError(f"第 {idx}/{total} 幕大模型绘图失败: {fail_err}")
+
+                # 成功生成，拷贝入持久化全局缓存
+                import shutil
+                shutil.copy2(target_file, cache_file)
+                scene.image_path = str(target_file)
+                logger.info(f"第 {idx}/{total} 幕插画生成成功: {target_file.name}")
+
+            return scenes
 
         finally:
-            # 无论成功与否，全部场景图完成后立即注销 SD 进程，确保 100% 释放 GPU 给下游 FFmpeg
+            # 批量绘图完毕后立即注销子进程，100% 归还 4GB 显存给下游 FFmpeg
             self._terminate_worker()
-
-        logger.info(f"小人书全部分镜插画就绪，共计 {len(scenes)} 张")
-        return scenes

@@ -389,23 +389,27 @@ class ResourceMonitorBar(QFrame):
 
 class PipelineFlowWidget(QWidget):
     """
-    全流程管线 8 节点可视化指示图。
+    全流程管线 12 节点真实物理时间线可视化指示图。
     【为什么这样设计】
-    采纳用户优化建议：
-    1. 移除节点卡片中的冗余英文代码（如 PARSED, TTS_GEN 等），仅保留纯中文名称；
-    2. 纵向空间 2/3 分配给中文管线说明：卡片内部由原双行缩为单行居中，增加垂直 padding 与字号至 12px 加粗，
-       使 8 个生产阶段更加醒目大气、易于辨识；
-    3. 纵向空间 1/3 让渡给底部的硬件负载、进度条和计时层，消除拥挤感。
+    严格落实用户指示：
+    1. 真实物理时间线：重构为 12 个严谨物理节点（解析->清洗->规划->语音合成->字幕对齐->意象提炼->大模型绘图->分辨率增强->智能混音->视频压制->成品质检->生产完成）；
+    2. 分类归纳双行布局：上行承载【文本与声音时序】(1~6)，下行承载【视觉生成与成片交付】(7~12)，
+       单卡片横向充裕宽阔（超 180px），杜绝 12 节点挤在单行的微缩拥挤，字号大、极度醒目；
+    3. 状态高亮与多集重置：单集生产循环时精准重置第 4~11 阶段，保留全书共享的前 3 阶段。
     """
     STAGES = [
         ("PARSED", "1. 结构解析"),
         ("CLEANED", "2. 正文清洗"),
-        ("VALIDATED", "3. 质量校验"),
-        ("PLANNED", "4. 规划就绪"),
-        ("TTS_GENERATING", "5. 语音合成"),
-        ("ALIGNING_SUBTITLES", "6. 字幕对齐"),
-        ("AUDIO_MIXING", "7. 混音渲染"),
-        ("COMPLETED", "8. 生产完成"),
+        ("PLANNED", "3. 规划就绪"),
+        ("TTS_GENERATING", "4. 语音合成"),
+        ("ALIGNING_SUBTITLES", "5. 字幕对齐"),
+        ("SCENE_PROMPTING", "6. 意象提炼"),
+        ("ILLUSTRATING", "7. 大模型绘图"),
+        ("UPSCALING", "8. 分辨率增强"),
+        ("AUDIO_MIXING", "9. 智能混音"),
+        ("VIDEO_RENDERING", "10. 视频合成"),
+        ("QUALITY_CHECK", "11. 成品质检"),
+        ("COMPLETED", "12. 生产完成"),
     ]
 
     def __init__(self, parent=None):
@@ -416,22 +420,30 @@ class PipelineFlowWidget(QWidget):
         self._init_ui()
 
     def _init_ui(self):
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(0, 2, 0, 2)
-        layout.setSpacing(6)
+        main_v = QVBoxLayout(self)
+        main_v.setContentsMargins(0, 1, 0, 1)
+        main_v.setSpacing(4)
 
-        for code, zh_name in self.STAGES:
+        # 第 1 行：文本与声音时序 (节点 1 至 6)
+        row1 = QHBoxLayout()
+        row1.setContentsMargins(0, 0, 0, 0)
+        row1.setSpacing(4)
+
+        # 第 2 行：视觉生成与成片交付 (节点 7 至 12)
+        row2 = QHBoxLayout()
+        row2.setContentsMargins(0, 0, 0, 0)
+        row2.setSpacing(4)
+
+        for idx, (code, zh_name) in enumerate(self.STAGES):
             frame = QFrame()
             frame.setObjectName(f"node_{code}")
             f_layout = QVBoxLayout(frame)
-            # 2/3 纵向空间充实给卡片内中文说明：设为 7px 垂直 padding
-            f_layout.setContentsMargins(4, 7, 4, 7)
+            f_layout.setContentsMargins(4, 5, 4, 5)
             f_layout.setSpacing(0)
 
             lbl_zh = QLabel(zh_name)
             lbl_zh.setAlignment(Qt.AlignCenter)
-            lbl_zh.setStyleSheet("font-size: 12px; font-weight: bold; color: #777788;")
-
+            lbl_zh.setStyleSheet("font-size: 11px; font-weight: bold; color: #777788;")
             f_layout.addWidget(lbl_zh)
 
             frame.setStyleSheet("""
@@ -441,21 +453,31 @@ class PipelineFlowWidget(QWidget):
                     border-radius: 4px;
                 }
             """)
-            layout.addWidget(frame)
+
+            if idx < 6:
+                row1.addWidget(frame, 1)
+            else:
+                row2.addWidget(frame, 1)
+
             self.node_frames.append((code, frame, lbl_zh))
+
+        main_v.addLayout(row1)
+        main_v.addLayout(row2)
 
     def set_stage(self, stage: str):
         self.current_stage = stage
         stage_order = [s[0] for s in self.STAGES]
-        normalized_stage = "AUDIO_MIXING" if stage == "VIDEO_RENDERING" else stage
 
-        # 【为什么这样设计】
-        # 响应问题一：连续生产多集时，当工序由后面的阶段（例如 6.字幕对齐、7.混音渲染）
-        # 回退到第 5 阶段（TTS_GENERATING 语音合成）时，表明系统已进入新的一集；
-        # 此时前 4 阶段（1.结构解析、2.正文清洗、3.质量校验、4.规划就绪）为全书共享就绪状态，应保持已完成；
-        # 而第 5 至 7 阶段为单集专属生命周期，必须重置为待执行状态，使第 5 阶段重新高亮激活，消除卡在上一集混音渲染的问题！
+        # 兼容老状态码映射
+        normalized_stage = stage
+        if stage == "STORYBOOK_SPLITTING":
+            normalized_stage = "SCENE_PROMPTING"
+        elif stage == "STORYBOOK_ILLUSTRATING":
+            normalized_stage = "ILLUSTRATING"
+
+        # 连续生产多集时，当进入新一集的语音合成，重置单集生命周期
         if normalized_stage == "TTS_GENERATING":
-            for ep_stage in ["TTS_GENERATING", "ALIGNING_SUBTITLES", "AUDIO_MIXING", "COMPLETED"]:
+            for ep_stage in ["TTS_GENERATING", "ALIGNING_SUBTITLES", "SCENE_PROMPTING", "ILLUSTRATING", "UPSCALING", "AUDIO_MIXING", "VIDEO_RENDERING", "QUALITY_CHECK"]:
                 self.completed_stages.discard(ep_stage)
 
         if normalized_stage in stage_order:
@@ -474,7 +496,7 @@ class PipelineFlowWidget(QWidget):
                         border-radius: 4px;
                     }
                 """)
-                lbl_zh.setStyleSheet("font-size: 12px; font-weight: bold; color: #00E676;")
+                lbl_zh.setStyleSheet("font-size: 11px; font-weight: bold; color: #00E676;")
             elif code in self.completed_stages:
                 frame.setStyleSheet("""
                     QFrame {
@@ -483,7 +505,7 @@ class PipelineFlowWidget(QWidget):
                         border-radius: 4px;
                     }
                 """)
-                lbl_zh.setStyleSheet("font-size: 12px; font-weight: bold; color: #3CB371;")
+                lbl_zh.setStyleSheet("font-size: 11px; font-weight: bold; color: #3CB371;")
             else:
                 frame.setStyleSheet("""
                     QFrame {
@@ -492,7 +514,7 @@ class PipelineFlowWidget(QWidget):
                         border-radius: 4px;
                     }
                 """)
-                lbl_zh.setStyleSheet("font-size: 12px; font-weight: bold; color: #777788;")
+                lbl_zh.setStyleSheet("font-size: 11px; font-weight: bold; color: #777788;")
 
     def reset_pipeline(self):
         self.completed_stages.clear()
@@ -505,7 +527,7 @@ class PipelineFlowWidget(QWidget):
                     border-radius: 4px;
                 }
             """)
-            lbl_zh.setStyleSheet("font-size: 12px; font-weight: bold; color: #777788;")
+            lbl_zh.setStyleSheet("font-size: 11px; font-weight: bold; color: #777788;")
 
 
 
@@ -574,12 +596,12 @@ class AudioPlayButton(QPushButton):
 
 
 class MainWindow(QMainWindow):
-    """书声 (ShuSheng) v3.3.0 PySide6 桌面主窗口"""
+    """书声 (ShuSheng) v3.3.3 PySide6 桌面主窗口"""
 
     def __init__(self, bridge: Optional[TaskManagerBridge] = None):
         super().__init__()
         self.bridge = bridge or TaskManagerBridge()
-        self.setWindowTitle("书声 (ShuSheng) v3.3.0 - 自动化有声视频生产工具")
+        self.setWindowTitle("书声 (ShuSheng) v3.3.3 - 自动化有声视频生产工具 (小人书 AI 连环画增强版)")
         self._raw_status_text = "空闲就绪 (IDLE)"
         self._is_producing = False
         # 【自适应屏幕工作区】检测当前主显示器可用区域，动态计算最佳默认尺寸，保证初始开机与最大化排版一致且完全舒展
@@ -1000,8 +1022,8 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
 
-        # 分组 1: 书名与交付版式（聚合书籍源文件、正文起始、视频标题、版式、封面、背景音乐）
-        grp_book = QGroupBox("【书名与交付版式】")
+        # 分组 1: 书籍与基础版式
+        grp_book = QGroupBox("【书籍与基础版式】")
         g_layout = QGridLayout(grp_book)
         g_layout.setSpacing(8)
         g_layout.setColumnStretch(0, 0)
@@ -1028,17 +1050,17 @@ class MainWindow(QMainWindow):
         self.spn_start_page.setValue(1)
         self.spn_start_page.setToolTip("正文物理起始页（用于跳过前言、目录和版权页）")
 
-        # 视频主标题（从原包装板块挪入）
+        # 视频主标题
         self.txt_main_title = QLineEdit()
         self.txt_main_title.setPlaceholderText("例如: 《巴菲特致股东的信》精选")
         self.txt_main_title.textChanged.connect(self._refresh_visual_preview)
 
-        # 视频版式（从原包装板块挪入）
+        # 视频版式
         self.cmb_video_layout = QComboBox()
         self.cmb_video_layout.addItems(["竖屏 9:16 (1080x1920, 手机/短视频流)", "横屏 16:9 (1920x1080, 电脑/B站/宽屏)"])
         self.cmb_video_layout.currentIndexChanged.connect(self._refresh_visual_preview)
 
-        # 封面图片（从原包装板块挪入）
+        # 封面图片
         self.txt_cover_path = QLineEdit()
         self.txt_cover_path.setPlaceholderText("留空则使用默认极简书影...")
         self.txt_cover_path.textChanged.connect(self._refresh_visual_preview)
@@ -1057,7 +1079,7 @@ class MainWindow(QMainWindow):
         cover_row.addWidget(btn_browse_cover)
         cover_row.addWidget(self.cmb_cover_mode)
 
-        # 背景音乐（从原包装板块挪入）
+        # 背景音乐
         self.txt_bgm_path = QLineEdit()
         self.txt_bgm_path.setPlaceholderText("留空则不添加背景音乐 (纯净人声)...")
         self.txt_bgm_path.textChanged.connect(self._on_bgm_text_changed)
@@ -1070,7 +1092,7 @@ class MainWindow(QMainWindow):
         bgm_row.addWidget(self.txt_bgm_path, 1)
         bgm_row.addWidget(btn_browse_bgm, 0)
 
-        # 组装第一板块网格
+        # 组装第一板块网格（书名与正文起始同行并列，压缩纵向高度）
         lbl_book_file = QLabel("书籍文件:")
         lbl_book_file.setFixedWidth(68)
         g_layout.addWidget(lbl_book_file, 0, 0)
@@ -1079,73 +1101,122 @@ class MainWindow(QMainWindow):
         lbl_book_title = QLabel("书籍名称:")
         lbl_book_title.setFixedWidth(68)
         g_layout.addWidget(lbl_book_title, 1, 0)
-        g_layout.addWidget(self.txt_book_title, 1, 1, 1, 3)
+        g_layout.addWidget(self.txt_book_title, 1, 1)
 
-        lbl_start_page = QLabel("正文起始页:")
-        lbl_start_page.setFixedWidth(68)
-        g_layout.addWidget(lbl_start_page, 2, 0)
-        g_layout.addWidget(self.spn_start_page, 2, 1, 1, 3)
+        lbl_start_page = QLabel("正文起始:")
+        lbl_start_page.setFixedWidth(60)
+        lbl_start_page.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        g_layout.addWidget(lbl_start_page, 1, 2)
+        g_layout.addWidget(self.spn_start_page, 1, 3)
 
         lbl_main_title = QLabel("视频主标题:")
         lbl_main_title.setFixedWidth(68)
-        g_layout.addWidget(lbl_main_title, 3, 0)
-        g_layout.addWidget(self.txt_main_title, 3, 1, 1, 3)
+        g_layout.addWidget(lbl_main_title, 2, 0)
+        g_layout.addWidget(self.txt_main_title, 2, 1, 1, 3)
 
         lbl_v_layout = QLabel("视频版式:")
         lbl_v_layout.setFixedWidth(68)
-        g_layout.addWidget(lbl_v_layout, 4, 0)
-        g_layout.addWidget(self.cmb_video_layout, 4, 1, 1, 3)
+        g_layout.addWidget(lbl_v_layout, 3, 0)
+        g_layout.addWidget(self.cmb_video_layout, 3, 1, 1, 3)
 
         lbl_cover_img = QLabel("封面图片:")
         lbl_cover_img.setFixedWidth(68)
-        g_layout.addWidget(lbl_cover_img, 5, 0)
-        g_layout.addLayout(cover_row, 5, 1, 1, 3)
+        g_layout.addWidget(lbl_cover_img, 4, 0)
+        g_layout.addLayout(cover_row, 4, 1, 1, 3)
 
         lbl_bgm_title = QLabel("背景音乐:")
         lbl_bgm_title.setFixedWidth(68)
-        g_layout.addWidget(lbl_bgm_title, 6, 0)
-        g_layout.addLayout(bgm_row, 6, 1, 1, 3)
+        g_layout.addWidget(lbl_bgm_title, 5, 0)
+        g_layout.addLayout(bgm_row, 5, 1, 1, 3)
 
-        # 小人书沉浸式图文模式（上图下文多场景配图）
-        self.chk_storybook_mode = QCheckBox("启用小人书沉浸模式")
+        layout.addWidget(grp_book)
+
+        # 分组 2: 【小人书 AI 连环画专属配置矩阵（测试阶段显性化）】
+        grp_storybook = QGroupBox("【小人书 AI 连环画专属配置矩阵】")
+        sb_layout = QGridLayout(grp_storybook)
+        sb_layout.setSpacing(8)
+        sb_layout.setColumnStretch(0, 0)
+        sb_layout.setColumnStretch(1, 1)
+        sb_layout.setColumnStretch(2, 0)
+        sb_layout.setColumnStretch(3, 1)
+
+        self.chk_storybook_mode = QCheckBox("启用小人书沉浸模式（AI 连环画图文同步）")
         self.chk_storybook_mode.setStyleSheet("font-weight: bold; color: #4CAF50;")
-        self.chk_storybook_mode.setToolTip("开启后，系统将按段落聚类为分镜场景，AI 自动生成专属插画并随语音同步播放（上图70% + 下文30%）")
+        self.chk_storybook_mode.setToolTip("开启后，系统将按段落聚类为分镜场景，AI 自动生成专属插画并随语音同步播放（上图80% + 下文20%）")
+        self.chk_storybook_mode.setChecked(True)
         self.chk_storybook_mode.stateChanged.connect(self._on_storybook_mode_changed)
+        sb_layout.addWidget(self.chk_storybook_mode, 0, 0, 1, 4)
 
+        # 行 1: 绘图大模型 与 意象导演
+        lbl_sd_model = QLabel("绘图模型:")
+        lbl_sd_model.setFixedWidth(68)
+        self.cmb_sd_model = QComboBox()
+        self.cmb_sd_model.addItem("SD 1.5 + LCM (4步极速/首选)", "sd15_lcm")
+        self.cmb_sd_model.addItem("SD 1.5 标准版 (Euler a 20步)", "sd15_standard")
+        self.cmb_sd_model.currentIndexChanged.connect(self._refresh_visual_preview)
+
+        lbl_director = QLabel("意象导演:")
+        lbl_director.setFixedWidth(60)
+        lbl_director.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.cmb_prompt_director = QComboBox()
+        self.cmb_prompt_director.addItem("Qwen2.5-1.5B (纯CPU/首选)", "Qwen/Qwen2.5-1.5B-Instruct")
+        self.cmb_prompt_director.addItem("Qwen2.5-0.5B (轻量CPU)", "Qwen/Qwen2.5-0.5B-Instruct")
+        self.cmb_prompt_director.addItem("rjieba 离线词典提取", "rjieba")
+        self.cmb_prompt_director.currentIndexChanged.connect(self._refresh_visual_preview)
+
+        sb_layout.addWidget(lbl_sd_model, 1, 0)
+        sb_layout.addWidget(self.cmb_sd_model, 1, 1)
+        sb_layout.addWidget(lbl_director, 1, 2)
+        sb_layout.addWidget(self.cmb_prompt_director, 1, 3)
+
+        # 行 2: 图文比例 与 分辨率增强策略
+        lbl_ratio = QLabel("图文比例:")
+        lbl_ratio.setFixedWidth(68)
+        self.cmb_image_ratio = QComboBox()
+        self.cmb_image_ratio.addItem("80/20 经典连环画 (首选)", 0.80)
+        self.cmb_image_ratio.addItem("70/30 大字幕版式", 0.70)
+        self.cmb_image_ratio.currentIndexChanged.connect(self._refresh_visual_preview)
+
+        lbl_upscale = QLabel("画质超分:")
+        lbl_upscale.setFixedWidth(60)
+        lbl_upscale.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.cmb_upscale_policy = QComboBox()
+        self.cmb_upscale_policy.addItem("Real-ESRGAN x2 智能超分 (首选)", "real_esrgan")
+        self.cmb_upscale_policy.addItem("Lanczos 双三次超采样", "lanczos")
+        self.cmb_upscale_policy.currentIndexChanged.connect(self._refresh_visual_preview)
+
+        sb_layout.addWidget(lbl_ratio, 2, 0)
+        sb_layout.addWidget(self.cmb_image_ratio, 2, 1)
+        sb_layout.addWidget(lbl_upscale, 2, 2)
+        sb_layout.addWidget(self.cmb_upscale_policy, 2, 3)
+
+        # 行 3: 分镜节奏 与 插画画风
+        lbl_scene_tempo = QLabel("分镜节奏:")
+        lbl_scene_tempo.setFixedWidth(68)
         self.spn_paras_per_scene = QSpinBox()
         self.spn_paras_per_scene.setRange(1, 20)
         self.spn_paras_per_scene.setValue(5)
         self.spn_paras_per_scene.setSuffix(" 段/镜")
-        self.spn_paras_per_scene.setEnabled(False)
-        self.spn_paras_per_scene.setToolTip("每隔多少个自然段自动切换一张插画")
+        self.spn_paras_per_scene.setToolTip("每隔多少个自然段自动切换一张插画（默认 5 段/镜）")
+        self.spn_paras_per_scene.valueChanged.connect(self._refresh_visual_preview)
 
+        lbl_style = QLabel("插画画风:")
+        lbl_style.setFixedWidth(60)
+        lbl_style.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         self.cmb_storybook_style = QComboBox()
         self.cmb_storybook_style.addItem("中国传统水墨风", "chinese_ink")
         self.cmb_storybook_style.addItem("经典复古连环画风", "comic_strip")
         self.cmb_storybook_style.addItem("唯美动漫插画风", "anime")
         self.cmb_storybook_style.addItem("欧洲古典油画风", "oil_painting")
         self.cmb_storybook_style.addItem("写实电影画质风", "realistic")
-        self.cmb_storybook_style.setEnabled(False)
         self.cmb_storybook_style.currentIndexChanged.connect(self._refresh_visual_preview)
 
-        storybook_row = QHBoxLayout()
-        storybook_row.setContentsMargins(0, 0, 0, 0)
-        storybook_row.setSpacing(6)
-        storybook_row.addWidget(self.chk_storybook_mode, 0)
-        storybook_row.addWidget(self.spn_paras_per_scene, 0)
-        storybook_row.addWidget(self.cmb_storybook_style, 1)
+        sb_layout.addWidget(lbl_scene_tempo, 3, 0)
+        sb_layout.addWidget(self.spn_paras_per_scene, 3, 1)
+        sb_layout.addWidget(lbl_style, 3, 2)
+        sb_layout.addWidget(self.cmb_storybook_style, 3, 3)
 
-        lbl_storybook = QLabel("小人书模式:")
-        lbl_storybook.setFixedWidth(68)
-        g_layout.addWidget(lbl_storybook, 7, 0)
-        g_layout.addLayout(storybook_row, 7, 1, 1, 3)
-
-        layout.addWidget(grp_book)
-        # 【为什么这样设计】
-        # 响应用户核心需求：实现左侧栏目与右侧栏目在全屏最大化下绝对等高对齐。
-        # 不在最底部堆积单个粗暴的 addStretch，而是在 4 个 GroupBox 之间均匀分配弹性伸缩权重，
-        # 保证最底部的【目标输出目录】下沿与右侧日志框下沿像素级严格齐平，且最大化时各卡片呼吸感自然舒展。
-        layout.addStretch(1)
+        layout.addWidget(grp_storybook)
 
         # 分组 2: 声音与引擎 (解耦体系)
         grp_voice = QGroupBox("【TTS 引擎与音色配置】")
@@ -1627,9 +1698,9 @@ class MainWindow(QMainWindow):
         self.lbl_preview_time.setEnabled(is_internal_mode)
 
         # 【为什么这样设计】
-        # 响应用户需求：“将右上角的窗口纵向加1/3的长度，右下的窗口纵向减少1/3的长度”，
-        # 将垂直比例调整为 65:35，为封面排版与混音试听留出极度充裕的视觉空间。
-        layout.addWidget(grp_workbench, 65)
+        # 响应用户最新需求：“日志框内文字过小，可适当加高日志框一行的高度，降低视频框一行的高度”。
+        # 将垂直比例调整为 45:55，为下方生产计划与后台日志释放充裕纵向空间，彻底消除拥挤感。
+        layout.addWidget(grp_workbench, 45)
 
         # ── 3. 生产计划、硬件诊断与后台实时日志 (三 Sheet TabWidget) ──
         grp_dashboard = QGroupBox("【生产计划全景、系统诊断与实时日志】")
@@ -1641,14 +1712,14 @@ class MainWindow(QMainWindow):
         # Sheet 1: 分集规划
         self.txt_plan_summary = QTextEdit()
         self.txt_plan_summary.setReadOnly(True)
-        self.txt_plan_summary.setStyleSheet("background-color: #16161C; font-size: 12px;")
+        self.txt_plan_summary.setStyleSheet("background-color: #16161C; font-size: 13px; font-family: 'Microsoft YaHei', sans-serif; line-height: 1.35;")
         self.txt_plan_summary.setPlaceholderText("点击下方 [生成生产计划] 后，在此查看全书总字数、预估总时长与分集详细规划表...")
         self.tab_widget.addTab(self.txt_plan_summary, "📋 分集规划")
 
         # Sheet 2: 硬件状态与开启诊断
         self.txt_hardware_diag = QTextEdit()
         self.txt_hardware_diag.setReadOnly(True)
-        self.txt_hardware_diag.setStyleSheet("background-color: #16161C; font-size: 11px; font-family: Consolas, monospace;")
+        self.txt_hardware_diag.setStyleSheet("background-color: #16161C; font-size: 12px; font-family: Consolas, monospace;")
         self.tab_widget.addTab(self.txt_hardware_diag, "💻 硬件状态")
 
         # Sheet 3: 后台实时日志
@@ -1659,7 +1730,7 @@ class MainWindow(QMainWindow):
 
         self.txt_live_logs = QTextEdit()
         self.txt_live_logs.setReadOnly(True)
-        self.txt_live_logs.setStyleSheet("background-color: #121218; font-size: 11px; font-family: Consolas, monospace;")
+        self.txt_live_logs.setStyleSheet("background-color: #121218; font-size: 13px; font-family: Consolas, 'Microsoft YaHei', monospace; line-height: 1.35;")
         self.txt_live_logs.setPlaceholderText("后台生产流水线实时流转日志与报错详情将在此展示，杜绝盲目等待...")
         tab_log_layout.addWidget(self.txt_live_logs)
 
@@ -1671,7 +1742,7 @@ class MainWindow(QMainWindow):
         self.tab_widget.addTab(tab_log_widget, "📜 实时日志")
 
         dash_layout.addWidget(self.tab_widget)
-        layout.addWidget(grp_dashboard, 35)
+        layout.addWidget(grp_dashboard, 55)
         return panel
 
 
@@ -2090,10 +2161,16 @@ class MainWindow(QMainWindow):
     def _on_storybook_mode_changed(self, state: int) -> None:
         """响应小人书沉浸图文模式勾选变动"""
         is_enabled = bool(state)
-        if hasattr(self, 'spn_paras_per_scene'):
-            self.spn_paras_per_scene.setEnabled(is_enabled)
-        if hasattr(self, 'cmb_storybook_style'):
-            self.cmb_storybook_style.setEnabled(is_enabled)
+        for w in (
+            getattr(self, 'cmb_sd_model', None),
+            getattr(self, 'cmb_prompt_director', None),
+            getattr(self, 'cmb_image_ratio', None),
+            getattr(self, 'cmb_upscale_policy', None),
+            getattr(self, 'spn_paras_per_scene', None),
+            getattr(self, 'cmb_storybook_style', None),
+        ):
+            if w is not None:
+                w.setEnabled(is_enabled)
         if hasattr(self, '_refresh_visual_preview'):
             self._refresh_visual_preview()
 
@@ -2374,11 +2451,12 @@ class MainWindow(QMainWindow):
                 is_storybook = hasattr(self, 'chk_storybook_mode') and self.chk_storybook_mode.isChecked()
 
                 if is_storybook:
-                    # ====== 小人书 80/20 模式实时预览 ======
-                    img_h = int(canvas_h * 0.80)
+                    # ====== 小人书 80/20 或 70/30 模式实时连环画预览 ======
+                    ratio_val = float(self.cmb_image_ratio.currentData() or 0.80) if hasattr(self, 'cmb_image_ratio') else 0.80
+                    img_h = int(canvas_h * ratio_val)
                     txt_h = canvas_h - img_h
 
-                    # 1. 顶部 80% 插画区
+                    # 1. 顶部插画区 (80% 或 70%)
                     if has_cover:
                         orig_pix = QPixmap(cover_path)
                         if not orig_pix.isNull():
@@ -2390,18 +2468,33 @@ class MainWindow(QMainWindow):
                         painter.fillRect(0, 0, canvas_w, img_h, QColor("#141923"))
                         painter.setPen(QColor("#3A4A5E"))
                         painter.drawRect(6, 6, canvas_w - 12, img_h - 12)
-                        painter.setFont(QFont("Microsoft YaHei", 9))
-                        style_txt = self.cmb_storybook_style.currentText() if hasattr(self, 'cmb_storybook_style') else "插画"
+
+                        style_txt = self.cmb_storybook_style.currentText() if hasattr(self, 'cmb_storybook_style') else "水墨风"
+                        sd_txt = "SD 1.5 + LCM" if (hasattr(self, 'cmb_sd_model') and "LCM" in self.cmb_sd_model.currentText()) else "SD 1.5 标准版"
+                        director_txt = "Qwen2.5-1.5B" if (hasattr(self, 'cmb_prompt_director') and "1.5B" in self.cmb_prompt_director.currentText()) else ("Qwen2.5-0.5B" if (hasattr(self, 'cmb_prompt_director') and "0.5B" in self.cmb_prompt_director.currentText()) else "rjieba")
                         paras = self.spn_paras_per_scene.value() if hasattr(self, 'spn_paras_per_scene') else 5
+                        pct_int = int(ratio_val * 100)
+
+                        painter.setFont(QFont("Microsoft YaHei", 9, QFont.Bold))
                         painter.setPen(QColor("#D4AF37"))
-                        painter.drawText(0, 0, canvas_w, img_h, Qt.AlignCenter, f"【AI {style_txt}】\n每 {paras} 段自动切镜 (80% 画面)")
+                        painter.drawText(0, int(img_h * 0.28), canvas_w, 24, Qt.AlignCenter, f"【AI {style_txt}】")
+
+                        painter.setFont(QFont("Microsoft YaHei", 8))
+                        painter.setPen(QColor("#66CCFF"))
+                        painter.drawText(0, int(img_h * 0.44), canvas_w, 20, Qt.AlignCenter, f"[{sd_txt}]")
+
+                        painter.setPen(QColor("#A0C0E0"))
+                        painter.drawText(0, int(img_h * 0.58), canvas_w, 20, Qt.AlignCenter, f"导演: {director_txt}")
+
+                        painter.setPen(QColor("#888899"))
+                        painter.drawText(0, int(img_h * 0.72), canvas_w, 20, Qt.AlignCenter, f"每 {paras} 段自动切镜 ({pct_int}% 画面)")
 
                     # 2. 图文分割金边
                     painter.setPen(Qt.NoPen)
                     painter.setBrush(QColor("#D4AF37"))
                     painter.drawRect(0, img_h - 2, canvas_w, 2)
 
-                    # 3. 底部 20% 科技深黑字幕容器
+                    # 3. 底部文字容器 (20% 或 30%)
                     painter.fillRect(0, img_h, canvas_w, txt_h, QColor("#0D0D12"))
                     painter.setFont(QFont("Microsoft YaHei", 8))
                     painter.setPen(QColor("#FFFFFF"))
@@ -2583,11 +2676,13 @@ class MainWindow(QMainWindow):
             "speech_speed": self.spn_speed.value(),
             "cover_mode": "single" if hasattr(self, 'cmb_cover_mode') and "单层" in self.cmb_cover_mode.currentText() else "dual",
             "skip_english": (self.cmb_skip_english.currentText() == "是") if hasattr(self, 'cmb_skip_english') else True,
-            "storybook_enabled": self.chk_storybook_mode.isChecked() if hasattr(self, 'chk_storybook_mode') else False,
+            "storybook_enabled": self.chk_storybook_mode.isChecked() if hasattr(self, 'chk_storybook_mode') else True,
             "paragraphs_per_scene": self.spn_paras_per_scene.value() if hasattr(self, 'spn_paras_per_scene') else 5,
             "storybook_style": self.cmb_storybook_style.currentData() if hasattr(self, 'cmb_storybook_style') else "chinese_ink",
-            "storybook_image_ratio": 0.80,
-            "storybook_llm_model": config.get("storybook.llm_model", "Qwen/Qwen2.5-1.5B-Instruct")
+            "storybook_image_ratio": float(self.cmb_image_ratio.currentData() if hasattr(self, 'cmb_image_ratio') else 0.80),
+            "storybook_llm_model": str(self.cmb_prompt_director.currentData() if hasattr(self, 'cmb_prompt_director') else "Qwen/Qwen2.5-1.5B-Instruct"),
+            "use_lcm": (self.cmb_sd_model.currentData() == "sd15_lcm") if hasattr(self, 'cmb_sd_model') else True,
+            "enable_upscale": (self.cmb_upscale_policy.currentData() == "real_esrgan") if hasattr(self, 'cmb_upscale_policy') else True,
         }
 
     def _on_generate_plan(self) -> None:

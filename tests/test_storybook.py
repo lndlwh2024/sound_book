@@ -90,8 +90,9 @@ def test_storybook_layout_geometry(tmp_path):
     assert spec_16_9.text_height == 216, "20% 字幕容器高度应为 216px"
 
 
-def test_illustration_manager_cache_and_placeholder(tmp_path):
-    """测试插画管理器缓存机制、横竖屏自适应与本地艺术降级底板生成"""
+def test_illustration_manager_blocking_and_cache(tmp_path):
+    """测试插画管理器在无大模型时的严肃报错阻断与缓存秒级命中机制"""
+    import pytest
     cache_dir = tmp_path / "cache"
     book_illus_dir = tmp_path / "book_illus"
     manager = IllustrationManager(
@@ -111,21 +112,37 @@ def test_illustration_manager_cache_and_placeholder(tmp_path):
         full_text="长亭外，古道边，芳草碧连天。"
     )
 
-    # 准备插画（在无 SD Worker 下将触发艺术降级底板生成）
+    # 1. 验证在本地无有效 SD 进程时，坚决抛出 RuntimeError 阻断，杜绝产出文字框废片
+    manager_mock = IllustrationManager(
+        cache_dir=cache_dir,
+        python_exe="invalid_python_binary_path",
+        default_style="chinese_ink",
+        aspect_ratio="portrait"
+    )
+    with pytest.raises(RuntimeError) as exc_info:
+        manager_mock.prepare_scene_illustrations(
+            scenes=[scene],
+            book_illustrations_dir=book_illus_dir,
+            style="chinese_ink"
+        )
+    assert "小人书大模型阻断" in str(exc_info.value) or "无法启动" in str(exc_info.value)
+
+    # 2. 验证缓存复用：当缓存中已存在真实有效插画时，无需拉起模型即可直接秒级复用
+    prompt_info = manager.prompt_generator.build_prompt(scene.full_text, style_key="chinese_ink")
+    cache_key = manager._compute_cache_key(prompt_info["positive_prompt"], "chinese_ink", manager.target_width, manager.target_height)
+    fake_img = Image.new("RGB", (1024, 1536), color=(20, 40, 60))
+    cache_file = cache_dir / f"art_{cache_key}.png"
+    fake_img.save(str(cache_file))
+
     scenes = manager.prepare_scene_illustrations(
         scenes=[scene],
         book_illustrations_dir=book_illus_dir,
         style="chinese_ink"
     )
-
     assert len(scenes) == 1
     assert scenes[0].image_path is not None
-    img_path = Path(scenes[0].image_path)
-    assert img_path.exists(), "生成的插画图片必须物理存在"
+    assert Path(scenes[0].image_path).exists()
 
-    # 验证生成的图片符合 1024x1536 规格
-    with Image.open(img_path) as im:
-        assert im.size == (1024, 1536)
 
 
 def test_prompt_generator_llm_fallback():
