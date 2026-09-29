@@ -276,3 +276,40 @@ def test_main_window_v076_features(qapp):
     assert cfg["split_mode"] == "by_chapter"
 
 
+def test_main_window_storybook_compact_row(qapp):
+    """
+    测试 v3.3.6 小人书单行紧凑配置与上下文选择特性：
+    1. 复选框去除多余文案，纯方框紧凑展示；
+    2. 分镜步长微调框后缀为 ' 句/分镜'；
+    3. 上下文数量下拉框包含 0-4 个上下文，默认值为 2；
+    4. 勾选框联动控制上下文下拉框与步长框的可用性；
+    5. 全局配置字典正确采集 context_scenes 与 paragraphs_per_scene。
+    """
+    window = MainWindow()
+
+    # 1. 验证控件属性
+    assert hasattr(window, "chk_storybook_mode")
+    assert window.chk_storybook_mode.text() == ""
+    assert hasattr(window, "spn_paras_per_scene")
+    assert window.spn_paras_per_scene.suffix() == " 句/分镜"
+    assert hasattr(window, "cmb_context_scenes")
+    assert window.cmb_context_scenes.count() == 5
+    assert window.cmb_context_scenes.currentData() == 2
+
+    # 2. 验证配置字典提取
+    cfg = window._get_current_config()
+    assert cfg["storybook_enabled"] is True
+    assert cfg["paragraphs_per_scene"] == 5
+    assert cfg["context_scenes"] == 2
+
+    # 3. 验证联动禁用
+    window.chk_storybook_mode.setChecked(False)
+    assert not window.cmb_context_scenes.isEnabled()
+    assert not window.spn_paras_per_scene.isEnabled()
+
+    window.chk_storybook_mode.setChecked(True)
+    assert window.cmb_context_scenes.isEnabled()
+    assert window.spn_paras_per_scene.isEnabled()
+
+
+

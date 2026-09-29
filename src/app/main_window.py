@@ -601,7 +601,7 @@ class MainWindow(QMainWindow):
     def __init__(self, bridge: Optional[TaskManagerBridge] = None):
         super().__init__()
         self.bridge = bridge or TaskManagerBridge()
-        self.setWindowTitle("书声 (ShuSheng) v3.3.5 - 自动化有声视频生产工具 (小人书 AI 连环画增强版)")
+        self.setWindowTitle("书声 (ShuSheng) v3.3.6 - 自动化有声视频生产工具 (小人书 AI 连环画增强版)")
         self._raw_status_text = "空闲就绪 (IDLE)"
         self._is_producing = False
         # 【自适应屏幕工作区】检测当前主显示器可用区域，动态计算最佳默认尺寸，保证初始开机与最大化排版一致且完全舒展
@@ -1099,19 +1099,31 @@ class MainWindow(QMainWindow):
         bgm_row.addWidget(self.txt_bgm_path, 1)
         bgm_row.addWidget(btn_browse_bgm, 0)
 
-        # 小人书模式（完全还原第一版设计，合并入书籍与基础版式，节省垂直空间）
-        self.chk_storybook_mode = QCheckBox("启用小人书沉浸模式")
+        # 小人书模式（紧凑单行：复选框 + 分镜句数 + 提示词上下文 + 插画风格）
+        self.chk_storybook_mode = QCheckBox("")
         self.chk_storybook_mode.setStyleSheet("font-weight: bold; color: #4CAF50;")
-        self.chk_storybook_mode.setToolTip("开启后，系统将按句子/段落聚类为分镜场景，AI 自动生成专属插画并随语音同步播放（上图80% + 下文20%）")
+        self.chk_storybook_mode.setToolTip("开启后，系统将按句子聚类为分镜场景，AI 自动生成专属插画并随语音同步播放（上图80% + 下文20%）")
         self.chk_storybook_mode.setChecked(True)
         self.chk_storybook_mode.stateChanged.connect(self._on_storybook_mode_changed)
 
         self.spn_paras_per_scene = QSpinBox()
         self.spn_paras_per_scene.setRange(1, 20)
         self.spn_paras_per_scene.setValue(5)
-        self.spn_paras_per_scene.setSuffix(" 段/镜")
-        self.spn_paras_per_scene.setToolTip("每隔多少个句子/段落自动切换一张插画（默认 5 段/镜）")
+        self.spn_paras_per_scene.setSuffix(" 句/分镜")
+        self.spn_paras_per_scene.setMinimumWidth(85)
+        self.spn_paras_per_scene.setToolTip("每隔多少个句子自动切换一张插画（默认 5 句/分镜）")
         self.spn_paras_per_scene.valueChanged.connect(self._refresh_visual_preview)
+
+        self.cmb_context_scenes = QComboBox()
+        self.cmb_context_scenes.addItem("0 个上下文", 0)
+        self.cmb_context_scenes.addItem("1 个上下文", 1)
+        self.cmb_context_scenes.addItem("2 个上下文", 2)
+        self.cmb_context_scenes.addItem("3 个上下文", 3)
+        self.cmb_context_scenes.addItem("4 个上下文", 4)
+        self.cmb_context_scenes.setCurrentIndex(2)
+        self.cmb_context_scenes.setMinimumWidth(95)
+        self.cmb_context_scenes.setToolTip("向前引入前 M 个分镜场景的原文作为提炼提示词的滚动上下文，辅助人物与时空连贯（默认 2 个上下文）")
+        self.cmb_context_scenes.currentIndexChanged.connect(self._refresh_visual_preview)
 
         self.cmb_storybook_style = QComboBox()
         self.cmb_storybook_style.addItem("中国传统水墨风", "chinese_ink")
@@ -1126,6 +1138,7 @@ class MainWindow(QMainWindow):
         storybook_row.setSpacing(6)
         storybook_row.addWidget(self.chk_storybook_mode, 0)
         storybook_row.addWidget(self.spn_paras_per_scene, 0)
+        storybook_row.addWidget(self.cmb_context_scenes, 0)
         storybook_row.addWidget(self.cmb_storybook_style, 1)
 
         # 组装第一板块网格（恢复原生标准独立行排版，彻底解决遮挡与挤压）
@@ -2201,6 +2214,7 @@ class MainWindow(QMainWindow):
             getattr(self, 'cmb_image_ratio', None),
             getattr(self, 'cmb_upscale_policy', None),
             getattr(self, 'spn_paras_per_scene', None),
+            getattr(self, 'cmb_context_scenes', None),
             getattr(self, 'cmb_storybook_style', None),
         ):
             if w is not None:
@@ -2507,6 +2521,7 @@ class MainWindow(QMainWindow):
                         sd_txt = "SD 1.5 + LCM" if (hasattr(self, 'cmb_sd_model') and "LCM" in self.cmb_sd_model.currentText()) else "SD 1.5 标准版"
                         director_txt = "Qwen2.5-1.5B" if (hasattr(self, 'cmb_prompt_director') and "1.5B" in self.cmb_prompt_director.currentText()) else ("Qwen2.5-0.5B" if (hasattr(self, 'cmb_prompt_director') and "0.5B" in self.cmb_prompt_director.currentText()) else "rjieba")
                         paras = self.spn_paras_per_scene.value() if hasattr(self, 'spn_paras_per_scene') else 5
+                        ctx_val = self.cmb_context_scenes.currentData() if hasattr(self, 'cmb_context_scenes') else 2
                         pct_int = int(ratio_val * 100)
 
                         painter.setFont(QFont("Microsoft YaHei", 9, QFont.Bold))
@@ -2521,7 +2536,7 @@ class MainWindow(QMainWindow):
                         painter.drawText(0, int(img_h * 0.58), canvas_w, 20, Qt.AlignCenter, f"导演: {director_txt}")
 
                         painter.setPen(QColor("#888899"))
-                        painter.drawText(0, int(img_h * 0.72), canvas_w, 20, Qt.AlignCenter, f"每 {paras} 段自动切镜 ({pct_int}% 画面)")
+                        painter.drawText(0, int(img_h * 0.72), canvas_w, 20, Qt.AlignCenter, f"每 {paras} 句切镜 · {ctx_val} 上下文 ({pct_int}% 画面)")
 
                     # 2. 图文分割金边
                     painter.setPen(Qt.NoPen)
@@ -2712,6 +2727,7 @@ class MainWindow(QMainWindow):
             "skip_english": (self.cmb_skip_english.currentText() == "是") if hasattr(self, 'cmb_skip_english') else True,
             "storybook_enabled": self.chk_storybook_mode.isChecked() if hasattr(self, 'chk_storybook_mode') else True,
             "paragraphs_per_scene": self.spn_paras_per_scene.value() if hasattr(self, 'spn_paras_per_scene') else 5,
+            "context_scenes": int(self.cmb_context_scenes.currentData()) if hasattr(self, 'cmb_context_scenes') else 2,
             "storybook_style": self.cmb_storybook_style.currentData() if hasattr(self, 'cmb_storybook_style') else "chinese_ink",
             "storybook_image_ratio": float(self.cmb_image_ratio.currentData() if hasattr(self, 'cmb_image_ratio') else 0.80),
             "storybook_llm_model": str(self.cmb_prompt_director.currentData() if hasattr(self, 'cmb_prompt_director') else "Qwen/Qwen2.5-1.5B-Instruct"),

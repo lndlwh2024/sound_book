@@ -216,22 +216,56 @@ class PromptGenerator:
             self._llm_pipeline = None
             return False
 
-    def extract_visual_scene_with_llm(self, scene_text: str) -> Optional[str]:
+    def extract_visual_scene_with_llm(
+        self,
+        scene_text: str,
+        history_texts: Optional[List[str]] = None
+    ) -> Optional[str]:
         """
         使用 Qwen 模型提炼出核心画面英文描述。
+        【为什么这样设计】
+        落实用户最新需求：支持向前引入 M 个历史场景作为辅助上下文，
+        在提示词中明确划分【历史上下文，仅用于理解】与【当前需要生成图片的内容】，
+        严格要求大模型只为当前 Scene 生成绘图 Prompt，严禁将历史场景的动作画入当前图片。
         """
         if not self._ensure_llm_ready():
             return None
 
-        # 截取前 300 字作为视觉意象核心，避免长段落消耗不必要的 CPU 推理时间
+        # 截取当前场景正文前 300 字作为视觉意象核心
         snippet = scene_text.strip()[:300]
-        prompt_instruction = (
-            "You are a visual director for classical storybook illustrations. "
-            "Read the following Chinese narrative and summarize it into ONE concise visual scene prompt for Stable Diffusion. "
-            "Rules: Output ONLY 15-25 English words describing subjects, environment, and atmosphere. Separated by commas. No explanations, no Chinese.\n\n"
-            f"Narrative: {snippet}\n\n"
-            "Visual Prompt:"
-        )
+
+        # 若存在历史上下文，按顺序组装结构化上下文
+        if history_texts and len(history_texts) > 0:
+            hist_blocks = []
+            hist_count = len(history_texts)
+            for idx, h_text in enumerate(history_texts):
+                offset = idx - hist_count  # 例如 -2, -1
+                h_snippet = h_text.strip()[:200]
+                hist_blocks.append(f"Scene {offset}:\n{h_snippet}")
+
+            history_section = "\n\n".join(hist_blocks)
+            prompt_instruction = (
+                "You are an expert visual director for classical storybook illustrations.\n\n"
+                "【历史上下文，仅用于理解】\n"
+                f"{history_section}\n\n"
+                "【当前需要生成图片的内容】\n"
+                f"{snippet}\n\n"
+                "要求：\n"
+                "1. 历史内容仅用于理解人物身份、时代、地点、指代和连续关系；\n"
+                "2. 只能且仅为【当前需要生成图片的内容】生成绘图 Prompt；\n"
+                "3. 严禁把历史 Scene 中已经结束或发生的动作画入当前图片；\n"
+                "4. Output ONLY 15-25 English words describing subjects, environment, and atmosphere of the CURRENT scene. "
+                "Separated by commas. No explanations, no Chinese.\n\n"
+                "Visual Prompt:"
+            )
+        else:
+            prompt_instruction = (
+                "You are a visual director for classical storybook illustrations. "
+                "Read the following Chinese narrative and summarize it into ONE concise visual scene prompt for Stable Diffusion. "
+                "Rules: Output ONLY 15-25 English words describing subjects, environment, and atmosphere. Separated by commas. No explanations, no Chinese.\n\n"
+                f"Narrative: {snippet}\n\n"
+                "Visual Prompt:"
+            )
 
         try:
             outputs = self._llm_pipeline(
@@ -284,21 +318,23 @@ class PromptGenerator:
         self,
         scene_text: str,
         style_key: Optional[str] = None,
-        custom_elements: Optional[str] = None
+        custom_elements: Optional[str] = None,
+        history_texts: Optional[List[str]] = None
     ) -> Dict[str, str]:
         """
         根据场景文本与指定风格组装用于文生图的 Prompt 与 Negative Prompt。
 
         【为什么这样设计】
         1. 双引擎协同：首选 Qwen2.5 提炼出的电影级英文意象；若未启用或未下载，无缝使用 rjieba 离线关键词；
-        2. 保持视觉意象的核心主体明确，前缀限定风格，中段交代场景与主体，后置强调光影质感；
-        3. 返回字典包含 positive, negative 及提取方式与关键词，便于调试与日志审计。
+        2. 引入前 M 个 Scene 滚动上下文：支持传入 history_texts 辅助指代消歧与时空连贯；
+        3. 保持视觉意象的核心主体明确，前缀限定风格，中段交代场景与主体，后置强调光影质感；
+        4. 返回字典包含 positive, negative 及提取方式与关键词，便于调试与日志审计。
         """
         chosen_style = style_key if style_key and style_key in STYLE_PRESETS else self.default_style
         style_cfg = STYLE_PRESETS[chosen_style]
 
-        # 1. 尝试使用首选 Qwen2.5-1.5B/0.5B CPU 模型进行意境提炼
-        llm_descriptor = self.extract_visual_scene_with_llm(scene_text)
+        # 1. 尝试使用首选 Qwen2.5-1.5B/0.5B CPU 模型进行意境提炼（支持注入历史上下文）
+        llm_descriptor = self.extract_visual_scene_with_llm(scene_text, history_texts=history_texts)
         method_used = "qwen_llm" if llm_descriptor else "rjieba_dict"
 
         if llm_descriptor:

@@ -223,3 +223,47 @@ def test_illustration_manager_single_image_fallback(tmp_path):
         assert f1.read() == f2.read(), "单图失败应继承上一幕插画内容"
 
 
+def test_prompt_generator_rolling_context():
+    """测试提示词生成器向前滚动 M 个 Scene 上下文的结构化组装与防动作污染指令"""
+    gen = PromptGenerator(default_style="chinese_ink")
+
+    # 1. 模拟历史上下文
+    history = [
+        "第一幕：李白白衣如雪，独自在江边饮酒赋诗。",
+        "第二幕：忽然扁舟划过，渔翁朗声呼唤李白登船。"
+    ]
+    cur_text = "李白踏上小舟，舟头微翘，江水滚滚向东流去。"
+
+    # 模拟 LLM 管道捕获输入
+    captured_prompts = []
+
+    def mock_llm_pipeline(prompt, **kwargs):
+        captured_prompts.append(prompt)
+        return [{"generated_text": prompt + " A lone poet standing on a traditional wooden boat on wide mist river."}]
+
+    gen._ensure_llm_ready = lambda: True
+    gen._llm_pipeline = mock_llm_pipeline
+
+    prompt_res = gen.build_prompt(cur_text, style_key="chinese_ink", history_texts=history)
+
+    assert len(captured_prompts) == 1
+    llm_input = captured_prompts[0]
+
+    # 校验指令中是否清晰分离历史与当前
+    assert "【历史上下文，仅用于理解】" in llm_input
+    assert "【当前需要生成图片的内容】" in llm_input
+    assert "Scene -2:\n第一幕：李白白衣如雪" in llm_input
+    assert "Scene -1:\n第二幕：忽然扁舟划过" in llm_input
+    assert "李白踏上小舟" in llm_input
+    assert "严禁把历史 Scene 中已经结束或发生的动作画入当前图片" in llm_input
+    assert "A lone poet standing on a traditional wooden boat" in prompt_res["positive_prompt"]
+
+    # 2. 校验 IllustrationManager context_scenes 参数有效性与越界保护
+    mgr = IllustrationManager(context_scenes=3)
+    assert mgr.context_scenes == 3
+
+    mgr_clamped = IllustrationManager(context_scenes=99)
+    assert mgr_clamped.context_scenes == 10
+
+
+

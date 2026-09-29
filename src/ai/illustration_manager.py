@@ -41,7 +41,8 @@ class IllustrationManager:
         sd_model_id: Optional[str] = None,
         use_lcm: bool = True,
         upscale_enabled: bool = True,
-        aspect_ratio: str = "portrait"
+        aspect_ratio: str = "portrait",
+        context_scenes: int = 2
     ):
         self.cache_dir = Path(cache_dir) if cache_dir else Path("output/illustrations_cache")
         self.cache_dir.mkdir(parents=True, exist_ok=True)
@@ -51,6 +52,7 @@ class IllustrationManager:
         self.use_lcm = use_lcm
         self.upscale_enabled = upscale_enabled
         self.aspect_ratio = aspect_ratio
+        self.context_scenes = max(0, min(10, context_scenes))
 
         # 确定生图基础与超分放大尺寸 (80% 黄金画面比例)
         if aspect_ratio == "landscape":
@@ -237,8 +239,17 @@ class IllustrationManager:
 
         # 检查是否全部已存在缓存
         all_cached = True
-        for scene in scenes:
-            prompt_info = self.prompt_generator.build_prompt(scene.full_text, style_key=chosen_style)
+        for i, scene in enumerate(scenes):
+            hist_texts = None
+            if self.context_scenes > 0 and i > 0:
+                h_start = max(0, i - self.context_scenes)
+                hist_texts = [scenes[k].full_text for k in range(h_start, i)]
+
+            prompt_info = self.prompt_generator.build_prompt(
+                scene.full_text,
+                style_key=chosen_style,
+                history_texts=hist_texts
+            )
             scene.prompt = prompt_info["positive_prompt"]
             cache_key = self._compute_cache_key(scene.prompt, chosen_style, self.target_width, self.target_height)
             target_file = book_illustrations_dir / f"{scene.scene_id}_{cache_key}.png"
@@ -259,8 +270,18 @@ class IllustrationManager:
 
         try:
             for idx, scene in enumerate(scenes, start=1):
-                # 1. 提炼提示词
-                prompt_info = self.prompt_generator.build_prompt(scene.full_text, style_key=chosen_style)
+                i = idx - 1
+                hist_texts = None
+                if self.context_scenes > 0 and i > 0:
+                    h_start = max(0, i - self.context_scenes)
+                    hist_texts = [scenes[k].full_text for k in range(h_start, i)]
+
+                # 1. 提炼提示词 (注入前 M 个场景的滚动上下文)
+                prompt_info = self.prompt_generator.build_prompt(
+                    scene.full_text,
+                    style_key=chosen_style,
+                    history_texts=hist_texts
+                )
                 scene.prompt = prompt_info["positive_prompt"]
 
                 # 2. 检查缓存 (基于目标分辨率与提示词做哈希)

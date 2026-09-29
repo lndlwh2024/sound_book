@@ -68,6 +68,7 @@ video:
 storybook:
   enabled: true
   paragraphs_per_scene: 5
+  context_scenes: 2
   layout: portrait_9_16
   image_ratio: 0.80
   text_ratio: 0.20

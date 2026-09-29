@@ -241,6 +241,7 @@ class ProductionWorker(QThread):
         storybook_llm_model = str(cfg.get("storybook_llm_model", config.get("storybook.llm_model", "Qwen/Qwen2.5-1.5B-Instruct")))
         use_lcm = bool(cfg.get("use_lcm", config.get("storybook.use_lcm", True)))
         enable_upscale = bool(cfg.get("enable_upscale", config.get("storybook.enable_upscale", True)))
+        context_scenes = int(cfg.get("context_scenes", config.get("storybook.context_scenes", 2)))
 
         # 彻底锁定绝对物理路径，支持自定义目标输出根目录
         # 【为什么这样设计】
@@ -528,7 +529,7 @@ class ProductionWorker(QThread):
 
                     # 节点 6: 意象提炼 (SCENE_PROMPTING)
                     self.sig_status_changed.emit("SCENE_PROMPTING")
-                    self.sig_progress_updated.emit(78.0, f"【6/12 意象提炼】正在按每 {paragraphs_per_scene} 段聚类场景并由 Qwen 提炼 SD Prompt...")
+                    self.sig_progress_updated.emit(78.0, f"【6/12 意象提炼】正在按每 {paragraphs_per_scene} 句聚类场景并结合前 {context_scenes} 个上下文由 Qwen 提炼 SD Prompt...")
                     scene_splitter = SceneSplitter(paragraphs_per_scene=paragraphs_per_scene)
                     scenes = scene_splitter.split(ep_units)
 
@@ -542,7 +543,8 @@ class ProductionWorker(QThread):
                         llm_model=storybook_llm_model,
                         use_lcm=use_lcm,
                         upscale_enabled=enable_upscale,
-                        aspect_ratio="landscape" if "landscape" in layout_name else "portrait"
+                        aspect_ratio="landscape" if "landscape" in layout_name else "portrait",
+                        context_scenes=context_scenes
                     )
                     book_illus_dir = book_dir / f"ep_{ep_order:02d}_illustrations"
 
