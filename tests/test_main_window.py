@@ -287,18 +287,18 @@ def test_main_window_storybook_compact_row(qapp):
     """
     window = MainWindow()
 
-    # 1. 验证控件属性与安全固定宽度
+    # 1. 验证控件属性与安全黄金比例尺寸
     assert hasattr(window, "chk_storybook_mode")
     assert window.chk_storybook_mode.text() == ""
     assert hasattr(window, "spn_paras_per_scene")
     assert window.spn_paras_per_scene.suffix() == " 句/分镜"
-    assert window.spn_paras_per_scene.maximumWidth() == 96
+    assert window.spn_paras_per_scene.maximumWidth() == 120
     assert hasattr(window, "cmb_context_scenes")
     assert window.cmb_context_scenes.count() == 5
     assert window.cmb_context_scenes.currentData() == 2
-    assert window.cmb_context_scenes.maximumWidth() == 108
+    assert window.cmb_context_scenes.maximumWidth() == 105
     assert hasattr(window, "cmb_storybook_style")
-    assert window.cmb_storybook_style.maximumWidth() == 136
+    assert window.cmb_storybook_style.maximumWidth() >= 1000  # 验证 stretch=1 自适应伸展，不被写死固定宽度
 
     # 2. 验证配置字典提取
     cfg = window._get_current_config()
