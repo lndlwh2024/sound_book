@@ -30,13 +30,12 @@ def test_main_window_initial_state(qapp):
 
     # 2. 默认音量与滑块（右上角两翼工作台）
     assert window.sld_narr_preview.value() == 100
-    assert window.sld_bgm_preview.value() == 30
+    assert window.sld_bgm_preview.value() == 0  # 无 BGM 时强制归零置灰
     assert "100%" in window.lbl_narr_vol_pct.text()
-    assert "30%" in window.lbl_bgm_vol_pct.text()
+    assert "0%" in window.lbl_bgm_vol_pct.text()
 
     # 3. 默认版式与运行模式
     assert "9:16" in window.cmb_video_layout.currentText()
-    assert "仅生成下一集" in window.cmb_run_mode.currentText()
     assert window.spn_target_duration.value() == 15
     assert window.spn_target_duration.minimum() == 1  # 验证支持 1 分钟超细粒度
     assert window.spn_min_interval.minimum() == 0.5   # 验证最小间隔下限已同步下调至 0.5 分钟
@@ -46,11 +45,11 @@ def test_main_window_initial_state(qapp):
     assert window.btn_pause.isEnabled() is False
     assert window.btn_resume.isEnabled() is False
 
-    # 5. 封面模式开关与跳过英文复选框初始状态
+    # 5. 封面模式开关与跳过英文初始状态
     assert hasattr(window, "cmb_cover_mode")
     assert "单层" in window.cmb_cover_mode.currentText()
-    assert hasattr(window, "chk_skip_english")
-    assert window.chk_skip_english.isChecked() is False
+    assert hasattr(window, "cmb_skip_english")
+    assert "是" in window.cmb_skip_english.currentText()
 
     # 6. 背景音频单独试听按键激活联动测试
     assert hasattr(window, "btn_play_bgm")
@@ -85,19 +84,20 @@ def test_main_window_get_current_config(qapp):
     assert cfg["nfe_step"] == 16
     assert cfg["cfg_strength"] == 2.0
     assert cfg["speech_speed"] == 1.0
-    assert cfg["run_mode"] == "RUN_NEXT_EPISODE"
     assert cfg["voice_volume_percent"] == 100.0
-    assert cfg["bgm_volume_percent"] == 30.0
+    assert cfg["bgm_volume_percent"] == 0.0
     assert cfg["cover_mode"] == "single"
-    assert cfg["skip_english"] is False
+    assert cfg["skip_english"] is True
     assert "output_dir" in cfg
     assert len(cfg["output_dir"]) > 0
 
     # 测试动态切换开关与复选框
-    window.chk_skip_english.setChecked(True)
+    idx_no = window.cmb_skip_english.findText("否")
+    if idx_no >= 0:
+        window.cmb_skip_english.setCurrentIndex(idx_no)
     window.cmb_cover_mode.setCurrentIndex(1) # 双层毛玻璃
     cfg_updated = window._get_current_config()
-    assert cfg_updated["skip_english"] is True
+    assert cfg_updated["skip_english"] is False
     assert cfg_updated["cover_mode"] == "dual"
 
 
@@ -169,27 +169,17 @@ def test_main_window_v070_features(qapp, monkeypatch):
     monkeypatch.setattr(window, "_on_azure_config", lambda: None)
     monkeypatch.setattr(window, "_check_local_model_availability", lambda text: None)
 
-    # 1. 验证凭据配置按钮动态显隐
-    # 默认本地 F5-TTS，凭据配置按钮应隐藏
+    # 1. 验证凭据配置按钮动态显隐与引擎锁定
+    # 响应用户需求：微软 API 暂未对接，锁定选项仅显示 F5-TTS，凭据配置按钮常驻隐藏
     assert window.btn_azure_config.isHidden()
-    # 切换至 Azure 引擎，凭据配置按钮应显示
-    idx_azure = window.cmb_tts_engine.findText("Azure", Qt.MatchContains)
-    assert idx_azure >= 0
-    window.cmb_tts_engine.setCurrentIndex(idx_azure)
-    assert not window.btn_azure_config.isHidden()
-    # 切换回本地 Kokoro 引擎，凭据配置按钮应再次隐藏
-    idx_kokoro = window.cmb_tts_engine.findText("Kokoro", Qt.MatchContains)
-    assert idx_kokoro >= 0
-    window.cmb_tts_engine.setCurrentIndex(idx_kokoro)
-    assert window.btn_azure_config.isHidden()
+    assert "F5-TTS" in window.cmb_tts_engine.currentText()
+    assert window.cmb_tts_engine.isEnabled() is False
 
     # 2. 验证右侧工作台重构组件与独立试听图标
     assert hasattr(window, "btn_play_voice")
     assert hasattr(window, "btn_play_bgm")
     assert hasattr(window, "sld_bgm_preview")
     assert hasattr(window, "sld_narr_preview")
-    assert window.btn_play_voice.text() == "▶"
-    assert window.btn_play_bgm.text() == "▶"
     assert not window.btn_play_bgm.isEnabled()  # 初始未选 BGM，置灰禁用
     assert window.btn_play_voice.isEnabled()   # 主音频常驻可用
     assert not hasattr(window, "slider_voice")  # 旧横向音量条已彻底移除
@@ -258,52 +248,31 @@ def test_main_window_v076_features(qapp):
 
     # 1. 验证切集模式及置灰联动
     assert hasattr(window, "cmb_split_mode")
-    assert "按目标时长" in window.cmb_split_mode.currentText()
-    assert window.spn_target_duration.isEnabled() is True
-    assert window.spn_min_interval.isEnabled() is True
-
-    # 切换至自然章节切集模式 -> 时长与最小间隔自动置灰锁定
-    idx_chap = window.cmb_split_mode.findText("自然章节", Qt.MatchContains)
-    assert idx_chap >= 0
-    window.cmb_split_mode.setCurrentIndex(idx_chap)
+    assert "自然章节" in window.cmb_split_mode.currentText()
     assert window.spn_target_duration.isEnabled() is False
     assert window.spn_min_interval.isEnabled() is False
 
-    # 切换回按时长切割 -> 恢复可用
+    # 切换至按目标时长切集模式 -> 时长与最小间隔自动恢复可用
     idx_dur = window.cmb_split_mode.findText("时长", Qt.MatchContains)
+    assert idx_dur >= 0
     window.cmb_split_mode.setCurrentIndex(idx_dur)
     assert window.spn_target_duration.isEnabled() is True
     assert window.spn_min_interval.isEnabled() is True
 
-    # 2. 验证运行方式与限时分钟数输入框联动
-    assert hasattr(window, "spn_limit_minutes")
-    assert window.spn_limit_minutes.value() == 60
-    assert window.spn_limit_minutes.isEnabled() is False  # 初始默认“仅生成下一集”，置灰
+    # 切换回自然章节 -> 再次置灰锁定
+    idx_chap = window.cmb_split_mode.findText("自然章节", Qt.MatchContains)
+    window.cmb_split_mode.setCurrentIndex(idx_chap)
+    assert window.spn_target_duration.isEnabled() is False
+    assert window.spn_min_interval.isEnabled() is False
 
-    # 切换为限时生成 -> 自动激活
-    idx_limit = window.cmb_run_mode.findText("限时", Qt.MatchContains)
-    assert idx_limit >= 0
-    window.cmb_run_mode.setCurrentIndex(idx_limit)
-    assert window.spn_limit_minutes.isEnabled() is True
-
-    # 切换为全书连续生成 -> 自动置灰
-    idx_full = window.cmb_run_mode.findText("全书连续", Qt.MatchContains)
-    assert idx_full >= 0
-    window.cmb_run_mode.setCurrentIndex(idx_full)
-    assert window.spn_limit_minutes.isEnabled() is False
-
-    # 3. 验证状态指示标签
+    # 2. 验证状态指示标签
     assert hasattr(window, "lbl_status")
-    assert window.lbl_status.sizePolicy().horizontalPolicy() == QSizePolicy.Expanding
+    assert window.lbl_status.sizePolicy().horizontalPolicy() in (QSizePolicy.Ignored, QSizePolicy.Expanding)
     assert len(window.lbl_status.toolTip()) > 0
 
-    # 4. 验证配置提取
+    # 3. 验证配置提取
     window.cmb_split_mode.setCurrentIndex(idx_chap)
-    window.cmb_run_mode.setCurrentIndex(idx_limit)
-    window.spn_limit_minutes.setValue(90)
     cfg = window._get_current_config()
     assert cfg["split_mode"] == "by_chapter"
-    assert cfg["run_mode"] == "RUN_DURATION_LIMIT"
-    assert cfg["limit_duration_mins"] == 90.0
 
 

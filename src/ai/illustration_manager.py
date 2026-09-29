@@ -31,12 +31,25 @@ class IllustrationManager:
         self,
         cache_dir: Optional[Path] = None,
         python_exe: Optional[str] = None,
-        default_style: str = "chinese_ink"
+        default_style: str = "chinese_ink",
+        llm_model: Optional[str] = "Qwen/Qwen2.5-1.5B-Instruct",
+        sd_model_id: Optional[str] = None,
+        aspect_ratio: str = "portrait"
     ):
         self.cache_dir = Path(cache_dir) if cache_dir else Path("output/illustrations_cache")
         self.cache_dir.mkdir(parents=True, exist_ok=True)
-        self.prompt_generator = PromptGenerator(default_style=default_style)
+        self.prompt_generator = PromptGenerator(default_style=default_style, llm_model=llm_model)
         self.default_style = default_style
+        self.sd_model_id = sd_model_id or "runwayml/stable-diffusion-v1-5"
+        self.aspect_ratio = aspect_ratio
+
+        # 确定生图基础与超分放大尺寸
+        if aspect_ratio == "landscape":
+            self.base_width, self.base_height = 768, 512
+            self.target_width, self.target_height = 1536, 1024
+        else:
+            self.base_width, self.base_height = 512, 768
+            self.target_width, self.target_height = 1024, 1536
 
         # 解析适用于 SD Worker 的 Python 解释器（优先使用 envs/f5）
         if python_exe and os.path.exists(python_exe):
@@ -51,7 +64,7 @@ class IllustrationManager:
         self._worker_process: Optional[subprocess.Popen] = None
         self._worker_ready = False
 
-    def _compute_cache_key(self, prompt: str, style: str, width: int = 512, height: int = 512) -> str:
+    def _compute_cache_key(self, prompt: str, style: str, width: int = 1024, height: int = 1536) -> str:
         """根据提示词、风格与尺寸生成确定性哈希缓存键"""
         raw = f"{prompt}|{style}|{width}x{height}"
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
@@ -83,6 +96,7 @@ class IllustrationManager:
             # 发送 init 指令
             init_cmd = {
                 "action": "init",
+                "model_id": self.sd_model_id,
                 "device": device,
                 "enable_cpu_offload": enable_cpu_offload,
                 "use_lcm": True
@@ -90,15 +104,43 @@ class IllustrationManager:
             self._worker_process.stdin.write(json.dumps(init_cmd) + "\n")
             self._worker_process.stdin.flush()
 
-            resp_line = self._worker_process.stdout.readline().strip()
-            if resp_line:
-                resp = json.loads(resp_line)
-                if resp.get("status") == "ready":
-                    self._worker_ready = True
-                    logger.info("SD Worker 成功就绪！")
-                    return True
+            # 使用超时保护读取子进程响应，杜绝模型未下载或网络阻塞导致主线程死锁
+            import queue
+            import threading
 
-            logger.warning(f"SD Worker 初始化未就绪，响应: {resp_line}")
+            resp_queue = queue.Queue()
+
+            def _read_stdout():
+                try:
+                    out = self._worker_process.stdout.readline()
+                    resp_queue.put(out)
+                except Exception as err:
+                    resp_queue.put(err)
+
+            reader_thread = threading.Thread(target=_read_stdout, daemon=True)
+            reader_thread.start()
+
+            try:
+                raw_line = resp_queue.get(timeout=5.0)
+                if isinstance(raw_line, Exception):
+                    raise raw_line
+                resp_line = (raw_line or "").strip()
+            except queue.Empty:
+                logger.info("SD Worker 未在 5 秒内就绪（本地权重未预置或离线），无缝熔断切换至本地优雅艺术底板")
+                self._terminate_worker()
+                return False
+
+            if resp_line:
+                try:
+                    resp = json.loads(resp_line)
+                    if resp.get("status") == "ready":
+                        self._worker_ready = True
+                        logger.info("SD Worker 成功就绪！")
+                        return True
+                except json.JSONDecodeError:
+                    pass
+
+            logger.info(f"SD Worker 未就绪 ({resp_line})，自动启用本地高雅艺术底板")
             self._terminate_worker()
             return False
 
@@ -130,8 +172,8 @@ class IllustrationManager:
         scene: ScenePlan,
         output_path: Path,
         style_name: str,
-        width: int = 1080,
-        height: int = 1344
+        width: Optional[int] = None,
+        height: Optional[int] = None
     ) -> Path:
         """
         优雅艺术底板生成器（零依赖纯本地保底）。
@@ -139,27 +181,30 @@ class IllustrationManager:
         """
         from PIL import Image, ImageDraw, ImageFont
 
+        w = width or self.target_width
+        h = height or self.target_height
+
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        img = Image.new("RGB", (width, height), color=(18, 22, 28))
+        img = Image.new("RGB", (w, h), color=(18, 22, 28))
         draw = ImageDraw.Draw(img)
 
         # 绘制古典水墨雅致渐变条纹
-        for y in range(height):
-            ratio = y / max(1, height)
+        for y in range(h):
+            ratio = y / max(1, h)
             r = int(18 + ratio * 15)
             g = int(24 + ratio * 20)
             b = int(32 + ratio * 28)
-            draw.line([(0, y), (width, y)], fill=(r, g, b))
+            draw.line([(0, y), (w, y)], fill=(r, g, b))
 
         # 绘制优雅外边框
-        pad = 40
+        pad = int(min(w, h) * 0.04)
         draw.rectangle(
-            [(pad, pad), (width - pad, height - pad)],
+            [(pad, pad), (w - pad, h - pad)],
             outline=(60, 75, 95),
             width=2
         )
         draw.rectangle(
-            [(pad + 8, pad + 8), (width - pad - 8, height - pad - 8)],
+            [(pad + 8, pad + 8), (w - pad - 8, h - pad - 8)],
             outline=(45, 55, 70),
             width=1
         )
@@ -167,19 +212,19 @@ class IllustrationManager:
         # 尝试使用 Windows 微软雅黑写入场景题注
         font_path = "C:/Windows/Fonts/msyh.ttc"
         try:
-            font_title = ImageFont.truetype(font_path, 42)
-            font_body = ImageFont.truetype(font_path, 28)
+            font_title = ImageFont.truetype(font_path, int(min(w, h) * 0.04))
+            font_body = ImageFont.truetype(font_path, int(min(w, h) * 0.026))
         except Exception:
             font_title = ImageFont.load_default()
             font_body = ImageFont.load_default()
 
         # 场景标题
         title_text = f"—— 第 {scene.scene_index} 幕 · {style_name} ——"
-        draw.text((width // 2, height // 2 - 60), title_text, fill=(212, 175, 55), font=font_title, anchor="mm")
+        draw.text((w // 2, h // 2 - 50), title_text, fill=(212, 175, 55), font=font_title, anchor="mm")
 
         # 场景核心摘录
         snippet = scene.full_text[:40] + ("..." if len(scene.full_text) > 40 else "")
-        draw.text((width // 2, height // 2 + 30), snippet, fill=(180, 195, 210), font=font_body, anchor="mm")
+        draw.text((w // 2, h // 2 + 30), snippet, fill=(180, 195, 210), font=font_body, anchor="mm")
 
         img.save(str(output_path), format="PNG")
         logger.debug(f"已生成艺术降级底板: {output_path}")
@@ -212,8 +257,8 @@ class IllustrationManager:
                 prompt_info = self.prompt_generator.build_prompt(scene.full_text, style_key=chosen_style)
                 scene.prompt = prompt_info["positive_prompt"]
 
-                # 2. 检查缓存
-                cache_key = self._compute_cache_key(scene.prompt, chosen_style)
+                # 2. 检查缓存 (基于目标分辨率与提示词做哈希)
+                cache_key = self._compute_cache_key(scene.prompt, chosen_style, self.target_width, self.target_height)
                 cache_file = self.cache_dir / f"art_{cache_key}.png"
                 target_file = book_illustrations_dir / f"{scene.scene_id}_{cache_key}.png"
 
@@ -231,21 +276,24 @@ class IllustrationManager:
                         progress_callback(idx, total, f"【小人书插画】第 {idx}/{total} 幕从全局缓存复用")
                     continue
 
-                # 3. 尝试调用 SD Worker 生成
+                # 3. 尝试调用 SD Worker 生成 (带超分放大)
                 generated = False
                 if worker_available and self._worker_process and self._worker_process.poll() is None:
                     try:
                         if progress_callback:
-                            progress_callback(idx, total, f"【小人书插画】正在调用 GPU 渲染第 {idx}/{total} 幕...")
+                            progress_callback(idx, total, f"【小人书插画】正在调用 GPU 渲染与超分第 {idx}/{total} 幕...")
                         gen_cmd = {
                             "action": "generate",
                             "prompt": prompt_info["positive_prompt"],
                             "negative_prompt": prompt_info["negative_prompt"],
                             "output_path": str(target_file),
-                            "width": 512,
-                            "height": 512,
+                            "width": self.base_width,
+                            "height": self.base_height,
                             "num_inference_steps": 4,
-                            "guidance_scale": 1.5
+                            "guidance_scale": 1.5,
+                            "upscale": True,
+                            "target_width": self.target_width,
+                            "target_height": self.target_height
                         }
                         self._worker_process.stdin.write(json.dumps(gen_cmd) + "\n")
                         self._worker_process.stdin.flush()
@@ -265,7 +313,13 @@ class IllustrationManager:
                 if not generated:
                     if progress_callback:
                         progress_callback(idx, total, f"【小人书插画】第 {idx}/{total} 幕启用艺术底板")
-                    self._generate_stylized_placeholder(scene, target_file, prompt_info["style_name"])
+                    self._generate_stylized_placeholder(
+                        scene,
+                        target_file,
+                        prompt_info["style_name"],
+                        width=self.target_width,
+                        height=self.target_height
+                    )
                     scene.image_path = str(target_file)
 
         finally:

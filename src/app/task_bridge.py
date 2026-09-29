@@ -236,7 +236,8 @@ class ProductionWorker(QThread):
         storybook_enabled = bool(cfg.get("storybook_enabled", config.get("storybook.enabled", False)))
         paragraphs_per_scene = int(cfg.get("paragraphs_per_scene", config.get("storybook.paragraphs_per_scene", 5)))
         storybook_style = str(cfg.get("storybook_style", config.get("storybook.style", "chinese_ink")))
-        storybook_image_ratio = float(cfg.get("storybook_image_ratio", config.get("storybook.image_ratio", 0.70)))
+        storybook_image_ratio = float(cfg.get("storybook_image_ratio", config.get("storybook.image_ratio", 0.80)))
+        storybook_llm_model = str(cfg.get("storybook_llm_model", config.get("storybook.llm_model", "Qwen/Qwen2.5-1.5B-Instruct")))
 
         # 彻底锁定绝对物理路径，支持自定义目标输出根目录
         # 【为什么这样设计】
@@ -538,7 +539,9 @@ class ProductionWorker(QThread):
                     self.sig_status_changed.emit("STORYBOOK_ILLUSTRATING")
                     illustration_mgr = IllustrationManager(
                         cache_dir=output_base / "illustrations_cache",
-                        default_style=storybook_style
+                        default_style=storybook_style,
+                        llm_model=storybook_llm_model,
+                        aspect_ratio="landscape" if "landscape" in layout_name else "portrait"
                     )
                     book_illus_dir = book_dir / f"ep_{ep_order:02d}_illustrations"
 

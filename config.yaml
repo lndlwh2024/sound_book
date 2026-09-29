@@ -69,11 +69,16 @@ storybook:
   enabled: false
   paragraphs_per_scene: 5
   layout: portrait_9_16
-  image_ratio: 0.70
-  text_ratio: 0.30
+  image_ratio: 0.80
+  text_ratio: 0.20
   style: chinese_ink
+  llm_model: Qwen/Qwen2.5-1.5B-Instruct
   sd_model_id: runwayml/stable-diffusion-v1-5
   use_lcm: true
   num_inference_steps: 4
   enable_cpu_offload: true
+  enable_upscale: true
+  target_width: 1024
+  target_height: 1536
+
 

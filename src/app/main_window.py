@@ -1329,10 +1329,7 @@ class MainWindow(QMainWindow):
 
         m_layout.addWidget(self.lbl_target_dur, 1, 0)
         m_layout.addLayout(self.dur_range_layout, 1, 1, 1, 3)
-        self.lbl_target_dur.setVisible(False)
-        self.spn_target_duration.setVisible(False)
-        self.lbl_min_intv.setVisible(False)
-        self.spn_min_interval.setVisible(False)
+        self._on_split_mode_changed(0)
 
         # 行 2: GPU温控配置（文案极致精炼：上限、复工、冷却，省 8 个汉字，释放横向空间）
         lbl_gpu_ctrl = QLabel("GPU温控:")
@@ -2372,11 +2369,11 @@ class MainWindow(QMainWindow):
                 is_storybook = hasattr(self, 'chk_storybook_mode') and self.chk_storybook_mode.isChecked()
 
                 if is_storybook:
-                    # ====== 小人书 70/30 模式实时预览 ======
-                    img_h = int(canvas_h * 0.70)
+                    # ====== 小人书 80/20 模式实时预览 ======
+                    img_h = int(canvas_h * 0.80)
                     txt_h = canvas_h - img_h
 
-                    # 1. 顶部 70% 插画区
+                    # 1. 顶部 80% 插画区
                     if has_cover:
                         orig_pix = QPixmap(cover_path)
                         if not orig_pix.isNull():
@@ -2392,14 +2389,14 @@ class MainWindow(QMainWindow):
                         style_txt = self.cmb_storybook_style.currentText() if hasattr(self, 'cmb_storybook_style') else "插画"
                         paras = self.spn_paras_per_scene.value() if hasattr(self, 'spn_paras_per_scene') else 5
                         painter.setPen(QColor("#D4AF37"))
-                        painter.drawText(0, 0, canvas_w, img_h, Qt.AlignCenter, f"【AI {style_txt}】\n每 {paras} 段自动切镜")
+                        painter.drawText(0, 0, canvas_w, img_h, Qt.AlignCenter, f"【AI {style_txt}】\n每 {paras} 段自动切镜 (80% 画面)")
 
                     # 2. 图文分割金边
                     painter.setPen(Qt.NoPen)
                     painter.setBrush(QColor("#D4AF37"))
                     painter.drawRect(0, img_h - 2, canvas_w, 2)
 
-                    # 3. 底部 30% 科技深黑字幕容器
+                    # 3. 底部 20% 科技深黑字幕容器
                     painter.fillRect(0, img_h, canvas_w, txt_h, QColor("#0D0D12"))
                     painter.setFont(QFont("Microsoft YaHei", 8))
                     painter.setPen(QColor("#FFFFFF"))
@@ -2584,7 +2581,8 @@ class MainWindow(QMainWindow):
             "storybook_enabled": self.chk_storybook_mode.isChecked() if hasattr(self, 'chk_storybook_mode') else False,
             "paragraphs_per_scene": self.spn_paras_per_scene.value() if hasattr(self, 'spn_paras_per_scene') else 5,
             "storybook_style": self.cmb_storybook_style.currentData() if hasattr(self, 'cmb_storybook_style') else "chinese_ink",
-            "storybook_image_ratio": 0.70
+            "storybook_image_ratio": 0.80,
+            "storybook_llm_model": config.get("storybook.llm_model", "Qwen/Qwen2.5-1.5B-Instruct")
         }
 
     def _on_generate_plan(self) -> None:

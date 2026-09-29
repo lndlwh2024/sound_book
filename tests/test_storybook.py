@@ -58,15 +58,17 @@ def test_prompt_generator_styles_and_keywords():
 
 
 def test_storybook_layout_geometry(tmp_path):
-    """测试小人书 70/30 比例几何计算与偶数尺寸规范"""
-    # 竖屏 9:16
-    engine_9_16 = StorybookLayoutEngine(layout_name="portrait_9_16", image_ratio=0.70)
+    """测试小人书 80/20 比例几何计算、70/30 兼容性与偶数尺寸规范"""
+    # 竖屏 9:16 (默认 80/20)
+    engine_9_16 = StorybookLayoutEngine(layout_name="portrait_9_16", image_ratio=0.80)
     spec_9_16 = engine_9_16.spec
     assert spec_9_16.width == 1080
     assert spec_9_16.height == 1920
     assert spec_9_16.image_height + spec_9_16.text_height == 1920
     assert spec_9_16.image_height % 2 == 0, "图片区域高度必须为偶数"
     assert spec_9_16.text_height % 2 == 0, "文字区域高度必须为偶数"
+    assert spec_9_16.image_height == 1536, "80% 画面高度应为 1536px"
+    assert spec_9_16.text_height == 384, "20% 字幕容器高度应为 384px"
 
     # 校验 FFmpeg 滤镜图
     dummy_ass = tmp_path / "test.ass"
@@ -76,21 +78,27 @@ def test_storybook_layout_geometry(tmp_path):
     assert "drawbox" in fg
     assert "subtitles" in fg
 
-    # 横屏 16:9
-    engine_16_9 = StorybookLayoutEngine(layout_name="landscape_16_9", image_ratio=0.70)
+    # 横屏 16:9 (默认 80/20)
+    engine_16_9 = StorybookLayoutEngine(layout_name="landscape_16_9", image_ratio=0.80)
     spec_16_9 = engine_16_9.spec
     assert spec_16_9.width == 1920
     assert spec_16_9.height == 1080
     assert spec_16_9.image_height + spec_16_9.text_height == 1080
     assert spec_16_9.image_height % 2 == 0
     assert spec_16_9.text_height % 2 == 0
+    assert spec_16_9.image_height == 864, "80% 画面高度应为 864px"
+    assert spec_16_9.text_height == 216, "20% 字幕容器高度应为 216px"
 
 
 def test_illustration_manager_cache_and_placeholder(tmp_path):
-    """测试插画管理器缓存机制与本地艺术降级底板生成"""
+    """测试插画管理器缓存机制、横竖屏自适应与本地艺术降级底板生成"""
     cache_dir = tmp_path / "cache"
     book_illus_dir = tmp_path / "book_illus"
-    manager = IllustrationManager(cache_dir=cache_dir, default_style="chinese_ink")
+    manager = IllustrationManager(
+        cache_dir=cache_dir,
+        default_style="chinese_ink",
+        aspect_ratio="portrait"
+    )
 
     scene = ScenePlan(
         scene_index=1,
@@ -115,6 +123,16 @@ def test_illustration_manager_cache_and_placeholder(tmp_path):
     img_path = Path(scenes[0].image_path)
     assert img_path.exists(), "生成的插画图片必须物理存在"
 
-    # 验证生成的图片符合规格
+    # 验证生成的图片符合 1024x1536 规格
     with Image.open(img_path) as im:
-        assert im.size == (1080, 1344) or im.size == (512, 512)
+        assert im.size == (1024, 1536)
+
+
+def test_prompt_generator_llm_fallback():
+    """测试 Qwen2.5 意象提炼在无权重时的优雅降级"""
+    gen = PromptGenerator(default_style="chinese_ink", llm_model="offline_rjieba")
+    res = gen.build_prompt("深山古寺，晚钟悠扬，一位年轻书生正在月下读书。")
+    assert res["method"] == "rjieba_dict"
+    assert "Traditional Chinese ink wash" in res["positive_prompt"]
+    assert any("temple" in p or "ancient" in p or "book" in p or "scholar" in p for p in res["positive_prompt"].split(","))
+

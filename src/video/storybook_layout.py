@@ -43,16 +43,16 @@ class StorybookLayoutEngine:
     def __init__(
         self,
         layout_name: str = "portrait_9_16",
-        image_ratio: float = 0.70,
+        image_ratio: float = 0.80,
         bg_color_hex: str = "0x0D0D12",
         border_color_hex: str = "0x3A3A4A"
     ):
         """
         :param layout_name: portrait_9_16 或 landscape_16_9
-        :param image_ratio: 顶部图片占比（默认 0.70 即 70%）
+        :param image_ratio: 顶部图片占比（默认 0.80 即 80% 画面 + 20% 字幕）
         """
         self.layout_name = layout_name if layout_name in self.PRESETS else "portrait_9_16"
-        self.image_ratio = max(0.50, min(0.85, image_ratio))
+        self.image_ratio = max(0.50, min(0.90, image_ratio))
         self.bg_color_hex = bg_color_hex
         self.border_color_hex = border_color_hex
         self.spec = self._compute_spec()
@@ -62,14 +62,14 @@ class StorybookLayoutEngine:
         if layout_name in self.PRESETS:
             self.layout_name = layout_name
         if image_ratio is not None:
-            self.image_ratio = max(0.50, min(0.85, image_ratio))
+            self.image_ratio = max(0.50, min(0.90, image_ratio))
         self.spec = self._compute_spec()
 
     def _compute_spec(self) -> StorybookLayoutSpec:
         """根据画布尺寸和比例计算几何规格"""
         w, h = self.PRESETS[self.layout_name]
         img_h = int(round(h * self.image_ratio))
-        # 保证偶数尺寸，适配 H.264 编码器
+        # 保证偶数尺寸，适配 H.264 / NVENC 硬件编码器
         if img_h % 2 != 0:
             img_h -= 1
         txt_h = h - img_h
@@ -78,14 +78,14 @@ class StorybookLayoutEngine:
             img_h = h - txt_h
 
         if self.layout_name == "portrait_9_16":
-            # 竖屏 1080x1920，底部 576px
-            # 字幕垂直居中在底部 576px 区域内，底部边距约等于 txt_h / 2 - 30px
-            margin_v = max(60, int(txt_h * 0.40))
-            font_size = 62
+            # 竖屏 1080x1920，80/20 比例下：顶部图片 1536px，底部容器 384px
+            # 字幕垂直居中在底部 384px 区域内，底部边距约为 110px ~ 125px
+            margin_v = max(70, int(txt_h * 0.32))
+            font_size = 56
         else:
-            # 横屏 1920x1080，底部 324px
-            margin_v = max(40, int(txt_h * 0.38))
-            font_size = 46
+            # 横屏 1920x1080，80/20 比例下：顶部图片 864px，底部容器 216px
+            margin_v = max(45, int(txt_h * 0.32))
+            font_size = 40
 
         return StorybookLayoutSpec(
             layout_name=self.layout_name,
