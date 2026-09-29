@@ -292,11 +292,13 @@ def test_main_window_storybook_compact_row(qapp):
     assert window.chk_storybook_mode.text() == ""
     assert hasattr(window, "spn_paras_per_scene")
     assert window.spn_paras_per_scene.suffix() == " 句/分镜"
-    assert window.spn_paras_per_scene.maximumWidth() == 78
+    assert window.spn_paras_per_scene.maximumWidth() == 96
     assert hasattr(window, "cmb_context_scenes")
     assert window.cmb_context_scenes.count() == 5
     assert window.cmb_context_scenes.currentData() == 2
-    assert window.cmb_context_scenes.maximumWidth() == 112
+    assert window.cmb_context_scenes.maximumWidth() == 108
+    assert hasattr(window, "cmb_storybook_style")
+    assert window.cmb_storybook_style.maximumWidth() == 136
 
     # 2. 验证配置字典提取
     cfg = window._get_current_config()

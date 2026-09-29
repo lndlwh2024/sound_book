@@ -607,7 +607,7 @@ class MainWindow(QMainWindow):
     def __init__(self, bridge: Optional[TaskManagerBridge] = None):
         super().__init__()
         self.bridge = bridge or TaskManagerBridge()
-        self.setWindowTitle("书声 (ShuSheng) v3.3.7 - 自动化有声视频生产工具 (小人书 AI 连环画增强版)")
+        self.setWindowTitle("书声 (ShuSheng) v3.3.8 - 自动化有声视频生产工具 (小人书 AI 连环画增强版)")
         self._raw_status_text = "空闲就绪 (IDLE)"
         self._is_producing = False
         self._is_dual_mode = False
@@ -1119,7 +1119,8 @@ class MainWindow(QMainWindow):
         self.spn_paras_per_scene.setRange(1, 20)
         self.spn_paras_per_scene.setValue(5)
         self.spn_paras_per_scene.setSuffix(" 句/分镜")
-        self.spn_paras_per_scene.setFixedWidth(78)
+        self.spn_paras_per_scene.setFixedWidth(96)
+        self.spn_paras_per_scene.setAlignment(Qt.AlignCenter)
         self.spn_paras_per_scene.setToolTip("每隔多少个句子自动切换一张插画（默认 5 句/分镜）")
         self.spn_paras_per_scene.valueChanged.connect(self._refresh_visual_preview)
 
@@ -1130,7 +1131,7 @@ class MainWindow(QMainWindow):
         self.cmb_context_scenes.addItem("3 个上下文", 3)
         self.cmb_context_scenes.addItem("4 个上下文", 4)
         self.cmb_context_scenes.setCurrentIndex(2)
-        self.cmb_context_scenes.setFixedWidth(112)
+        self.cmb_context_scenes.setFixedWidth(108)
         self.cmb_context_scenes.setToolTip("向前引入前 M 个分镜场景的原文作为提炼提示词的滚动上下文，辅助人物与时空连贯（默认 2 个上下文）")
         self.cmb_context_scenes.currentIndexChanged.connect(self._refresh_visual_preview)
 
@@ -1140,15 +1141,17 @@ class MainWindow(QMainWindow):
         self.cmb_storybook_style.addItem("唯美动漫插画风", "anime")
         self.cmb_storybook_style.addItem("欧洲古典油画风", "oil_painting")
         self.cmb_storybook_style.addItem("写实电影画质风", "realistic")
+        self.cmb_storybook_style.setFixedWidth(136)
         self.cmb_storybook_style.currentIndexChanged.connect(self._refresh_visual_preview)
 
         storybook_row = QHBoxLayout()
         storybook_row.setContentsMargins(0, 0, 0, 0)
-        storybook_row.setSpacing(4)
+        storybook_row.setSpacing(5)
         storybook_row.addWidget(self.chk_storybook_mode, 0)
         storybook_row.addWidget(self.spn_paras_per_scene, 0)
         storybook_row.addWidget(self.cmb_context_scenes, 0)
-        storybook_row.addWidget(self.cmb_storybook_style, 1)
+        storybook_row.addWidget(self.cmb_storybook_style, 0)
+        storybook_row.addStretch(1)
 
         # 组装第一板块网格（恢复原生标准独立行排版，彻底解决遮挡与挤压）
         lbl_book_file = QLabel("书籍文件:")
