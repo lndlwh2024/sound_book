@@ -102,12 +102,19 @@ class IllustrationManager:
             logger.error(err)
             return False, err
 
-        msg = "【小人书大模型】正在启动绘图工作进程并加载 SD 1.5 权重 (首次运行约需 15~40 秒，请稍候)..."
+        msg = "【小人书大模型】正在启动绘图工作进程并加载 SD 1.5 权重 (首次运行若需下载约需数分钟，请稍候)..."
         logger.info(msg)
         if status_callback:
             status_callback(msg)
 
         try:
+            # 注入国内镜像加速源与禁用冗余警告，保证无缓冲实时输出
+            env = os.environ.copy()
+            if "HF_ENDPOINT" not in env:
+                env["HF_ENDPOINT"] = "https://hf-mirror.com"
+            env["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
+            env["PYTHONUNBUFFERED"] = "1"
+
             self._worker_process = subprocess.Popen(
                 [self.python_exe, str(worker_script)],
                 stdin=subprocess.PIPE,
@@ -115,21 +122,34 @@ class IllustrationManager:
                 stderr=subprocess.PIPE,
                 text=True,
                 encoding="utf-8",
-                bufsize=1
+                errors="replace",
+                bufsize=1,
+                env=env
             )
 
-            # 启动 stderr 监听线程，将子进程的下载与载入日志打到主程序日志中
+            # 动态活跃度时间戳（只要有网络下载进度或数据输出，持续自动续期，彻底消除 180s 超时误杀）
+            last_active_time = time.time()
+
+            # 启动 stderr 监听线程，将子进程的底层日志打到主程序日志中并续期活跃时间
             def _log_stderr():
-                while self._worker_process and self._worker_process.poll() is None:
-                    line = self._worker_process.stderr.readline()
-                    if line:
+                nonlocal last_active_time
+                try:
+                    while self._worker_process and self._worker_process.poll() is None:
+                        line = self._worker_process.stderr.readline()
+                        if not line:
+                            break
+                        last_active_time = time.time()
                         s_line = line.strip()
+                        if "symlinks" in s_line and "huggingface_hub" in s_line:
+                            continue
                         if "download" in s_line.lower() or "loading" in s_line.lower() or "progress" in s_line.lower():
                             logger.info(f"[SD Worker 进度] {s_line}")
                             if status_callback:
                                 status_callback(f"【模型加载/下载中】{s_line}")
                         else:
                             logger.debug(f"[SD Worker] {s_line}")
+                except Exception as e_err:
+                    logger.debug(f"stderr 监听线程退出: {e_err}")
 
             stderr_thread = threading.Thread(target=_log_stderr, daemon=True)
             stderr_thread.start()
@@ -145,53 +165,110 @@ class IllustrationManager:
             self._worker_process.stdin.write(json.dumps(init_cmd) + "\n")
             self._worker_process.stdin.flush()
 
-            # 使用守护队列读取 stdout 应答（最长等待 180 秒）
+            # 使用守护队列流式读取 stdout 进度与状态应答
             resp_queue = queue.Queue()
 
             def _read_stdout():
                 try:
-                    out = self._worker_process.stdout.readline()
-                    resp_queue.put(out)
+                    while self._worker_process and self._worker_process.poll() is None:
+                        out = self._worker_process.stdout.readline()
+                        if not out:
+                            break
+                        resp_queue.put(out)
+                        # 当收到最终 status (ready 或 error) 时，说明初始化阶段已收尾，监听线程优雅退出
+                        try:
+                            data = json.loads(out.strip())
+                            if data.get("status") in ("ready", "error"):
+                                break
+                        except Exception:
+                            pass
                 except Exception as err:
                     resp_queue.put(err)
 
             reader_thread = threading.Thread(target=_read_stdout, daemon=True)
             reader_thread.start()
 
-            try:
-                # 预留 180 秒充裕时间供磁盘读取或网络下载
-                raw_line = resp_queue.get(timeout=180.0)
-                if isinstance(raw_line, Exception):
-                    raise raw_line
-                resp_line = (raw_line or "").strip()
-            except queue.Empty:
-                err = "SD Worker 启动超时 (超过 180 秒未响应，可能因网络阻塞或显存耗尽)"
-                logger.error(err)
-                self._terminate_worker()
-                return False, err
+            # 动态活跃度超时驱动（只要有进度更新永不超时；连续 90 秒无任何响应才判定为网络故障）
+            idle_timeout = 90.0
 
-            if resp_line:
+            while True:
+                # 实时检查子进程是否已提前异常退出
+                if self._worker_process.poll() is not None:
+                    code = self._worker_process.returncode
+                    err = f"SD Worker 进程异常退出 (退出代码: {code})"
+                    logger.error(err)
+                    self._terminate_worker()
+                    return False, err
+
                 try:
-                    resp = json.loads(resp_line)
-                    if resp.get("status") == "ready":
+                    raw_item = resp_queue.get(timeout=0.5)
+                    last_active_time = time.time()  # 收到有效数据，立即刷新活跃度
+
+                    if isinstance(raw_item, Exception):
+                        raise raw_item
+
+                    resp_line = (raw_item or "").strip()
+                    if not resp_line:
+                        continue
+
+                    try:
+                        msg_json = json.loads(resp_line)
+                    except json.JSONDecodeError:
+                        logger.debug(f"[SD Worker 原始输出] {resp_line}")
+                        continue
+
+                    action = msg_json.get("action")
+                    if action == "progress":
+                        # 处理下载进度或状态流
+                        p_type = msg_json.get("type", "download")
+                        desc = msg_json.get("desc", "正在下载")
+                        pct = msg_json.get("percent", 0)
+                        rate = msg_json.get("rate", "")
+                        downloaded = msg_json.get("downloaded", 0)
+                        total = msg_json.get("total", 0)
+
+                        if p_type == "status":
+                            ui_text = f"【小人书大模型】{desc}"
+                        elif total and total > 0:
+                            dl_mb = downloaded / (1024 * 1024)
+                            tot_mb = total / (1024 * 1024)
+                            if tot_mb >= 1024:
+                                size_str = f"{dl_mb / 1024:.2f}GB / {tot_mb / 1024:.2f}GB"
+                            else:
+                                size_str = f"{dl_mb:.1f}MB / {tot_mb:.1f}MB"
+                            speed_str = f", 速度 {rate}" if rate else ""
+                            ui_text = f"【首次下载 SD 1.5 绘图大模型】{desc} {pct}% ({size_str}{speed_str})"
+                        else:
+                            ui_text = f"【模型下载中】{desc} {pct}%"
+
+                        logger.info(f"[SD Worker 进度] {ui_text}")
+                        if status_callback:
+                            status_callback(ui_text)
+                        continue
+
+                    status = msg_json.get("status")
+                    if status == "ready":
                         self._worker_ready = True
                         succ_msg = "【小人书大模型】SD 1.5 绘图大模型与 LCM-LoRA 插件已成功就绪！"
                         logger.info(succ_msg)
                         if status_callback:
                             status_callback(succ_msg)
                         return True, "就绪"
-                    else:
-                        err = resp.get("error", f"初始化异常返回: {resp_line}")
-                        logger.error(f"SD Worker 初始化失败: {err}")
+                    elif status == "error":
+                        err = msg_json.get("error", f"初始化异常返回: {resp_line}")
+                        logger.error(f"SD Worker 明确报错: {err}")
                         self._terminate_worker()
                         return False, err
-                except json.JSONDecodeError:
-                    pass
+                    else:
+                        logger.debug(f"收到其他 Worker 状态: {msg_json}")
 
-            err = f"SD Worker 返回未知数据: {resp_line}"
-            logger.error(err)
-            self._terminate_worker()
-            return False, err
+                except queue.Empty:
+                    # 检查静默超时
+                    if time.time() - last_active_time > idle_timeout:
+                        err = f"SD Worker 启动超时 (连续 {int(idle_timeout)} 秒无任何网络下载或数据响应，网络可能已中断或显存耗尽)"
+                        logger.error(err)
+                        self._terminate_worker()
+                        return False, err
 
         except Exception as e:
             err = f"拉起 SD Worker 异常: {e}"

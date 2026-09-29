@@ -14,14 +14,28 @@ import json
 import time
 import logging
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Tuple
 
-# 设置输出编码为 UTF-8
-if sys.platform == "win32":
-    import io
-    sys.stdin = io.TextIOWrapper(sys.stdin.buffer, encoding='utf-8')
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
-    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
+# 注入国内镜像加速源与禁用冗余警告
+if "HF_ENDPOINT" not in os.environ:
+    os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
+if "HF_HUB_DISABLE_SYMLINKS_WARNING" not in os.environ:
+    os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
+
+def _setup_windows_utf8_io():
+    """在 Windows 独立执行时安全设置 UTF-8 标准 IO"""
+    if sys.platform == "win32":
+        import io
+        try:
+            if hasattr(sys.stdin, "buffer"):
+                sys.stdin = io.TextIOWrapper(sys.stdin.buffer, encoding='utf-8')
+            if hasattr(sys.stdout, "buffer"):
+                sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+            if hasattr(sys.stderr, "buffer"):
+                sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
+        except Exception:
+            pass
+
 
 logging.basicConfig(
     level=logging.INFO,
@@ -37,8 +51,65 @@ _pipeline = None
 
 def send_response(data: Dict[str, Any]) -> None:
     """向主进程标准输出发送 JSON 响应行"""
-    sys.stdout.write(json.dumps(data, ensure_ascii=False) + "\n")
-    sys.stdout.flush()
+    try:
+        sys.stdout.write(json.dumps(data, ensure_ascii=False) + "\n")
+        sys.stdout.flush()
+    except Exception as e:
+        logger.debug(f"发送响应失败: {e}")
+
+
+def _setup_tqdm_hook():
+    """
+    挂载 tqdm 进度劫持钩子，流式向主进程汇报大文件下载实时进度。
+    【为什么这样设计】
+    huggingface_hub / diffusers 在下载 safetensors 权重时默认使用 tqdm 向 stderr 输出 \\r，
+    导致主进程的标准行读取器无法及时获悉逐秒变化的下载进度。
+    通过重载 tqdm 的 update()，以 0.5s 节流向 stdout 发送结构化 JSON 事件：
+    {"action": "progress", "type": "download", "percent": 35, "desc": "...", "rate": "8.5MB/s", ...}
+    主进程可无缝推送到 UI 状态栏并重置超时守护，彻底消除假死与超时误杀。
+    """
+    try:
+        import tqdm
+        import tqdm.auto
+        base_tqdm = tqdm.tqdm
+
+        class WorkerTqdm(base_tqdm):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self._last_report = 0.0
+
+            def update(self, n=1):
+                super().update(n)
+                now = time.time()
+                if now - self._last_report >= 0.5:
+                    self._last_report = now
+                    try:
+                        desc = self.desc or "正在下载模型权重"
+                        pct = int((self.n / self.total * 100)) if (self.total and self.total > 0) else 0
+                        rate = self.format_dict.get("rate") if hasattr(self, "format_dict") and self.format_dict else None
+                        rate_str = ""
+                        if rate:
+                            if rate >= 1024 * 1024:
+                                rate_str = f"{rate / (1024 * 1024):.1f} MB/s"
+                            elif rate >= 1024:
+                                rate_str = f"{rate / 1024:.1f} KB/s"
+                        send_response({
+                            "action": "progress",
+                            "type": "download",
+                            "desc": desc,
+                            "percent": pct,
+                            "rate": rate_str,
+                            "downloaded": self.n,
+                            "total": self.total
+                        })
+                    except Exception:
+                        pass
+
+        tqdm.tqdm = WorkerTqdm
+        tqdm.auto.tqdm = WorkerTqdm
+        logger.info("已成功激活 WorkerTqdm 流式下载进度劫持")
+    except Exception as e:
+        logger.debug(f"挂载 WorkerTqdm 异常: {e}")
 
 
 def init_pipeline(
@@ -46,7 +117,7 @@ def init_pipeline(
     device: str = "cuda",
     enable_cpu_offload: bool = True,
     use_lcm: bool = True
-) -> bool:
+) -> Tuple[bool, str]:
     """
     初始化 Stable Diffusion 推理管道。
     """
@@ -54,6 +125,9 @@ def init_pipeline(
     try:
         import torch
         from diffusers import StableDiffusionPipeline, LCMScheduler
+
+        # 启动进度拦截钩子
+        _setup_tqdm_hook()
 
         logger.info(f"正在加载 SD 模型: {model_id} (设备={device}, CPU_Offload={enable_cpu_offload}, LCM={use_lcm})...")
         dtype = torch.float16 if device == "cuda" and torch.cuda.is_available() else torch.float32
@@ -71,14 +145,19 @@ def init_pipeline(
             logger.info("成功从本地缓存载入 SD 模型权重！")
         except Exception as e_local:
             if is_local_dir:
-                raise e_local
-            logger.info(f"本地未命中 SD 缓存，检测网络连通性...")
-            # 快速探测外网连接（1.0 秒超时）
+                return False, f"本地模型目录无法载入: {e_local}"
+            logger.info("本地未命中完整 SD 缓存，准备从远端镜像源拉取权重...")
+            send_response({
+                "action": "progress",
+                "type": "status",
+                "desc": "本地未命中完整 SD 缓存，准备从镜像源下载权重 (约 4.2GB，请保持网络连接)"
+            })
+            # 快速探测外网连接（3.0 秒超时）
             import socket
             can_connect = False
             for host in ("hf-mirror.com", "huggingface.co"):
                 try:
-                    s = socket.create_connection((host, 443), timeout=1.0)
+                    s = socket.create_connection((host, 443), timeout=3.0)
                     s.close()
                     can_connect = True
                     break
@@ -86,20 +165,33 @@ def init_pipeline(
                     continue
 
             if not can_connect:
-                logger.info("当前网络未连接或无法访问 HuggingFace，跳过在线下载，直接启用本地优雅艺术底板")
-                return False
+                err_net = "当前网络未连接或无法访问 HuggingFace 镜像源 (hf-mirror.com / huggingface.co)，请检查网络连接！"
+                logger.error(err_net)
+                return False, err_net
 
-            pipe = StableDiffusionPipeline.from_pretrained(
-                model_id,
-                torch_dtype=dtype,
-                safety_checker=None,
-                requires_safety_checker=False
-            )
+            try:
+                pipe = StableDiffusionPipeline.from_pretrained(
+                    model_id,
+                    torch_dtype=dtype,
+                    safety_checker=None,
+                    requires_safety_checker=False
+                )
+            except Exception as dl_err:
+                err_dl = f"下载或加载 SD 模型权重失败: {dl_err}"
+                logger.error(err_dl)
+                return False, err_dl
 
         if use_lcm:
             try:
-                # 挂载 LCM-LoRA 加速模块
-                pipe.load_lora_weights("latent-consistency/lcm-lora-sdv1-5")
+                send_response({
+                    "action": "progress",
+                    "type": "status",
+                    "desc": "正在挂载 LCM-LoRA 极速采样插件..."
+                })
+                try:
+                    pipe.load_lora_weights("latent-consistency/lcm-lora-sdv1-5", local_files_only=True)
+                except Exception:
+                    pipe.load_lora_weights("latent-consistency/lcm-lora-sdv1-5")
                 pipe.scheduler = LCMScheduler.from_config(pipe.scheduler.config)
                 logger.info("成功挂载 LCM-LoRA 加速引擎，启用 4 步极速采样")
             except Exception as e:
@@ -117,13 +209,15 @@ def init_pipeline(
 
         _pipeline = pipe
         logger.info("SD Worker 模型就绪！")
-        return True
+        return True, "就绪"
     except ImportError as e:
-        logger.error(f"缺少 diffusers 或必要依赖: {e}")
-        return False
+        err_imp = f"缺少 diffusers 或必要依赖: {e}"
+        logger.error(err_imp)
+        return False, err_imp
     except Exception as e:
-        logger.error(f"加载 SD 模型失败: {e}", exc_info=True)
-        return False
+        err_gen = f"加载 SD 模型失败: {e}"
+        logger.error(err_gen, exc_info=True)
+        return False, err_gen
 
 
 def upscale_image(
@@ -263,13 +357,16 @@ def main():
             if action == "ping":
                 send_response({"status": "pong"})
             elif action == "init":
-                ok = init_pipeline(
+                ok, err_detail = init_pipeline(
                     model_id=cmd.get("model_id", "runwayml/stable-diffusion-v1-5"),
                     device=cmd.get("device", "cuda"),
                     enable_cpu_offload=cmd.get("enable_cpu_offload", True),
                     use_lcm=cmd.get("use_lcm", True)
                 )
-                send_response({"status": "ready" if ok else "error"})
+                if ok:
+                    send_response({"status": "ready"})
+                else:
+                    send_response({"status": "error", "error": err_detail})
             elif action == "generate":
                 res = generate_image(
                     prompt=cmd.get("prompt", ""),
@@ -306,4 +403,6 @@ def main():
 
 
 if __name__ == "__main__":
+    _setup_windows_utf8_io()
     main()
+

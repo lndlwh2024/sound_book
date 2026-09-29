@@ -318,4 +318,34 @@ def test_storybook_two_step_pipeline():
     assert abs(bound_scenes[2].duration - 7.0) < 1e-4
 
 
+def test_sd_worker_tqdm_hook_and_progress():
+    """测试 WorkerTqdm 进度拦截与 JSON 结构化流式广播机制"""
+    pytest.importorskip("tqdm")
+    import workers.sd_worker as sd_mod
+    import time
 
+    # 激活 tqdm hook
+    sd_mod._setup_tqdm_hook()
+    from tqdm.auto import tqdm
+
+    captured_jsons = []
+    original_send = sd_mod.send_response
+    try:
+        sd_mod.send_response = lambda d: captured_jsons.append(d)
+
+        # 模拟大文件下载分块
+        with tqdm(total=1000, desc="unet/diffusion_pytorch_model.safetensors") as pbar:
+            pbar.update(200)
+            time.sleep(0.55)  # 越过 0.5s 节流阈值
+            pbar.update(300)
+
+        assert len(captured_jsons) >= 1
+        last = captured_jsons[-1]
+        assert last["action"] == "progress"
+        assert last["type"] == "download"
+        assert "unet" in last["desc"]
+        assert last["percent"] == 50
+        assert last["downloaded"] == 500
+        assert last["total"] == 1000
+    finally:
+        sd_mod.send_response = original_send
