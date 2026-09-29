@@ -20,8 +20,15 @@ logger = logging.getLogger(__name__)
 @dataclass
 class ScenePlan:
     """
-    小人书分镜场景数据模型。
-    对应一张配图及其生命周期内的所有语音与字幕。
+    小人书分镜场景数据模型 (SceneUnit)。
+    【为什么这样设计】
+    严格落实用户确立的核心原则：
+    1. SpeechUnit 与 SceneUnit 分离：SpeechUnit 专职服务于 TTS 和 ASS 字幕；SceneUnit 专职服务于插画和镜头；
+    2. 每 X 句决定图片分组：一个 SceneUnit 聚合 X 个连续的 SpeechUnit；
+    3. 图片显示时间由真实 TTS 时间轴决定：
+       Scene start = 该 Scene 第一条 SpeechUnit 的开始时间；
+       Scene end = 该 Scene 最后一条 SpeechUnit 的结束时间；
+       时长不搞平均分配，完全由语音物理时长自然决定。
     """
     scene_index: int
     scene_id: str
@@ -50,6 +57,10 @@ class ScenePlan:
             "prompt": self.prompt,
             "image_path": self.image_path,
         }
+
+
+# 架构别名：明确区分 SpeechUnit (语音/字幕单元) 与 SceneUnit (插画分镜单元)
+SceneUnit = ScenePlan
 
 
 class SceneSplitter:

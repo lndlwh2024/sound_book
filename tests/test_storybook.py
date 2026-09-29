@@ -153,3 +153,73 @@ def test_prompt_generator_llm_fallback():
     assert "Traditional Chinese ink wash" in res["positive_prompt"]
     assert any("temple" in p or "ancient" in p or "book" in p or "scholar" in p for p in res["positive_prompt"].split(","))
 
+
+def test_illustration_manager_single_image_fallback(tmp_path):
+    """测试原则 9：单张图片生成失败时自动延用上一张图兜底，整条生产线不中断"""
+    cache_dir = tmp_path / "cache"
+    book_illus_dir = tmp_path / "book_illus"
+    manager = IllustrationManager(
+        cache_dir=cache_dir,
+        default_style="chinese_ink",
+        aspect_ratio="portrait"
+    )
+
+    scene1 = ScenePlan(
+        scene_index=1,
+        scene_id="scene_001",
+        start_unit_index=0,
+        end_unit_index=1,
+        start_time=0.0,
+        end_time=5.0,
+        duration=5.0,
+        full_text="高山流水，琴声悠扬。"
+    )
+    scene2 = ScenePlan(
+        scene_index=2,
+        scene_id="scene_002",
+        start_unit_index=2,
+        end_unit_index=3,
+        start_time=5.0,
+        end_time=10.0,
+        duration=5.0,
+        full_text="闹市繁华，车水马龙。"
+    )
+
+    # 预设 scene1 的缓存图片
+    prompt_info1 = manager.prompt_generator.build_prompt(scene1.full_text, style_key="chinese_ink")
+    cache_key1 = manager._compute_cache_key(prompt_info1["positive_prompt"], "chinese_ink", manager.target_width, manager.target_height)
+    fake_img1 = Image.new("RGB", (1024, 1536), color=(30, 60, 90))
+    cache_file1 = cache_dir / f"art_{cache_key1}.png"
+    fake_img1.save(str(cache_file1))
+
+    # 模拟 worker 生成 scene2 失败
+    class DummyWorker:
+        def __init__(self):
+            import io
+            self.stdin = io.StringIO()
+            self.stdout = io.StringIO('{"success": false, "error": "GPU OOM test"}\n')
+        def poll(self):
+            return None
+        def wait(self, timeout=None):
+            return 0
+
+    manager._worker_process = DummyWorker()
+    manager._worker_ready = True
+    manager._ensure_worker_started = lambda *args, **kwargs: (True, "mocked")
+
+    # 执行生成：scene1 命中缓存，scene2 绘画失败，自动延用 scene1 画面
+    result_scenes = manager.prepare_scene_illustrations(
+        scenes=[scene1, scene2],
+        book_illustrations_dir=book_illus_dir,
+        style="chinese_ink"
+    )
+
+    assert len(result_scenes) == 2
+    assert result_scenes[0].image_path is not None
+    assert result_scenes[1].image_path is not None
+    assert Path(result_scenes[1].image_path).exists()
+    # 验证第二幕画面内容与第一幕完全相同（无缝继承上一幕画面）
+    with open(result_scenes[0].image_path, "rb") as f1, open(result_scenes[1].image_path, "rb") as f2:
+        assert f1.read() == f2.read(), "单图失败应继承上一幕插画内容"
+
+

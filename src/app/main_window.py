@@ -601,7 +601,7 @@ class MainWindow(QMainWindow):
     def __init__(self, bridge: Optional[TaskManagerBridge] = None):
         super().__init__()
         self.bridge = bridge or TaskManagerBridge()
-        self.setWindowTitle("书声 (ShuSheng) v3.3.3 - 自动化有声视频生产工具 (小人书 AI 连环画增强版)")
+        self.setWindowTitle("书声 (ShuSheng) v3.3.4 - 自动化有声视频生产工具 (小人书 AI 连环画增强版)")
         self._raw_status_text = "空闲就绪 (IDLE)"
         self._is_producing = False
         # 【自适应屏幕工作区】检测当前主显示器可用区域，动态计算最佳默认尺寸，保证初始开机与最大化排版一致且完全舒展
@@ -1092,7 +1092,7 @@ class MainWindow(QMainWindow):
         bgm_row.addWidget(self.txt_bgm_path, 1)
         bgm_row.addWidget(btn_browse_bgm, 0)
 
-        # 组装第一板块网格（书名与正文起始同行并列，压缩纵向高度）
+        # 组装第一板块网格（恢复原生标准独立行排版，彻底解决遮挡与挤压）
         lbl_book_file = QLabel("书籍文件:")
         lbl_book_file.setFixedWidth(68)
         g_layout.addWidget(lbl_book_file, 0, 0)
@@ -1101,38 +1101,37 @@ class MainWindow(QMainWindow):
         lbl_book_title = QLabel("书籍名称:")
         lbl_book_title.setFixedWidth(68)
         g_layout.addWidget(lbl_book_title, 1, 0)
-        g_layout.addWidget(self.txt_book_title, 1, 1)
+        g_layout.addWidget(self.txt_book_title, 1, 1, 1, 3)
 
-        lbl_start_page = QLabel("正文起始:")
-        lbl_start_page.setFixedWidth(60)
-        lbl_start_page.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        g_layout.addWidget(lbl_start_page, 1, 2)
-        g_layout.addWidget(self.spn_start_page, 1, 3)
+        lbl_start_page = QLabel("正文起始页:")
+        lbl_start_page.setFixedWidth(68)
+        g_layout.addWidget(lbl_start_page, 2, 0)
+        g_layout.addWidget(self.spn_start_page, 2, 1, 1, 3)
 
         lbl_main_title = QLabel("视频主标题:")
         lbl_main_title.setFixedWidth(68)
-        g_layout.addWidget(lbl_main_title, 2, 0)
-        g_layout.addWidget(self.txt_main_title, 2, 1, 1, 3)
+        g_layout.addWidget(lbl_main_title, 3, 0)
+        g_layout.addWidget(self.txt_main_title, 3, 1, 1, 3)
 
         lbl_v_layout = QLabel("视频版式:")
         lbl_v_layout.setFixedWidth(68)
-        g_layout.addWidget(lbl_v_layout, 3, 0)
-        g_layout.addWidget(self.cmb_video_layout, 3, 1, 1, 3)
+        g_layout.addWidget(lbl_v_layout, 4, 0)
+        g_layout.addWidget(self.cmb_video_layout, 4, 1, 1, 3)
 
         lbl_cover_img = QLabel("封面图片:")
         lbl_cover_img.setFixedWidth(68)
-        g_layout.addWidget(lbl_cover_img, 4, 0)
-        g_layout.addLayout(cover_row, 4, 1, 1, 3)
+        g_layout.addWidget(lbl_cover_img, 5, 0)
+        g_layout.addLayout(cover_row, 5, 1, 1, 3)
 
         lbl_bgm_title = QLabel("背景音乐:")
         lbl_bgm_title.setFixedWidth(68)
-        g_layout.addWidget(lbl_bgm_title, 5, 0)
-        g_layout.addLayout(bgm_row, 5, 1, 1, 3)
+        g_layout.addWidget(lbl_bgm_title, 6, 0)
+        g_layout.addLayout(bgm_row, 6, 1, 1, 3)
 
         layout.addWidget(grp_book)
 
-        # 分组 2: 【小人书 AI 连环画专属配置矩阵（测试阶段显性化）】
-        grp_storybook = QGroupBox("【小人书 AI 连环画专属配置矩阵】")
+        # 分组 1.5: 【小人书沉浸模式（保留分镜与画风，临时参数挪至右侧工作台）】
+        grp_storybook = QGroupBox("【小人书沉浸模式】")
         sb_layout = QGridLayout(grp_storybook)
         sb_layout.setSpacing(8)
         sb_layout.setColumnStretch(0, 0)
@@ -1147,57 +1146,14 @@ class MainWindow(QMainWindow):
         self.chk_storybook_mode.stateChanged.connect(self._on_storybook_mode_changed)
         sb_layout.addWidget(self.chk_storybook_mode, 0, 0, 1, 4)
 
-        # 行 1: 绘图大模型 与 意象导演
-        lbl_sd_model = QLabel("绘图模型:")
-        lbl_sd_model.setFixedWidth(68)
-        self.cmb_sd_model = QComboBox()
-        self.cmb_sd_model.addItem("SD 1.5 + LCM (4步极速/首选)", "sd15_lcm")
-        self.cmb_sd_model.addItem("SD 1.5 标准版 (Euler a 20步)", "sd15_standard")
-        self.cmb_sd_model.currentIndexChanged.connect(self._refresh_visual_preview)
-
-        lbl_director = QLabel("意象导演:")
-        lbl_director.setFixedWidth(60)
-        lbl_director.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        self.cmb_prompt_director = QComboBox()
-        self.cmb_prompt_director.addItem("Qwen2.5-1.5B (纯CPU/首选)", "Qwen/Qwen2.5-1.5B-Instruct")
-        self.cmb_prompt_director.addItem("Qwen2.5-0.5B (轻量CPU)", "Qwen/Qwen2.5-0.5B-Instruct")
-        self.cmb_prompt_director.addItem("rjieba 离线词典提取", "rjieba")
-        self.cmb_prompt_director.currentIndexChanged.connect(self._refresh_visual_preview)
-
-        sb_layout.addWidget(lbl_sd_model, 1, 0)
-        sb_layout.addWidget(self.cmb_sd_model, 1, 1)
-        sb_layout.addWidget(lbl_director, 1, 2)
-        sb_layout.addWidget(self.cmb_prompt_director, 1, 3)
-
-        # 行 2: 图文比例 与 分辨率增强策略
-        lbl_ratio = QLabel("图文比例:")
-        lbl_ratio.setFixedWidth(68)
-        self.cmb_image_ratio = QComboBox()
-        self.cmb_image_ratio.addItem("80/20 经典连环画 (首选)", 0.80)
-        self.cmb_image_ratio.addItem("70/30 大字幕版式", 0.70)
-        self.cmb_image_ratio.currentIndexChanged.connect(self._refresh_visual_preview)
-
-        lbl_upscale = QLabel("画质超分:")
-        lbl_upscale.setFixedWidth(60)
-        lbl_upscale.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        self.cmb_upscale_policy = QComboBox()
-        self.cmb_upscale_policy.addItem("Real-ESRGAN x2 智能超分 (首选)", "real_esrgan")
-        self.cmb_upscale_policy.addItem("Lanczos 双三次超采样", "lanczos")
-        self.cmb_upscale_policy.currentIndexChanged.connect(self._refresh_visual_preview)
-
-        sb_layout.addWidget(lbl_ratio, 2, 0)
-        sb_layout.addWidget(self.cmb_image_ratio, 2, 1)
-        sb_layout.addWidget(lbl_upscale, 2, 2)
-        sb_layout.addWidget(self.cmb_upscale_policy, 2, 3)
-
-        # 行 3: 分镜节奏 与 插画画风
+        # 仅保留分镜节奏 与 插画画风（其他 4 个临时测试参数挪至右侧工作台视窗下沿）
         lbl_scene_tempo = QLabel("分镜节奏:")
         lbl_scene_tempo.setFixedWidth(68)
         self.spn_paras_per_scene = QSpinBox()
         self.spn_paras_per_scene.setRange(1, 20)
         self.spn_paras_per_scene.setValue(5)
         self.spn_paras_per_scene.setSuffix(" 段/镜")
-        self.spn_paras_per_scene.setToolTip("每隔多少个自然段自动切换一张插画（默认 5 段/镜）")
+        self.spn_paras_per_scene.setToolTip("每隔多少个句子/段落自动切换一张插画（默认 5 段/镜）")
         self.spn_paras_per_scene.valueChanged.connect(self._refresh_visual_preview)
 
         lbl_style = QLabel("插画画风:")
@@ -1211,10 +1167,10 @@ class MainWindow(QMainWindow):
         self.cmb_storybook_style.addItem("写实电影画质风", "realistic")
         self.cmb_storybook_style.currentIndexChanged.connect(self._refresh_visual_preview)
 
-        sb_layout.addWidget(lbl_scene_tempo, 3, 0)
-        sb_layout.addWidget(self.spn_paras_per_scene, 3, 1)
-        sb_layout.addWidget(lbl_style, 3, 2)
-        sb_layout.addWidget(self.cmb_storybook_style, 3, 3)
+        sb_layout.addWidget(lbl_scene_tempo, 1, 0)
+        sb_layout.addWidget(self.spn_paras_per_scene, 1, 1)
+        sb_layout.addWidget(lbl_style, 1, 2)
+        sb_layout.addWidget(self.cmb_storybook_style, 1, 3)
 
         layout.addWidget(grp_storybook)
 
@@ -1603,6 +1559,76 @@ class MainWindow(QMainWindow):
 
         wb_main_layout.addLayout(stage_layout)
 
+        # 【为什么这样设计】
+        # 响应用户最新需求：“在右侧上框内的下沿放置截图 2 的 4 个临时测试参数”。
+        # 将绘图模型、意象导演、图文比例、画质超分等测试矩阵收纳在工作台下沿，
+        # 既直观方便测试切换，又彻底解放左侧配置卡片空间，杜绝遮挡。
+        self.frame_storybook_params = QFrame()
+        self.frame_storybook_params.setStyleSheet("""
+            QFrame {
+                background-color: #161622;
+                border: 1px solid #333348;
+                border-radius: 5px;
+                padding: 2px 6px;
+            }
+            QLabel {
+                font-size: 11px;
+                color: #BBBBCC;
+                font-weight: bold;
+            }
+        """)
+        sb_param_grid = QGridLayout(self.frame_storybook_params)
+        sb_param_grid.setContentsMargins(6, 4, 6, 4)
+        sb_param_grid.setHorizontalSpacing(10)
+        sb_param_grid.setVerticalSpacing(4)
+        sb_param_grid.setColumnStretch(0, 0)
+        sb_param_grid.setColumnStretch(1, 1)
+        sb_param_grid.setColumnStretch(2, 0)
+        sb_param_grid.setColumnStretch(3, 1)
+
+        lbl_sd_model = QLabel("绘图模型:")
+        lbl_sd_model.setFixedWidth(56)
+        self.cmb_sd_model = QComboBox()
+        self.cmb_sd_model.addItem("SD 1.5 + LCM (4步极速/首选)", "sd15_lcm")
+        self.cmb_sd_model.addItem("SD 1.5 标准版 (Euler a 20步)", "sd15_standard")
+        self.cmb_sd_model.currentIndexChanged.connect(self._refresh_visual_preview)
+
+        lbl_director = QLabel("意象导演:")
+        lbl_director.setFixedWidth(56)
+        lbl_director.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.cmb_prompt_director = QComboBox()
+        self.cmb_prompt_director.addItem("Qwen2.5-1.5B (纯CPU/首选)", "Qwen/Qwen2.5-1.5B-Instruct")
+        self.cmb_prompt_director.addItem("Qwen2.5-0.5B (轻量CPU)", "Qwen/Qwen2.5-0.5B-Instruct")
+        self.cmb_prompt_director.addItem("rjieba 离线词典提取", "rjieba")
+        self.cmb_prompt_director.currentIndexChanged.connect(self._refresh_visual_preview)
+
+        lbl_ratio = QLabel("图文比例:")
+        lbl_ratio.setFixedWidth(56)
+        self.cmb_image_ratio = QComboBox()
+        self.cmb_image_ratio.addItem("80/20 经典连环画 (首选)", 0.80)
+        self.cmb_image_ratio.addItem("70/30 大字幕版式", 0.70)
+        self.cmb_image_ratio.currentIndexChanged.connect(self._refresh_visual_preview)
+
+        lbl_upscale = QLabel("画质超分:")
+        lbl_upscale.setFixedWidth(56)
+        lbl_upscale.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.cmb_upscale_policy = QComboBox()
+        self.cmb_upscale_policy.addItem("Real-ESRGAN x2 智能超分 (首选)", "real_esrgan")
+        self.cmb_upscale_policy.addItem("Lanczos 双三次超采样", "lanczos")
+        self.cmb_upscale_policy.currentIndexChanged.connect(self._refresh_visual_preview)
+
+        sb_param_grid.addWidget(lbl_sd_model, 0, 0)
+        sb_param_grid.addWidget(self.cmb_sd_model, 0, 1)
+        sb_param_grid.addWidget(lbl_director, 0, 2)
+        sb_param_grid.addWidget(self.cmb_prompt_director, 0, 3)
+
+        sb_param_grid.addWidget(lbl_ratio, 1, 0)
+        sb_param_grid.addWidget(self.cmb_image_ratio, 1, 1)
+        sb_param_grid.addWidget(lbl_upscale, 1, 2)
+        sb_param_grid.addWidget(self.cmb_upscale_policy, 1, 3)
+
+        wb_main_layout.addWidget(self.frame_storybook_params)
+
         # 下部：【混合试听】主控制按钮 — 三态切换（播放/暂停/继续）
         # 【为什么这样设计】
         # 响应用户需求：删除左下角独立播放按钮（功能与混合试听重复），
@@ -1698,9 +1724,9 @@ class MainWindow(QMainWindow):
         self.lbl_preview_time.setEnabled(is_internal_mode)
 
         # 【为什么这样设计】
-        # 响应用户最新需求：“日志框内文字过小，可适当加高日志框一行的高度，降低视频框一行的高度”。
-        # 将垂直比例调整为 45:55，为下方生产计划与后台日志释放充裕纵向空间，彻底消除拥挤感。
-        layout.addWidget(grp_workbench, 45)
+        # 响应用户最新需求：“右侧上下框 高度比为 1:1”。
+        # 将上下两框的伸缩权重均设为 1，呈现完美均衡的 1:1 对等视觉高度。
+        layout.addWidget(grp_workbench, 1)
 
         # ── 3. 生产计划、硬件诊断与后台实时日志 (三 Sheet TabWidget) ──
         grp_dashboard = QGroupBox("【生产计划全景、系统诊断与实时日志】")
@@ -1742,7 +1768,8 @@ class MainWindow(QMainWindow):
         self.tab_widget.addTab(tab_log_widget, "📜 实时日志")
 
         dash_layout.addWidget(self.tab_widget)
-        layout.addWidget(grp_dashboard, 55)
+        # 严格保持 1:1 上下等高对齐
+        layout.addWidget(grp_dashboard, 1)
         return panel
 
 
@@ -2162,6 +2189,7 @@ class MainWindow(QMainWindow):
         """响应小人书沉浸图文模式勾选变动"""
         is_enabled = bool(state)
         for w in (
+            getattr(self, 'frame_storybook_params', None),
             getattr(self, 'cmb_sd_model', None),
             getattr(self, 'cmb_prompt_director', None),
             getattr(self, 'cmb_image_ratio', None),

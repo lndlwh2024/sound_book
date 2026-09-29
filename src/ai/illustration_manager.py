@@ -315,7 +315,26 @@ class IllustrationManager:
                 resp = json.loads(resp_line)
                 if not resp.get("success"):
                     fail_err = resp.get("error", "未知绘画失败")
-                    raise RuntimeError(f"第 {idx}/{total} 幕大模型绘图失败: {fail_err}")
+                    # 【原则 9：运行时失败兜底】
+                    # 单张图片生成失败不能中断整条生产线；自动延用上一张图或可用画面继续生产
+                    prev_valid_img = None
+                    for p_idx in range(idx - 2, -1, -1):
+                        if scenes[p_idx].image_path and os.path.exists(scenes[p_idx].image_path):
+                            prev_valid_img = scenes[p_idx].image_path
+                            break
+
+                    if prev_valid_img:
+                        logger.warning(
+                            f"第 {idx}/{total} 幕插画绘制失败 ({fail_err})，"
+                            f"自动继承上一幕插画继续生产，确保整集流水线平稳交付！"
+                        )
+                        import shutil
+                        shutil.copy2(prev_valid_img, target_file)
+                        scene.image_path = str(target_file)
+                        continue
+                    else:
+                        # 若为首幕失败且无任何前序插画，严格阻断
+                        raise RuntimeError(f"首幕插画大模型绘图失败，无法建立初始镜头: {fail_err}")
 
                 # 成功生成，拷贝入持久化全局缓存
                 import shutil
