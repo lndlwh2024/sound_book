@@ -404,9 +404,64 @@ ALIGNING_SUBTITLES ──> AUDIO_MIXING ──> VIDEO_RENDERING ──> COMPLETE
    - **Quadro T1000 独显**：脱离屏幕直连，以无头计算卡（Headless Compute Accelerator）模式纯净运行，**空闲显存高达 3935MB / 4096MB**。
 2. **HDMI 外接显示器物理拓扑与优化准则**：
    - **硬件原理**：移动工作站的物理 HDMI 接口直接硬连在 NVIDIA 独显电路上；外接 HDMI 显示器时，独显必须激活帧缓冲区与 DWM，导致 ~400MB 显存开销及待机功耗增加；
-   - **工程最佳实践**：在执行长达数小时的长篇批量视频生产时，**建议拔出 HDMI 外接显示器（或使用 Type-C/雷电接口的 DisplayPort Alt Mode 转接至核显通道）**，让 T1000 处于绝对零显示负担与最低温升状态，大幅减少触发 78°C 温控休眠的几率。
+   - **显示器软关机时的显存占用现象**：即便按显示器电源键“关机”，只要 HDMI 线缆依然插在接口上，由于 HDMI 第 18 引脚（+5V 辅助供电）与第 19 引脚 HPD（热插拔检测）保持导通，显卡驱动与 Windows DWM 仍会判定显示器在线，继续维持桌面帧缓冲（Framebuffer），导致 ~300MB-500MB 显存无法自动释放；
+   - **工程最佳实践与免拔线技巧**：
+     * **方案 A (软件一键释放，推荐)**：无需频繁拔插 HDMI 线，直接按下键盘组合键 **`Win + P`**，选择 **“仅电脑屏幕” (PC screen only)**。Windows 会立即卸载外接显示器的全部图形上下文与显存图层，独显显存立即归零；
+     * **方案 B (硬件物理断开)**：批量生产有声书前，直接拔除笔记本 HDMI 物理插头；
+     * **方案 C (转接核显)**：使用 Type-C/雷电接口的 DisplayPort Alt Mode 转接显示器，彻底将显示负担转嫁给 Intel UHD 核显。
 
 ### 14.3 CPU 与 GPU 算力隔离与时序互斥
+
+#### 1. 全流程硬件协同与时序泳道图
+```mermaid
+sequenceDiagram
+    autonumber
+    participant UI as 主进程控制台 (PySide6)
+    participant CPU as 宿主 CPU (i7) & 40GB 内存
+    participant GPU as 专用独显 Quadro T1000 (3.9GB 空闲)
+    participant Disk as 本地磁盘产物
+
+    Note over UI, GPU: 【阶段 1：F5-TTS 语音合成】(耗时约 60 - 90 分钟)
+    UI->>GPU: 启动 F5-TTS Worker (显存占用 2.5GB)
+    loop 220 句自然句切片
+        UI->>GPU: 推送文本切片 (正常运行；若温度超 78℃ 触发自动微热休眠)
+        GPU->>Disk: 逐句生成物理 1:1 WAV 音频切片与时长
+    end
+    UI->>GPU: 终止 F5-TTS 进程，彻底清空显存 (T1000 显存回归 0MB)
+
+    Note over UI, CPU: 【阶段 2：场景切分与 Qwen2.5-1.5B 提炼】(耗时约 40 - 60 秒)
+    UI->>CPU: 读取全部物理 WAV 时长，按默认 5 段聚类切分为 20 个场景
+    UI->>CPU: 内存载入 Qwen2.5-1.5B (占用 RAM 1.8GB，【显存 0MB】)
+    loop 20 个场景循环 (多线程并行)
+        CPU->>CPU: 提炼文学叙事意象，直出 20 条英文视觉 Prompt (单次 ~2.5s)
+    end
+    Note over CPU, GPU: Prompt 生成完毕，释放/驻留内存，GPU 全程处于 0 负载静默
+
+    Note over UI, GPU: 【阶段 3：SD 1.5 + LCM 极速出图】(耗时约 2.0 - 2.5 分钟)
+    UI->>GPU: 启动 SD Worker (独显独占 3.1GB，全速 FP16 模式)
+    loop 20 个分镜场景
+        alt 已存在增量缓存
+            GPU->>Disk: 直接复用已有场景插画 (0 秒)
+        else 新图生成
+            GPU->>GPU: LCM 4 步采样推理 (单张 6-8 秒)
+            GPU->>Disk: 输出 512×768 基础画面
+        end
+    end
+
+    Note over UI, GPU: 【阶段 4：Real-ESRGAN 画质增强】(耗时约 30 秒)
+    loop 20 张图片
+        GPU->>GPU: Real-ESRGAN x2 处理 (显存 800MB，单张 1.5 秒)
+        GPU->>Disk: 覆写为 1024×1536 细腻大图 (无损提升)
+    end
+    UI->>GPU: 终止 SD Worker，归还全部显存给操作系统
+
+    Note over UI, Disk: 【阶段 5：80/20 排版与视频封装】(耗时约 15 - 20 秒)
+    UI->>Disk: 导出 80/20 比例专属 ASS 字幕 (MarginV=120px) 与 Concat 脚本
+    UI->>GPU: 调用 FFmpeg NVENC 硬件电路压制 (显存占用 200MB)
+    GPU->>Disk: 交付最终 1080P 小人书沉浸式 MP4 视频
+```
+
+#### 2. 时序互斥生命周期规则
 为杜绝 4GB 显存 OOM 与高负载死锁，系统采用严格的时序互斥调度：
 - **阶段一 (TTS)**：仅 F5-TTS 占用独显（~2.5GB VRAM），完成后立即终止 Worker 进程，显存彻底归零；
 - **阶段二 (LLM 导演)**：Qwen2.5-1.5B 100% 运行于 i7 CPU 与 40GB 物理内存中，显存占用恒为 0MB，耗时仅 40~60 秒；

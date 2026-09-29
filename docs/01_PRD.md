@@ -177,8 +177,9 @@
 - **音画随动翻页**：根据段落进度与真实音频物理时长自动切换插画，听众如同在翻阅一本有声图文画卷；
 - **双显卡协同优化**：核显（Intel UHD）负责屏幕交互与桌面渲染，独显（NVIDIA T1000）作为专用离屏算力引擎，生产时推荐不插 HDMI 外接屏以达到极致纯净算力与低温运行。
 
-#### 4.9.2 全流程业务与数据管线图
+#### 4.9.2 全流程端到端业务与时序管线图
 
+##### 1. 业务阶段与数据流向概览
 ```mermaid
 flowchart TD
     A["电子书原始文件 (.pdf / .epub)"] --> B["阶段一：解析、清洗与校验 (CPU)"]
@@ -204,6 +205,55 @@ flowchart TD
     P --> Q["导出 80/20 底部容器 ASS 字幕 + Concat 时间轴脚本"]
     Q --> R["FFmpeg Concat Demuxer 单通道直通压制 MP4"]
     R --> S["交付最终 1080P 小人书沉浸式视频"]
+```
+
+##### 2. 硬件资源分时复用与时序泳道协同管线图
+```mermaid
+sequenceDiagram
+    autonumber
+    participant UI as 主进程控制台 (PySide6)
+    participant CPU as 宿主 CPU (i7) & 40GB 内存
+    participant GPU as 专用独显 Quadro T1000 (3.9GB 空闲)
+    participant Disk as 本地磁盘产物
+
+    Note over UI, GPU: 【阶段 1：F5-TTS 语音合成】(耗时约 60 - 90 分钟)
+    UI->>GPU: 启动 F5-TTS Worker (显存占用 2.5GB)
+    loop 220 句自然句切片
+        UI->>GPU: 推送文本切片 (正常运行；若温度超 78℃ 触发自动微热休眠)
+        GPU->>Disk: 逐句生成物理 1:1 WAV 音频切片与时长
+    end
+    UI->>GPU: 终止 F5-TTS 进程，彻底清空显存 (T1000 显存回归 0MB)
+
+    Note over UI, CPU: 【阶段 2：场景切分与 Qwen2.5-1.5B 提炼】(耗时约 40 - 60 秒)
+    UI->>CPU: 读取全部物理 WAV 时长，按默认 5 段聚类切分为 20 个场景
+    UI->>CPU: 内存载入 Qwen2.5-1.5B (占用 RAM 1.8GB，【显存 0MB】)
+    loop 20 个场景循环 (多线程并行)
+        CPU->>CPU: 提炼文学叙事意象，直出 20 条英文视觉 Prompt (单次 ~2.5s)
+    end
+    Note over CPU, GPU: Prompt 生成完毕，释放/驻留内存，GPU 全程处于 0 负载静默
+
+    Note over UI, GPU: 【阶段 3：SD 1.5 + LCM 极速出图】(耗时约 2.0 - 2.5 分钟)
+    UI->>GPU: 启动 SD Worker (独显独占 3.1GB，全速 FP16 模式)
+    loop 20 个分镜场景
+        alt 已存在增量缓存
+            GPU->>Disk: 直接复用已有场景插画 (0 秒)
+        else 新图生成
+            GPU->>GPU: LCM 4 步采样推理 (单张 6-8 秒)
+            GPU->>Disk: 输出 512×768 基础画面
+        end
+    end
+
+    Note over UI, GPU: 【阶段 4：Real-ESRGAN 画质增强】(耗时约 30 秒)
+    loop 20 张图片
+        GPU->>GPU: Real-ESRGAN x2 处理 (显存 800MB，单张 1.5 秒)
+        GPU->>Disk: 覆写为 1024×1536 细腻大图 (无损提升)
+    end
+    UI->>GPU: 终止 SD Worker，归还全部显存给操作系统
+
+    Note over UI, Disk: 【阶段 5：80/20 排版与视频封装】(耗时约 15 - 20 秒)
+    UI->>Disk: 导出 80/20 比例专属 ASS 字幕 (MarginV=120px) 与 Concat 脚本
+    UI->>GPU: 调用 FFmpeg NVENC 硬件电路压制 (显存占用 200MB)
+    GPU->>Disk: 交付最终 1080P 小人书沉浸式 MP4 视频
 ```
 
 #### 4.9.3 真实生产环境管线用时与硬件资源图
