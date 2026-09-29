@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-书声 (ShuSheng) v3.2.2 PySide6 桌面主窗口
+书声 (ShuSheng) v3.3.0 PySide6 桌面主窗口
 遵循 PRD 与详细设计规范：三栏直观布局、非阻塞后台线程隔离、实时封面排版与混音试听预览。
-包含多Sheet生产监控面板、硬件负载实时指示条、任务动态计时器与云端API凭据管理。
+包含多Sheet生产监控面板、硬件负载实时指示条、任务动态计时器、小人书沉浸图文模式与云端API凭据管理。
 """
 import os
 import sys
@@ -574,12 +574,12 @@ class AudioPlayButton(QPushButton):
 
 
 class MainWindow(QMainWindow):
-    """书声 (ShuSheng) v3.2.2 PySide6 桌面主窗口"""
+    """书声 (ShuSheng) v3.3.0 PySide6 桌面主窗口"""
 
     def __init__(self, bridge: Optional[TaskManagerBridge] = None):
         super().__init__()
         self.bridge = bridge or TaskManagerBridge()
-        self.setWindowTitle("书声 (ShuSheng) v3.2.2 - 自动化有声视频生产工具")
+        self.setWindowTitle("书声 (ShuSheng) v3.3.0 - 自动化有声视频生产工具")
         self._raw_status_text = "空闲就绪 (IDLE)"
         self._is_producing = False
         # 【自适应屏幕工作区】检测当前主显示器可用区域，动态计算最佳默认尺寸，保证初始开机与最大化排版一致且完全舒展
@@ -1105,6 +1105,40 @@ class MainWindow(QMainWindow):
         lbl_bgm_title.setFixedWidth(68)
         g_layout.addWidget(lbl_bgm_title, 6, 0)
         g_layout.addLayout(bgm_row, 6, 1, 1, 3)
+
+        # 小人书沉浸式图文模式（上图下文多场景配图）
+        self.chk_storybook_mode = QCheckBox("启用小人书沉浸模式")
+        self.chk_storybook_mode.setStyleSheet("font-weight: bold; color: #4CAF50;")
+        self.chk_storybook_mode.setToolTip("开启后，系统将按段落聚类为分镜场景，AI 自动生成专属插画并随语音同步播放（上图70% + 下文30%）")
+        self.chk_storybook_mode.stateChanged.connect(self._on_storybook_mode_changed)
+
+        self.spn_paras_per_scene = QSpinBox()
+        self.spn_paras_per_scene.setRange(1, 20)
+        self.spn_paras_per_scene.setValue(5)
+        self.spn_paras_per_scene.setSuffix(" 段/镜")
+        self.spn_paras_per_scene.setEnabled(False)
+        self.spn_paras_per_scene.setToolTip("每隔多少个自然段自动切换一张插画")
+
+        self.cmb_storybook_style = QComboBox()
+        self.cmb_storybook_style.addItem("中国传统水墨风", "chinese_ink")
+        self.cmb_storybook_style.addItem("经典复古连环画风", "comic_strip")
+        self.cmb_storybook_style.addItem("唯美动漫插画风", "anime")
+        self.cmb_storybook_style.addItem("欧洲古典油画风", "oil_painting")
+        self.cmb_storybook_style.addItem("写实电影画质风", "realistic")
+        self.cmb_storybook_style.setEnabled(False)
+        self.cmb_storybook_style.currentIndexChanged.connect(self._refresh_visual_preview)
+
+        storybook_row = QHBoxLayout()
+        storybook_row.setContentsMargins(0, 0, 0, 0)
+        storybook_row.setSpacing(6)
+        storybook_row.addWidget(self.chk_storybook_mode, 0)
+        storybook_row.addWidget(self.spn_paras_per_scene, 0)
+        storybook_row.addWidget(self.cmb_storybook_style, 1)
+
+        lbl_storybook = QLabel("小人书模式:")
+        lbl_storybook.setFixedWidth(68)
+        g_layout.addWidget(lbl_storybook, 7, 0)
+        g_layout.addLayout(storybook_row, 7, 1, 1, 3)
 
         layout.addWidget(grp_book)
         # 【为什么这样设计】
@@ -2051,6 +2085,16 @@ class MainWindow(QMainWindow):
             if hasattr(self, '_refresh_visual_preview'):
                 self._refresh_visual_preview()
 
+    def _on_storybook_mode_changed(self, state: int) -> None:
+        """响应小人书沉浸图文模式勾选变动"""
+        is_enabled = bool(state)
+        if hasattr(self, 'spn_paras_per_scene'):
+            self.spn_paras_per_scene.setEnabled(is_enabled)
+        if hasattr(self, 'cmb_storybook_style'):
+            self.cmb_storybook_style.setEnabled(is_enabled)
+        if hasattr(self, '_refresh_visual_preview'):
+            self._refresh_visual_preview()
+
     def _on_browse_cover(self) -> None:
         file_path, _ = QFileDialog.getOpenFileName(self, "选择封面图像", "", "Images (*.jpg *.jpeg *.png *.webp)")
         if file_path:
@@ -2325,44 +2369,79 @@ class MainWindow(QMainWindow):
                 # 1. 绘制底板或封面
                 cover_path = self.txt_cover_path.text().strip() if hasattr(self, 'txt_cover_path') else ""
                 has_cover = bool(cover_path and os.path.exists(cover_path))
+                is_storybook = hasattr(self, 'chk_storybook_mode') and self.chk_storybook_mode.isChecked()
 
-                # 识别当前封面模式：单层极简 (纯黑底板) vs 双层毛玻璃 (全屏背景)
-                is_dual_mode = hasattr(self, 'cmb_cover_mode') and "双层" in self.cmb_cover_mode.currentText()
+                if is_storybook:
+                    # ====== 小人书 70/30 模式实时预览 ======
+                    img_h = int(canvas_h * 0.70)
+                    txt_h = canvas_h - img_h
 
-                if has_cover:
-                    orig_pix = QPixmap(cover_path)
-                    if not orig_pix.isNull():
-                        if is_dual_mode:
-                            # 双层毛玻璃模式：底层全屏拉伸铺满并叠加半透明暗层模拟高斯模糊毛玻璃
-                            bg_pix = orig_pix.scaled(canvas_w, canvas_h, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
-                            bx = max(0, (bg_pix.width() - canvas_w) // 2)
-                            by = max(0, (bg_pix.height() - canvas_h) // 2)
-                            painter.drawPixmap(0, 0, bg_pix, bx, by, canvas_w, canvas_h)
-                            painter.fillRect(0, 0, canvas_w, canvas_h, QColor(0, 0, 0, 168))
-                        else:
-                            # 单层极简模式：深黑纯净科技底板 (#0D0D12)，彻底消除底层模糊重影
-                            painter.fillRect(0, 0, canvas_w, canvas_h, QColor("#0D0D12"))
-
-                        scaled_cover = orig_pix.scaled(
-                            int(canvas_w * 0.85), int(canvas_h * 0.65),
-                            Qt.KeepAspectRatio, Qt.SmoothTransformation
-                        )
-                        cx = (canvas_w - scaled_cover.width()) // 2
-                        cy = (canvas_h - scaled_cover.height()) // 2 + int(canvas_h * 0.08)
-                        painter.drawPixmap(cx, cy, scaled_cover)
+                    # 1. 顶部 70% 插画区
+                    if has_cover:
+                        orig_pix = QPixmap(cover_path)
+                        if not orig_pix.isNull():
+                            scaled_img = orig_pix.scaled(canvas_w, img_h, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
+                            sx = max(0, (scaled_img.width() - canvas_w) // 2)
+                            sy = max(0, (scaled_img.height() - img_h) // 2)
+                            painter.drawPixmap(0, 0, scaled_img, sx, sy, canvas_w, img_h)
                     else:
-                        has_cover = False
+                        painter.fillRect(0, 0, canvas_w, img_h, QColor("#141923"))
+                        painter.setPen(QColor("#3A4A5E"))
+                        painter.drawRect(6, 6, canvas_w - 12, img_h - 12)
+                        painter.setFont(QFont("Microsoft YaHei", 9))
+                        style_txt = self.cmb_storybook_style.currentText() if hasattr(self, 'cmb_storybook_style') else "插画"
+                        paras = self.spn_paras_per_scene.value() if hasattr(self, 'spn_paras_per_scene') else 5
+                        painter.setPen(QColor("#D4AF37"))
+                        painter.drawText(0, 0, canvas_w, img_h, Qt.AlignCenter, f"【AI {style_txt}】\n每 {paras} 段自动切镜")
 
-                if not has_cover:
-                    painter.fillRect(0, 0, canvas_w, canvas_h, QColor("#181822"))
-                    painter.setPen(QColor("#333348"))
-                    box_w, box_h = int(canvas_w * 0.8), int(canvas_h * 0.55)
-                    bx = (canvas_w - box_w) // 2
-                    by = (canvas_h - box_h) // 2 + int(canvas_h * 0.08)
-                    painter.drawRoundedRect(bx, by, box_w, box_h, 6, 6)
-                    painter.setFont(QFont("Microsoft YaHei", 9))
-                    painter.setPen(QColor("#666680"))
-                    painter.drawText(bx, by, box_w, box_h, Qt.AlignCenter, "（未选择封面图片）")
+                    # 2. 图文分割金边
+                    painter.setPen(Qt.NoPen)
+                    painter.setBrush(QColor("#D4AF37"))
+                    painter.drawRect(0, img_h - 2, canvas_w, 2)
+
+                    # 3. 底部 30% 科技深黑字幕容器
+                    painter.fillRect(0, img_h, canvas_w, txt_h, QColor("#0D0D12"))
+                    painter.setFont(QFont("Microsoft YaHei", 8))
+                    painter.setPen(QColor("#FFFFFF"))
+                    painter.drawText(6, img_h, canvas_w - 12, txt_h, Qt.AlignCenter | Qt.TextWordWrap, "当前朗读字幕逐句高亮呈现...")
+                else:
+                    # 识别当前封面模式：单层极简 (纯黑底板) vs 双层毛玻璃 (全屏背景)
+                    is_dual_mode = hasattr(self, 'cmb_cover_mode') and "双层" in self.cmb_cover_mode.currentText()
+
+                    if has_cover:
+                        orig_pix = QPixmap(cover_path)
+                        if not orig_pix.isNull():
+                            if is_dual_mode:
+                                # 双层毛玻璃模式：底层全屏拉伸铺满并叠加半透明暗层模拟高斯模糊毛玻璃
+                                bg_pix = orig_pix.scaled(canvas_w, canvas_h, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
+                                bx = max(0, (bg_pix.width() - canvas_w) // 2)
+                                by = max(0, (bg_pix.height() - canvas_h) // 2)
+                                painter.drawPixmap(0, 0, bg_pix, bx, by, canvas_w, canvas_h)
+                                painter.fillRect(0, 0, canvas_w, canvas_h, QColor(0, 0, 0, 168))
+                            else:
+                                # 单层极简模式：深黑纯净科技底板 (#0D0D12)，彻底消除底层模糊重影
+                                painter.fillRect(0, 0, canvas_w, canvas_h, QColor("#0D0D12"))
+
+                            scaled_cover = orig_pix.scaled(
+                                int(canvas_w * 0.85), int(canvas_h * 0.65),
+                                Qt.KeepAspectRatio, Qt.SmoothTransformation
+                            )
+                            cx = (canvas_w - scaled_cover.width()) // 2
+                            cy = (canvas_h - scaled_cover.height()) // 2 + int(canvas_h * 0.08)
+                            painter.drawPixmap(cx, cy, scaled_cover)
+                        else:
+                            has_cover = False
+
+                    if not has_cover:
+                        painter.fillRect(0, 0, canvas_w, canvas_h, QColor("#181822"))
+                        painter.setPen(QColor("#333348"))
+                        box_w, box_h = int(canvas_w * 0.8), int(canvas_h * 0.55)
+                        bx = (canvas_w - box_w) // 2
+                        by = (canvas_h - box_h) // 2 + int(canvas_h * 0.08)
+                        painter.drawRoundedRect(bx, by, box_w, box_h, 6, 6)
+                        painter.setFont(QFont("Microsoft YaHei", 9))
+                        painter.setPen(QColor("#666680"))
+                        painter.drawText(bx, by, box_w, box_h, Qt.AlignCenter, "（未选择封面图片）")
 
                 # 2. 绘制视频主标题与副标题叠加效果 (仅在用户真正输入了主标题时才渲染，未输入则保持干净画面)
                 main_title = self.txt_main_title.text().strip() if hasattr(self, 'txt_main_title') else ""
@@ -2501,7 +2580,11 @@ class MainWindow(QMainWindow):
             "cfg_strength": default_cfg_strength,
             "speech_speed": self.spn_speed.value(),
             "cover_mode": "single" if hasattr(self, 'cmb_cover_mode') and "单层" in self.cmb_cover_mode.currentText() else "dual",
-            "skip_english": (self.cmb_skip_english.currentText() == "是") if hasattr(self, 'cmb_skip_english') else True
+            "skip_english": (self.cmb_skip_english.currentText() == "是") if hasattr(self, 'cmb_skip_english') else True,
+            "storybook_enabled": self.chk_storybook_mode.isChecked() if hasattr(self, 'chk_storybook_mode') else False,
+            "paragraphs_per_scene": self.spn_paras_per_scene.value() if hasattr(self, 'spn_paras_per_scene') else 5,
+            "storybook_style": self.cmb_storybook_style.currentData() if hasattr(self, 'cmb_storybook_style') else "chinese_ink",
+            "storybook_image_ratio": 0.70
         }
 
     def _on_generate_plan(self) -> None:
@@ -2698,6 +2781,8 @@ class MainWindow(QMainWindow):
             "ALIGNING_SUBTITLES": ("🟢", "【6/8】正在生成并对齐双语字幕 (ALIGNING_SUBTITLES)"),
             "AUDIO_MIXING": ("🟢", "【7/8】正在进行人声与背景音乐侧链混音 (AUDIO_MIXING)"),
             "VIDEO_RENDERING": ("🟢", "【7/8】正在进行 GPU 加速视频压制 (VIDEO_RENDERING)"),
+            "STORYBOOK_SPLITTING": ("🟢", "【7/8】正在进行小人书场景智能切分 (STORYBOOK_SPLITTING)"),
+            "STORYBOOK_ILLUSTRATING": ("🟢", "【7/8】正在生成/匹配小人书场景专属插画 (STORYBOOK_ILLUSTRATING)"),
             "COMPLETED": ("🎉", "【8/8】生产完成！全部视频与音频已就绪 (COMPLETED)"),
             "COOLING": ("❄️", "【GPU温控保护中】核心温度超标，正在冷却休眠 (COOLING)..."),
             "PAUSING": ("🟠", "【安全暂停中】等待当前切片落盘后停机 (PAUSING)..."),
@@ -2706,7 +2791,7 @@ class MainWindow(QMainWindow):
         }
 
         icon, desc = stage_names.get(status, ("⚪", status))
-        if status in ["TTS_GENERATING", "ALIGNING_SUBTITLES", "AUDIO_MIXING", "VIDEO_RENDERING"]:
+        if status in ["TTS_GENERATING", "ALIGNING_SUBTITLES", "AUDIO_MIXING", "VIDEO_RENDERING", "STORYBOOK_SPLITTING", "STORYBOOK_ILLUSTRATING"]:
             if not self._timer_breathing.isActive():
                 self._timer_breathing.start(350)
             self._set_config_inputs_enabled(False)

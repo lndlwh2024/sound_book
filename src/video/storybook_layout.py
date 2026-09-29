@@ -1,0 +1,152 @@
+# -*- coding: utf-8 -*-
+"""
+小人书排版引擎 (Storybook Layout Engine)
+负责计算"上图下文"（上方插画 70% + 下方动态字幕 30%）的几何切分与 FFmpeg 复合滤镜图构建。
+
+【为什么这样设计】
+1. 沉浸式黄金比例：响应用户对画面偏小的顾虑，采用 70/30 经典图文分栏，顶部 70% 完整展示大画幅插画，底部 30% 留作科技质感字幕展示区；
+2. 零黑边等比铺满：对生成图片采用 scale + crop 智能裁切对齐机制，杜绝粗暴拉伸变形，画面无缝贴合顶部画框；
+3. 横竖双版式自适应：无缝支持 9:16 移动端竖屏（1080x1920）与 16:9 宽屏（1920x1080），字幕边距自动对准底部容器中心。
+"""
+import os
+import logging
+from dataclasses import dataclass
+from typing import Dict, Tuple, Optional
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class StorybookLayoutSpec:
+    """小人书排版规格定义"""
+    layout_name: str
+    width: int
+    height: int
+    image_height: int
+    text_height: int
+    subtitle_margin_v: int
+    subtitle_font_size: int
+    border_height: int = 3
+    bg_color_hex: str = "0x0D0D12"
+    border_color_hex: str = "0x2A2A38"
+
+
+class StorybookLayoutEngine:
+    """
+    小人书排版计算与滤镜构建引擎
+    """
+    PRESETS: Dict[str, Tuple[int, int]] = {
+        "portrait_9_16": (1080, 1920),
+        "landscape_16_9": (1920, 1080),
+    }
+
+    def __init__(
+        self,
+        layout_name: str = "portrait_9_16",
+        image_ratio: float = 0.70,
+        bg_color_hex: str = "0x0D0D12",
+        border_color_hex: str = "0x3A3A4A"
+    ):
+        """
+        :param layout_name: portrait_9_16 或 landscape_16_9
+        :param image_ratio: 顶部图片占比（默认 0.70 即 70%）
+        """
+        self.layout_name = layout_name if layout_name in self.PRESETS else "portrait_9_16"
+        self.image_ratio = max(0.50, min(0.85, image_ratio))
+        self.bg_color_hex = bg_color_hex
+        self.border_color_hex = border_color_hex
+        self.spec = self._compute_spec()
+
+    def set_layout(self, layout_name: str, image_ratio: Optional[float] = None) -> None:
+        """切换版式或调整比例"""
+        if layout_name in self.PRESETS:
+            self.layout_name = layout_name
+        if image_ratio is not None:
+            self.image_ratio = max(0.50, min(0.85, image_ratio))
+        self.spec = self._compute_spec()
+
+    def _compute_spec(self) -> StorybookLayoutSpec:
+        """根据画布尺寸和比例计算几何规格"""
+        w, h = self.PRESETS[self.layout_name]
+        img_h = int(round(h * self.image_ratio))
+        # 保证偶数尺寸，适配 H.264 编码器
+        if img_h % 2 != 0:
+            img_h -= 1
+        txt_h = h - img_h
+        if txt_h % 2 != 0:
+            txt_h += 1
+            img_h = h - txt_h
+
+        if self.layout_name == "portrait_9_16":
+            # 竖屏 1080x1920，底部 576px
+            # 字幕垂直居中在底部 576px 区域内，底部边距约等于 txt_h / 2 - 30px
+            margin_v = max(60, int(txt_h * 0.40))
+            font_size = 62
+        else:
+            # 横屏 1920x1080，底部 324px
+            margin_v = max(40, int(txt_h * 0.38))
+            font_size = 46
+
+        return StorybookLayoutSpec(
+            layout_name=self.layout_name,
+            width=w,
+            height=h,
+            image_height=img_h,
+            text_height=txt_h,
+            subtitle_margin_v=margin_v,
+            subtitle_font_size=font_size,
+            border_height=3,
+            bg_color_hex=self.bg_color_hex,
+            border_color_hex=self.border_color_hex
+        )
+
+    def build_scene_filtergraph(
+        self,
+        ass_subtitles_path: Optional[str] = None
+    ) -> str:
+        """
+        构建单场景或分段视频的 FFmpeg 复杂滤镜图。
+        [0:v] 为输入的插画图片流。
+
+        【为什么这样设计】
+        1. [img]: 先等比放大以覆盖目标图片框，并在中心裁切，消除四周黑色边条；
+        2. [txtbg]: 创建干净的科技深黑底板；
+        3. [base]: 使用 vstack 纵向拼合上图与下文；
+        4. [divider]: 在图文接缝处绘制 3px 精细修饰线，强化版面精致度；
+        5. [vout]: 挂载 ASS 专业字幕。
+        """
+        W = self.spec.width
+        H_img = self.spec.image_height
+        H_txt = self.spec.text_height
+        border_y = H_img - self.spec.border_height
+
+        # 1. 顶部图片流缩放与居中裁切
+        img_filter = (
+            f"[0:v]scale={W}:{H_img}:force_original_aspect_ratio=increase,"
+            f"crop={W}:{H_img}[img];"
+        )
+
+        # 2. 底部文字容器底色
+        txt_filter = (
+            f"color=c={self.spec.bg_color_hex}:s={W}x{H_txt}:d=1[txtbg];"
+        )
+
+        # 3. 纵向堆叠
+        stack_filter = (
+            f"[img][txtbg]vstack[stacked];"
+        )
+
+        # 4. 图文分割线
+        divider_filter = (
+            f"[stacked]drawbox=x=0:y={border_y}:w={W}:h={self.spec.border_height}:"
+            f"color={self.spec.border_color_hex}@0.8:t=fill[comp1]"
+        )
+
+        # 5. 字幕挂载
+        if ass_subtitles_path and os.path.exists(ass_subtitles_path):
+            clean_ass_path = ass_subtitles_path.replace("\\", "/").replace(":", r"\:")
+            filtergraph = f"{img_filter}{txt_filter}{stack_filter}{divider_filter};[comp1]subtitles='{clean_ass_path}'[vout]"
+        else:
+            filtergraph = f"{img_filter}{txt_filter}{stack_filter}{divider_filter}[vout]"
+
+        return filtergraph

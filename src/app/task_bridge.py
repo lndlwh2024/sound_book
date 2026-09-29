@@ -24,6 +24,9 @@ from ..audio.audio_mixer import AudioMixer
 from ..audio.audio_qc import AudioQC
 from ..audio.ffmpeg_utils import concat_wavs, _generate_silence
 from ..video.video_composer import VideoComposer
+from ..video.storybook_composer import StorybookComposer
+from ..core.scene_splitter import SceneSplitter
+from ..ai.illustration_manager import IllustrationManager
 from ..state.models import TaskStatus, EpisodeManifest, BookStructure
 from ..state.manifest import ManifestManager
 from ..tts.router import create_tts_router
@@ -230,6 +233,10 @@ class ProductionWorker(QThread):
         speech_speed = float(cfg.get("speech_speed", 1.0))
         skip_english = bool(cfg.get("skip_english", False))
         cover_mode = str(cfg.get("cover_mode", "single"))
+        storybook_enabled = bool(cfg.get("storybook_enabled", config.get("storybook.enabled", False)))
+        paragraphs_per_scene = int(cfg.get("paragraphs_per_scene", config.get("storybook.paragraphs_per_scene", 5)))
+        storybook_style = str(cfg.get("storybook_style", config.get("storybook.style", "chinese_ink")))
+        storybook_image_ratio = float(cfg.get("storybook_image_ratio", config.get("storybook.image_ratio", 0.70)))
 
         # 彻底锁定绝对物理路径，支持自定义目标输出根目录
         # 【为什么这样设计】
@@ -503,10 +510,12 @@ class ProductionWorker(QThread):
                 import shutil
                 shutil.copy2(ep_voice_tmp, ep_final_wav)
 
-            # 音频混音与视频合成（若封面存在）
+            # 音频混音与视频合成（小人书模式或标准封面模式）
             # 视频命名结构：书名_章节_时长_[commit号].mp4（其中书名去除书名号，时长按分钟计算）
             ep_mp4_path = output_base / f"{clean_book}_{clean_ch}_{dur_mins}m_[{commit_hash}].mp4"
-            if cover_path and Path(cover_path).exists():
+            should_render_video = storybook_enabled or (cover_path and Path(cover_path).exists())
+
+            if should_render_video:
                 self.sig_status_changed.emit("AUDIO_MIXING")
                 self.sig_progress_updated.emit(75.0, f"【7/8 混音渲染 (AUDIO_MIXING)】正在执行人声与背景音乐智能侧链混音...")
                 audio_mixer.mix_episode(
@@ -515,18 +524,72 @@ class ProductionWorker(QThread):
                     output_path=ep_audio_path
                 )
 
-                self.sig_status_changed.emit("VIDEO_RENDERING")
-                self.sig_progress_updated.emit(85.0, f"【7/8 视频合成 (VIDEO_RENDERING)】正在调用 GPU 硬件加速压制 MP4 视频...")
-                video_composer.render_episode_video(
-                    cover_path=cover_path,
-                    audio_path=ep_audio_path,
-                    main_title=main_title,
-                    subtitle=ep.subtitle,
-                    output_mp4_path=ep_mp4_path,
-                    ass_subtitles_path=ep_ass_path,
-                    layout_name=layout_name,
-                    cover_mode=cover_mode
-                )
+                if storybook_enabled:
+                    # ====== 模式 A: 小人书分镜多图合成模式 ======
+                    # 【为什么这样设计】
+                    # 1. 响应用户“上图下文小人书沉浸体验”需求，按每 N 段自动聚类分镜场景；
+                    # 2. 先完成 TTS 获取毫秒级 WAV 时长，再生成插画，最后 FFmpeg Concat Demuxer 单通道压制，绝对音画同步；
+                    # 3. 释放 GPU 显存后无缝调用 NVENC 硬件压制，兼顾轻量与极速。
+                    self.sig_status_changed.emit("STORYBOOK_SPLITTING")
+                    self.sig_progress_updated.emit(78.0, f"【7/8 小人书】正在按每 {paragraphs_per_scene} 段聚类场景分镜...")
+                    scene_splitter = SceneSplitter(paragraphs_per_scene=paragraphs_per_scene)
+                    scenes = scene_splitter.split(ep_units)
+
+                    self.sig_status_changed.emit("STORYBOOK_ILLUSTRATING")
+                    illustration_mgr = IllustrationManager(
+                        cache_dir=output_base / "illustrations_cache",
+                        default_style=storybook_style
+                    )
+                    book_illus_dir = book_dir / f"ep_{ep_order:02d}_illustrations"
+
+                    def _on_illus_progress(cur, tot, msg):
+                        pct = 80.0 + (cur / max(1, tot)) * 8.0
+                        self.sig_progress_updated.emit(pct, msg)
+
+                    scenes = illustration_mgr.prepare_scene_illustrations(
+                        scenes=scenes,
+                        book_illustrations_dir=book_illus_dir,
+                        style=storybook_style,
+                        progress_callback=_on_illus_progress
+                    )
+
+                    # 导出适配小人书底部 30% 容器的 ASS 样式字幕
+                    storybook_ass_path = book_dir / f"episode_{ep_order:02d}_storybook.ass"
+                    subtitle_engine.export_ass(
+                        sub_items,
+                        str(storybook_ass_path),
+                        layout=f"storybook_{layout_name}"
+                    )
+
+                    self.sig_status_changed.emit("VIDEO_RENDERING")
+                    self.sig_progress_updated.emit(88.0, f"【7/8 小人书合成】正在压制小人书 MP4 视频...")
+                    storybook_composer = StorybookComposer(
+                        layout_name=layout_name,
+                        image_ratio=storybook_image_ratio
+                    )
+                    storybook_composer.render_storybook_video(
+                        scenes=scenes,
+                        audio_path=ep_audio_path,
+                        output_mp4_path=ep_mp4_path,
+                        ass_subtitles_path=storybook_ass_path,
+                        temp_work_dir=book_dir / f"ep_{ep_order:02d}_storybook_tmp",
+                        layout_name=layout_name,
+                        image_ratio=storybook_image_ratio
+                    )
+                else:
+                    # ====== 模式 B: 标准单封面/双层毛玻璃视频模式 ======
+                    self.sig_status_changed.emit("VIDEO_RENDERING")
+                    self.sig_progress_updated.emit(85.0, f"【7/8 视频合成 (VIDEO_RENDERING)】正在调用 GPU 硬件加速压制 MP4 视频...")
+                    video_composer.render_episode_video(
+                        cover_path=cover_path,
+                        audio_path=ep_audio_path,
+                        main_title=main_title,
+                        subtitle=ep.subtitle,
+                        output_mp4_path=ep_mp4_path,
+                        ass_subtitles_path=ep_ass_path,
+                        layout_name=layout_name,
+                        cover_mode=cover_mode
+                    )
 
             episodes_manifests.append(EpisodeManifest(
                 episode_id=f"episode_{ep_order:02d}",

@@ -65,3 +65,15 @@ video:
   font_family: Microsoft YaHei
   title_font_size: 48
   subtitle_font_size: 38
+storybook:
+  enabled: false
+  paragraphs_per_scene: 5
+  layout: portrait_9_16
+  image_ratio: 0.70
+  text_ratio: 0.30
+  style: chinese_ink
+  sd_model_id: runwayml/stable-diffusion-v1-5
+  use_lcm: true
+  num_inference_steps: 4
+  enable_cpu_offload: true
+
