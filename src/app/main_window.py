@@ -402,8 +402,8 @@ class PipelineFlowWidget(QWidget):
         ("CLEANED", "2. 正文清洗"),
         ("PLANNED", "3. 规划就绪"),
         ("TTS_GENERATING", "4. 语音合成"),
-        ("ALIGNING_SUBTITLES", "5. 字幕对齐"),
-        ("SCENE_PROMPTING", "6. 意象提炼"),
+        ("PROMPT_PREGEN", "5. 意象预提炼"),
+        ("SUBTITLE_SYNC", "6. 时序与字幕"),
         ("ILLUSTRATING", "7. 大模型绘图"),
         ("UPSCALING", "8. 分辨率增强"),
         ("AUDIO_MIXING", "9. 智能混音"),
@@ -470,14 +470,16 @@ class PipelineFlowWidget(QWidget):
 
         # 兼容老状态码映射
         normalized_stage = stage
-        if stage == "STORYBOOK_SPLITTING":
-            normalized_stage = "SCENE_PROMPTING"
+        if stage in ("STORYBOOK_SPLITTING", "SCENE_PROMPTING"):
+            normalized_stage = "PROMPT_PREGEN"
+        elif stage in ("ALIGNING_SUBTITLES",):
+            normalized_stage = "SUBTITLE_SYNC"
         elif stage == "STORYBOOK_ILLUSTRATING":
             normalized_stage = "ILLUSTRATING"
 
         # 连续生产多集时，当进入新一集的语音合成，重置单集生命周期
         if normalized_stage == "TTS_GENERATING":
-            for ep_stage in ["TTS_GENERATING", "ALIGNING_SUBTITLES", "SCENE_PROMPTING", "ILLUSTRATING", "UPSCALING", "AUDIO_MIXING", "VIDEO_RENDERING", "QUALITY_CHECK"]:
+            for ep_stage in ["TTS_GENERATING", "PROMPT_PREGEN", "SUBTITLE_SYNC", "ILLUSTRATING", "UPSCALING", "AUDIO_MIXING", "VIDEO_RENDERING", "QUALITY_CHECK"]:
                 self.completed_stages.discard(ep_stage)
 
         if normalized_stage in stage_order:
@@ -487,8 +489,12 @@ class PipelineFlowWidget(QWidget):
             if normalized_stage == "COMPLETED":
                 self.completed_stages.add("COMPLETED")
 
+        # 特别支持：当语音合成 TTS_GENERATING 进行时，意象预提炼 PROMPT_PREGEN 作为并行任务同步处于高亮/激活状态
+        is_parallel_pregen = (normalized_stage == "TTS_GENERATING")
+
         for code, frame, lbl_zh in self.node_frames:
-            if code == normalized_stage and normalized_stage != "COMPLETED":
+            is_active = (code == normalized_stage and normalized_stage != "COMPLETED") or (is_parallel_pregen and code == "PROMPT_PREGEN")
+            if is_active:
                 frame.setStyleSheet("""
                     QFrame {
                         background-color: #143520;
@@ -601,9 +607,12 @@ class MainWindow(QMainWindow):
     def __init__(self, bridge: Optional[TaskManagerBridge] = None):
         super().__init__()
         self.bridge = bridge or TaskManagerBridge()
-        self.setWindowTitle("书声 (ShuSheng) v3.3.6 - 自动化有声视频生产工具 (小人书 AI 连环画增强版)")
+        self.setWindowTitle("书声 (ShuSheng) v3.3.7 - 自动化有声视频生产工具 (小人书 AI 连环画增强版)")
         self._raw_status_text = "空闲就绪 (IDLE)"
         self._is_producing = False
+        self._is_dual_mode = False
+        self._cur_dual_tts = ""
+        self._cur_dual_prompt = ""
         # 【自适应屏幕工作区】检测当前主显示器可用区域，动态计算最佳默认尺寸，保证初始开机与最大化排版一致且完全舒展
         screen = QApplication.primaryScreen()
         if screen:
@@ -1110,7 +1119,7 @@ class MainWindow(QMainWindow):
         self.spn_paras_per_scene.setRange(1, 20)
         self.spn_paras_per_scene.setValue(5)
         self.spn_paras_per_scene.setSuffix(" 句/分镜")
-        self.spn_paras_per_scene.setMinimumWidth(85)
+        self.spn_paras_per_scene.setFixedWidth(78)
         self.spn_paras_per_scene.setToolTip("每隔多少个句子自动切换一张插画（默认 5 句/分镜）")
         self.spn_paras_per_scene.valueChanged.connect(self._refresh_visual_preview)
 
@@ -1121,7 +1130,7 @@ class MainWindow(QMainWindow):
         self.cmb_context_scenes.addItem("3 个上下文", 3)
         self.cmb_context_scenes.addItem("4 个上下文", 4)
         self.cmb_context_scenes.setCurrentIndex(2)
-        self.cmb_context_scenes.setMinimumWidth(95)
+        self.cmb_context_scenes.setFixedWidth(112)
         self.cmb_context_scenes.setToolTip("向前引入前 M 个分镜场景的原文作为提炼提示词的滚动上下文，辅助人物与时空连贯（默认 2 个上下文）")
         self.cmb_context_scenes.currentIndexChanged.connect(self._refresh_visual_preview)
 
@@ -1135,7 +1144,7 @@ class MainWindow(QMainWindow):
 
         storybook_row = QHBoxLayout()
         storybook_row.setContentsMargins(0, 0, 0, 0)
-        storybook_row.setSpacing(6)
+        storybook_row.setSpacing(4)
         storybook_row.addWidget(self.chk_storybook_mode, 0)
         storybook_row.addWidget(self.spn_paras_per_scene, 0)
         storybook_row.addWidget(self.cmb_context_scenes, 0)
@@ -1914,6 +1923,7 @@ class MainWindow(QMainWindow):
         """连接后台 Bridge 信号"""
         self.bridge.sig_status_changed.connect(self._on_worker_status_changed)
         self.bridge.sig_progress_updated.connect(self._on_worker_progress_updated)
+        self.bridge.sig_dual_progress_updated.connect(self._on_worker_dual_progress_updated)
         self.bridge.sig_plan_ready.connect(self._on_worker_plan_ready)
         self.bridge.sig_task_completed.connect(self._on_worker_task_completed)
         self.bridge.sig_task_paused.connect(self._on_worker_task_paused)
@@ -2954,46 +2964,13 @@ class MainWindow(QMainWindow):
         self._update_status_display(desc)
         self._apply_button_lock_state(status)
 
-    def _update_status_display(self, text: Optional[str] = None) -> None:
-        """
-        【为什么这样设计】
-        响应问题二：状态栏文案右侧留白过大、提前截断衰退问题。
-        底层逻辑解耦：
-        1. 缓存完整无损的原始状态文本 self._raw_status_text，并在 ToolTip 中永远完整展示；
-        2. 利用 Qt 原生 QFontMetrics 动态测量当前状态栏可用的真实物理像素宽度 avail_w；
-        3. 只要窗口放宽、最大化或可用宽度能够容纳全部字数，100% 完整平铺展开，绝不出现任何省略号；
-        4. 仅当用户主动将窗口严重缩窄、物理像素实在容纳不下时，才使用 ElideMiddle 优雅居中省略，并在 resize 时自适应重算！
-        """
-        if text is not None:
-            self._raw_status_text = text
-            if hasattr(self, 'lbl_status') and self.lbl_status:
-                self.lbl_status.setToolTip(text)
-
-        raw = getattr(self, "_raw_status_text", "")
-        if not raw or not hasattr(self, 'lbl_status') or not self.lbl_status:
-            return
-
-        avail_w = self.lbl_status.width()
-        # 若界面尚未绘制或宽度极小，直接展示
-        if avail_w <= 60:
-            self.lbl_status.setText(raw)
-            return
-
-        fm = QFontMetrics(self.lbl_status.font())
-        text_w = fm.horizontalAdvance(raw)
-        # 预留 8px 安全缓冲边距防抖
-        if text_w <= avail_w - 8:
-            self.lbl_status.setText(raw)
-            return
-
-        # 【为什么这样设计】
-        # 响应用户明确交互规则：
-        # 1. 只有物理宽度容纳不下时才截断；
-        # 2. 严禁从句首截断！阅读者最关注朗读句子的开头语义；
-        # 3. 截断算法重构为：固定展示【原文开头】（尽可能多展现）+【...】+【后10个字】+【总字数】；
-        # 4. 彻底抛弃盲目中间折半截断的 Qt.ElideMiddle。
+    def _elide_single_line(self, raw: str, fm: QFontMetrics, target_avail: int) -> str:
+        """单行智能首尾截断辅助函数"""
         import re
-        target_avail = avail_w - 8
+        if fm.horizontalAdvance(raw) <= target_avail:
+            return raw
+
+        # 优先匹配 原文: "..." 结构
         m = re.search(r'^(.*?原文:\s*")(.*?)((?:\(共\d+字\))?"\s*)$', raw)
         if m:
             prefix = m.group(1)
@@ -3001,8 +2978,7 @@ class MainWindow(QMainWindow):
             suffix = m.group(3)
             if len(body) > 10:
                 tail = f"...{body[-10:]}{suffix}"
-                tail_w = fm.horizontalAdvance(prefix + tail)
-                remain_w = target_avail - tail_w
+                remain_w = target_avail - fm.horizontalAdvance(prefix + tail)
                 if remain_w > 0:
                     low = 0
                     high = len(body) - 10
@@ -3010,22 +2986,43 @@ class MainWindow(QMainWindow):
                     while low <= high:
                         mid = (low + high) // 2
                         cand = body[:mid]
-                        if fm.horizontalAdvance(cand) <= remain_w:
+                        if fm.horizontalAdvance(prefix + cand + tail) <= target_avail:
                             best_head = cand
                             low = mid + 1
                         else:
                             high = mid - 1
-                    self.lbl_status.setText(f"{prefix}{best_head}{tail}")
-                    return
+                    return f"{prefix}{best_head}{tail}"
                 else:
-                    self.lbl_status.setText(f"{prefix}{tail}")
-                    return
+                    return f"{prefix}{tail}"
 
-        # 通用兜底截断：句首尽可能多展示 + ... + 尾部 10 个字
+        # 意象预提炼专用匹配：CPU 正在预提炼场景意象(5/12)_ ...
+        m_prompt = re.match(r'^(CPU 正在预提炼场景意象\(\d+/\d+\)_\s*)(.*)$', raw)
+        if m_prompt:
+            prefix = m_prompt.group(1)
+            body = m_prompt.group(2)
+            if len(body) > 10:
+                tail = f"...{body[-10:]}"
+                remain_w = target_avail - fm.horizontalAdvance(prefix + tail)
+                if remain_w > 0:
+                    low = 0
+                    high = len(body) - 10
+                    best_head = ""
+                    while low <= high:
+                        mid = (low + high) // 2
+                        cand = body[:mid]
+                        if fm.horizontalAdvance(prefix + cand + tail) <= target_avail:
+                            best_head = cand
+                            low = mid + 1
+                        else:
+                            high = mid - 1
+                    return f"{prefix}{best_head}{tail}"
+                else:
+                    return f"{prefix}{tail}"
+
+        # 通用截断：开头 + ... + 尾部10字
         if len(raw) > 15:
             tail = f"...{raw[-10:]}"
-            tail_w = fm.horizontalAdvance(tail)
-            remain_w = target_avail - tail_w
+            remain_w = target_avail - fm.horizontalAdvance(tail)
             if remain_w > 0:
                 low = 0
                 high = len(raw) - 10
@@ -3033,18 +3030,75 @@ class MainWindow(QMainWindow):
                 while low <= high:
                     mid = (low + high) // 2
                     cand = raw[:mid]
-                    if fm.horizontalAdvance(cand) <= remain_w:
+                    if fm.horizontalAdvance(cand + tail) <= target_avail:
                         best_head = cand
                         low = mid + 1
                     else:
                         high = mid - 1
-                self.lbl_status.setText(f"{best_head}{tail}")
-                return
+                return f"{best_head}{tail}"
             else:
-                self.lbl_status.setText(tail)
-                return
+                return tail
 
-        self.lbl_status.setText(raw)
+        return raw
+
+    def _update_status_display(self, text: Optional[str] = None) -> None:
+        """
+        状态栏文本呈现与自适应截断渲染器。
+        【为什么这样设计】
+        1. 双核并发模式：自动应用 10.5px 紧凑双行排版，第一行展示语音合成，第二行展示意象预提炼；
+        2. 单任务模式：平滑恢复 13px 单行排版；
+        3. 严谨遵循 QFontMetrics，超出可用宽度时保留句首开头 + ... + 尾部10字，绝不横向撑爆界面！
+        """
+        if text is not None:
+            self._raw_status_text = text
+            if hasattr(self, 'lbl_status') and self.lbl_status:
+                self.lbl_status.setToolTip(text)
+
+        if not hasattr(self, 'lbl_status') or not self.lbl_status:
+            return
+
+        avail_w = self.lbl_status.width()
+        if avail_w <= 60:
+            avail_w = 400
+
+        target_avail = max(60, avail_w - 8)
+
+        # 检查是否处于双行并发模式
+        if getattr(self, "_is_dual_mode", False) and self._cur_dual_tts and self._cur_dual_prompt:
+            self.lbl_status.setStyleSheet("color: #E0E0E0; font-size: 10.5px; font-weight: bold; line-height: 1.15;")
+            self.lbl_status.setToolTip(f"{self._cur_dual_tts}\n{self._cur_dual_prompt}")
+            fm = QFontMetrics(self.lbl_status.font())
+            line1 = self._elide_single_line(self._cur_dual_tts, fm, target_avail)
+            line2 = self._elide_single_line(self._cur_dual_prompt, fm, target_avail)
+            self.lbl_status.setText(f"{line1}\n{line2}")
+            return
+
+        # 单行正常模式
+        raw = getattr(self, "_raw_status_text", "")
+        if not raw:
+            return
+
+        self.lbl_status.setStyleSheet("color: #E0E0E0; font-size: 13px; font-weight: bold;")
+        self.lbl_status.setToolTip(raw)
+        fm = QFontMetrics(self.lbl_status.font())
+        elided = self._elide_single_line(raw, fm, target_avail)
+        self.lbl_status.setText(elided)
+
+    def _on_worker_dual_progress_updated(self, tts_text: str, prompt_text: str) -> None:
+        """
+        接收后台 GPU TTS 与 CPU 意象预提炼双核并发进度广播。
+        """
+        if tts_text and prompt_text:
+            self._is_dual_mode = True
+            self._cur_dual_tts = tts_text
+            self._cur_dual_prompt = prompt_text
+            self._update_status_display()
+        else:
+            self._is_dual_mode = False
+            self._cur_dual_tts = ""
+            self._cur_dual_prompt = ""
+            if tts_text:
+                self._update_status_display(tts_text)
 
     def _apply_button_lock_state(self, state: str) -> None:
         """
@@ -3130,7 +3184,8 @@ class MainWindow(QMainWindow):
         if pct >= 0:
             self.progress_bar.setValue(int(pct))
         if msg:
-            self._update_status_display(msg)
+            if not getattr(self, "_is_dual_mode", False):
+                self._update_status_display(msg)
 
     def _on_worker_plan_ready(self, plan: Any) -> None:
         try:

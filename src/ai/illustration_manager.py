@@ -217,6 +217,50 @@ class IllustrationManager:
                 self._worker_ready = False
                 logger.info("SD Worker 进程已退出，显存已全部归还操作系统")
 
+    def pregenerate_prompts(
+        self,
+        scenes: List[ScenePlan],
+        style: Optional[str] = None,
+        on_progress: Optional[Callable[[int, int, str], None]] = None
+    ) -> List[ScenePlan]:
+        """
+        Step A 专用：基于 CPU 异步预先提炼场景提示词 (Prompt Pregeneration)。
+
+        【为什么这样设计】
+        1. 严格落实两段式并发：在 GPU 运行 F5-TTS 期间，由本方法占用 CPU 多核与轻量大模型
+           批量提炼所有分镜的 Prompt 草案，实现 CPU/GPU 双核零争抢并发；
+        2. 通过 on_progress 回调广播：(当前分镜序号, 总分镜数, 当前分镜首句文本)，
+           供前端状态栏以双行排版、智能首尾截断实时呈现；
+        3. 注入滚动前 M 个场景上下文与反动作污染指令。
+        """
+        chosen_style = style or self.default_style
+        total = len(scenes)
+
+        for idx, scene in enumerate(scenes, start=1):
+            i = idx - 1
+            hist_texts = None
+            if self.context_scenes > 0 and i > 0:
+                h_start = max(0, i - self.context_scenes)
+                hist_texts = [scenes[k].full_text for k in range(h_start, i)]
+
+            first_sent = getattr(scene, "first_sentence", "") or (scene.full_text.split("，")[0] if scene.full_text else "")
+            if on_progress:
+                try:
+                    on_progress(idx, total, first_sent)
+                except Exception as e:
+                    logger.debug(f"Prompt 进度回调执行异常: {e}")
+
+            # 若尚未提炼 prompt，调用生成器提炼
+            if not scene.prompt:
+                prompt_info = self.prompt_generator.build_prompt(
+                    scene.full_text,
+                    style_key=chosen_style,
+                    history_texts=hist_texts
+                )
+                scene.prompt = prompt_info["positive_prompt"]
+
+        return scenes
+
     def prepare_scene_illustrations(
         self,
         scenes: List[ScenePlan],
@@ -229,9 +273,10 @@ class IllustrationManager:
         批量为分集的所有场景绘制真实插画。
         【为什么这样设计】
         1. 优先复用磁盘哈希缓存，避免重复耗费算力；
-        2. 若本地未命中缓存且 SD Worker 无法就绪，坚决抛出 RuntimeError 阻断流水线，
+        2. 若场景已由 Step A 预生成 prompt，直接复用，绝不重复调用大模型；
+        3. 若本地未命中缓存且 SD Worker 无法就绪，坚决抛出 RuntimeError 阻断流水线，
            绝不自欺欺人生成毫无价值的文字框废片；
-        3. 单张插画生成后无损通过超分辨率放大输出 1024x1536 细腻大图。
+        4. 单张插画生成后无损通过超分辨率放大输出 1024x1536 细腻大图。
         """
         book_illustrations_dir.mkdir(parents=True, exist_ok=True)
         chosen_style = style or self.default_style
@@ -240,17 +285,19 @@ class IllustrationManager:
         # 检查是否全部已存在缓存
         all_cached = True
         for i, scene in enumerate(scenes):
-            hist_texts = None
-            if self.context_scenes > 0 and i > 0:
-                h_start = max(0, i - self.context_scenes)
-                hist_texts = [scenes[k].full_text for k in range(h_start, i)]
+            if not scene.prompt:
+                hist_texts = None
+                if self.context_scenes > 0 and i > 0:
+                    h_start = max(0, i - self.context_scenes)
+                    hist_texts = [scenes[k].full_text for k in range(h_start, i)]
 
-            prompt_info = self.prompt_generator.build_prompt(
-                scene.full_text,
-                style_key=chosen_style,
-                history_texts=hist_texts
-            )
-            scene.prompt = prompt_info["positive_prompt"]
+                prompt_info = self.prompt_generator.build_prompt(
+                    scene.full_text,
+                    style_key=chosen_style,
+                    history_texts=hist_texts
+                )
+                scene.prompt = prompt_info["positive_prompt"]
+
             cache_key = self._compute_cache_key(scene.prompt, chosen_style, self.target_width, self.target_height)
             target_file = book_illustrations_dir / f"{scene.scene_id}_{cache_key}.png"
             cache_file = self.cache_dir / f"art_{cache_key}.png"
@@ -271,18 +318,19 @@ class IllustrationManager:
         try:
             for idx, scene in enumerate(scenes, start=1):
                 i = idx - 1
-                hist_texts = None
-                if self.context_scenes > 0 and i > 0:
-                    h_start = max(0, i - self.context_scenes)
-                    hist_texts = [scenes[k].full_text for k in range(h_start, i)]
+                if not scene.prompt:
+                    hist_texts = None
+                    if self.context_scenes > 0 and i > 0:
+                        h_start = max(0, i - self.context_scenes)
+                        hist_texts = [scenes[k].full_text for k in range(h_start, i)]
 
-                # 1. 提炼提示词 (注入前 M 个场景的滚动上下文)
-                prompt_info = self.prompt_generator.build_prompt(
-                    scene.full_text,
-                    style_key=chosen_style,
-                    history_texts=hist_texts
-                )
-                scene.prompt = prompt_info["positive_prompt"]
+                    # 1. 提炼提示词 (注入前 M 个场景的滚动上下文)
+                    prompt_info = self.prompt_generator.build_prompt(
+                        scene.full_text,
+                        style_key=chosen_style,
+                        history_texts=hist_texts
+                    )
+                    scene.prompt = prompt_info["positive_prompt"]
 
                 # 2. 检查缓存 (基于目标分辨率与提示词做哈希)
                 cache_key = self._compute_cache_key(scene.prompt, chosen_style, self.target_width, self.target_height)

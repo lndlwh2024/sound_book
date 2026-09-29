@@ -266,4 +266,56 @@ def test_prompt_generator_rolling_context():
     assert mgr_clamped.context_scenes == 10
 
 
+def test_storybook_two_step_pipeline():
+    """测试 Step A 纯文本切分与异步提炼 + Step B 真实物理时序绑定两段式流水线"""
+    splitter = SceneSplitter(paragraphs_per_scene=3)
+    mock_units = [
+        {"unit_id": f"u_{i}", "text": f"第 {i+1} 句自然文本内容。", "audio_duration": 0.0}
+        for i in range(8)
+    ]
+
+    # Step A: 纯文本切分（无需真实音频时长）
+    scenes = splitter.split_by_text(mock_units, paragraphs_per_scene=3)
+    assert len(scenes) == 3
+    assert scenes[0].start_unit_index == 0 and scenes[0].end_unit_index == 2
+    assert scenes[0].first_sentence == "第 1 句自然文本内容。"
+    assert scenes[1].first_sentence == "第 4 句自然文本内容。"
+    assert scenes[2].first_sentence == "第 7 句自然文本内容。"
+    assert scenes[0].start_time == 0.0 and scenes[0].duration == 0.0
+
+    # Step A: 异步提炼 Prompt 与进度监听
+    mgr = IllustrationManager()
+    mgr.prompt_generator._ensure_llm_ready = lambda: False  # 降级为 rjieba 离线生成以适配瘦测试环境
+
+    progress_events = []
+    def _mock_progress(cur, tot, first):
+        progress_events.append((cur, tot, first))
+
+    scenes = mgr.pregenerate_prompts(scenes, style="chinese_ink", on_progress=_mock_progress)
+    assert len(progress_events) == 3
+    assert progress_events[0] == (1, 3, "第 1 句自然文本内容。")
+    assert progress_events[1] == (2, 3, "第 4 句自然文本内容。")
+    assert progress_events[2] == (3, 3, "第 7 句自然文本内容。")
+    for s in scenes:
+        assert len(s.prompt) > 0
+
+    # Step B: 真实 TTS 结束后时序绑定
+    class MockSubItem:
+        def __init__(self, start_t, end_t):
+            self.start_time = start_t
+            self.end_time = end_t
+
+    mock_subs = [MockSubItem(i * 3.5, (i + 1) * 3.5) for i in range(8)]
+    bound_scenes = splitter.bind_timestamps(scenes, mock_subs)
+
+    assert bound_scenes[0].start_time == 0.0
+    assert bound_scenes[0].end_time == 10.5
+    assert bound_scenes[0].duration == 10.5
+    assert bound_scenes[1].start_time == 10.5
+    assert bound_scenes[1].end_time == 21.0
+    assert bound_scenes[2].start_time == 21.0
+    assert bound_scenes[2].end_time == 28.0
+    assert abs(bound_scenes[2].duration - 7.0) < 1e-4
+
+
 

@@ -321,14 +321,16 @@ class F5Backend(TTSBackend):
 
         result = self._send_payload(payload)
 
-        # 若 CUDA 显存不足则自动 fallback 到 CPU 重试
-        if not result.success and result.error_code == "CUDA_OOM":
-            if self._cpu_fallback:
-                logger.info("F5 触发 CUDA OOM，正在自动切换至 CPU 重新渲染...")
-                payload["device"] = "cpu"
-                result = self._send_payload(payload)
-            else:
-                logger.warning("F5 触发 CUDA OOM，当前配置未开启 CPU 回退")
+        # 【为什么这样设计】
+        # 严格遵守用户资源原则：F5-TTS 专注使用 GPU 运行，CPU 资源专供 Qwen 意象提炼大模型并发使用。
+        # 坚决注释并禁用 CPU 兜底逻辑，一旦显存不足直接报错阻断，绝对禁止 TTS 退回 CPU 引发多核资源严重争抢与系统卡死。
+        # if not result.success and result.error_code == "CUDA_OOM":
+        #     if self._cpu_fallback:
+        #         logger.info("F5 触发 CUDA OOM，正在自动切换至 CPU 重新渲染...")
+        #         payload["device"] = "cpu"
+        #         result = self._send_payload(payload)
+        #     else:
+        #         logger.warning("F5 触发 CUDA OOM，当前配置未开启 CPU 回退")
 
         return result
 

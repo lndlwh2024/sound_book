@@ -182,6 +182,7 @@ class ProductionWorker(QThread):
     """
     sig_status_changed = Signal(str)
     sig_progress_updated = Signal(float, str)
+    sig_dual_progress_updated = Signal(str, str)
     sig_preview_ready = Signal(str)
     sig_plan_ready = Signal(object)
     sig_task_completed = Signal(str)
@@ -353,6 +354,59 @@ class ProductionWorker(QThread):
                 ep_units.extend(chunker.build_speech_units(ch.paragraphs, chapter_id=getattr(ch, 'chapter_id', ch.id), skip_english=skip_english))
 
 
+            # ====== 两段式 CPU/GPU 并发启动 (Step A) ======
+            # 【为什么这样设计】
+            # 严格落实用户核心原则：
+            # 1. Step A: 仅依赖清洗后的文本与分镜规划，由 CPU 后台线程预先提炼场景 Prompt 草案；
+            # 2. 主线程同时调度 GPU 进行 F5-TTS 语音合成，实现 CPU/GPU 零争抢并行；
+            # 3. 实时向前端广播双行状态：第一行保持原 TTS 文案，第二行严格按 CPU 正在预提炼场景意象(分镜/总分镜)_ 首句...尾10字 显示；
+            # 4. 彻底禁用 CPU 跑 TTS 兜底，避免与意象提炼大模型争抢 CPU 资源。
+            storybook_scenes = None
+            prompt_thread = None
+            prompt_thread_err = None
+            scene_splitter = None
+            illustration_mgr = None
+            cur_tts_text = f"【4/12 语音合成 (GPU)】第 {ep_order:02d} 集 · 正在初始化语音引擎..."
+            cur_prompt_text = ""
+
+            if storybook_enabled and ep_units:
+                scene_splitter = SceneSplitter(paragraphs_per_scene=paragraphs_per_scene)
+                storybook_scenes = scene_splitter.split_by_text(ep_units, paragraphs_per_scene=paragraphs_per_scene)
+                illustration_mgr = IllustrationManager(
+                    cache_dir=output_base / "illustrations_cache",
+                    default_style=storybook_style,
+                    llm_model=storybook_llm_model,
+                    use_lcm=use_lcm,
+                    upscale_enabled=enable_upscale,
+                    aspect_ratio="landscape" if "landscape" in layout_name else "portrait",
+                    context_scenes=context_scenes
+                )
+
+                def _on_prompt_progress(cur_s, tot_s, first_sent):
+                    nonlocal cur_prompt_text
+                    cur_prompt_text = f"CPU 正在预提炼场景意象({cur_s}/{tot_s})_ {first_sent}"
+                    self.sig_dual_progress_updated.emit(cur_tts_text, cur_prompt_text)
+
+                def _run_prompt_step_a():
+                    nonlocal storybook_scenes, prompt_thread_err, cur_prompt_text
+                    try:
+                        logger.info(f"【CPU 意象预提炼】开始在后台预生成第 {ep_order:02d} 集 {len(storybook_scenes)} 幕场景 Prompt (Step A)...")
+                        storybook_scenes = illustration_mgr.pregenerate_prompts(
+                            storybook_scenes,
+                            style=storybook_style,
+                            on_progress=_on_prompt_progress
+                        )
+                        cur_prompt_text = f"CPU 正在预提炼场景意象({len(storybook_scenes)}/{len(storybook_scenes)})_ 全部预提炼就绪，等待语音合成汇合..."
+                        self.sig_dual_progress_updated.emit(cur_tts_text, cur_prompt_text)
+                        logger.info(f"【CPU 意象预提炼】第 {ep_order:02d} 集全部场景 Prompt 预提炼完成！")
+                    except Exception as ex:
+                        prompt_thread_err = ex
+                        logger.error(f"CPU 预提炼场景意象异常: {ex}")
+
+                import threading
+                prompt_thread = threading.Thread(target=_run_prompt_step_a, daemon=True)
+                prompt_thread.start()
+
             tts_engine_name = str(cfg.get("tts_engine", "f5")).lower()
             voice_profile = cfg.get("voice_profile", "E1")
             tts_router = create_tts_router(config.get("tts", {}))
@@ -383,10 +437,13 @@ class ProductionWorker(QThread):
                             else:
                                 preview_fmt = f"{clean_text}(共{tot_chars}字)"
 
+                            cur_tts_text = f"【4/12 语音合成 (GPU)】第 {ep_order:02d} 集 · 朗读 {idx+1}/{total_u} 句 | 原文: \"{preview_fmt}\""
                             self.sig_progress_updated.emit(
                                 20.0 + ((idx + 1) / max(1, total_u)) * 45.0,
-                                f"【5/8 语音合成】第 {ep_order:02d} 集 · 朗读 {idx+1}/{total_u} 句 | 原文: \"{preview_fmt}\""
+                                cur_tts_text
                             )
+                            if storybook_enabled:
+                                self.sig_dual_progress_updated.emit(cur_tts_text, cur_prompt_text)
 
                             # 【核心设计：读显分离】
                             # u.text 严格保持阿拉伯数字格式，确保 SRT 字幕与画面保持原书排版；
@@ -460,14 +517,25 @@ class ProductionWorker(QThread):
                                     break
                 finally:
                     tts_backend.stop_session()
+                    if prompt_thread and prompt_thread.is_alive():
+                        logger.info("语音合成结束，正在等待 CPU 场景意象提炼线程汇合...")
+                        prompt_thread.join(timeout=180.0)
+                    if prompt_thread_err:
+                        logger.error(f"CPU 场景意象预提炼发生异常: {prompt_thread_err}")
             else:
                 for u in ep_units:
                     if u.audio_duration <= 0:
                         u.audio_duration = max(1.5, len(u.text) * 0.2)
 
-            self.sig_status_changed.emit("ALIGNING_SUBTITLES")
-            self.sig_progress_updated.emit(70.0, f"【6/8 字幕对齐 (ALIGNING_SUBTITLES)】正在对齐生成第 {ep_order:02d} 集双语字幕...")
+            # 恢复单行状态并进入时序与字幕节点
+            self.sig_dual_progress_updated.emit("", "")
+            self.sig_status_changed.emit("SUBTITLE_SYNC")
+            self.sig_progress_updated.emit(70.0, f"【6/12 时序与字幕】正在对齐生成第 {ep_order:02d} 集双语字幕并绑定分镜真实时间轴...")
             sub_items = subtitle_engine.align(ep_units)
+
+            # Step B: 毫秒级绑定真实音频起止时间戳
+            if storybook_enabled and storybook_scenes and scene_splitter:
+                storybook_scenes = scene_splitter.bind_timestamps(storybook_scenes, sub_items)
 
             # 计算单集物理时长（秒）并换算为分钟（不足 1 分钟四舍五入保底 1m）
             duration_secs = sub_items[-1].end_time if sub_items else 0.0
@@ -522,30 +590,29 @@ class ProductionWorker(QThread):
                 if storybook_enabled:
                     # ====== 模式 A: 小人书分镜沉浸式流水线 (严格物理时间线) ======
                     # 【为什么这样设计】
-                    # 1. 严格落实真实物理时间线：先完成文本意象提炼、大模型绘图与超分辨率增强，
-                    #    再进行人声与 BGM 智能混音，最后结合 ASS 字幕执行单通道 NVENC 硬件压制；
+                    # 1. 严格落实真实物理时间线：Prompt 已由 Step A 在 TTS 期间预先提炼完毕；
+                    #    此处直接调度 SD 1.5 进行批量绘图与超分辨率放大，节省 1~2 分钟纯等待时间；
                     # 2. 严格落实质量红线：若大模型不可用坚决报错阻断，绝不自欺欺人生产毫无价值的文字框废片；
                     # 3. 严格落实命名规范：带插画的小人书 MP4 注入 '_P_' 标记，不带插画的文件保持原版命名不变。
-
-                    # 节点 6: 意象提炼 (SCENE_PROMPTING)
-                    self.sig_status_changed.emit("SCENE_PROMPTING")
-                    self.sig_progress_updated.emit(78.0, f"【6/12 意象提炼】正在按每 {paragraphs_per_scene} 句聚类场景并结合前 {context_scenes} 个上下文由 Qwen 提炼 SD Prompt...")
-                    scene_splitter = SceneSplitter(paragraphs_per_scene=paragraphs_per_scene)
-                    scenes = scene_splitter.split(ep_units)
 
                     # 节点 7: 大模型绘图 (ILLUSTRATING)
                     self.sig_status_changed.emit("ILLUSTRATING")
                     self.sig_progress_updated.emit(80.0, f"【7/12 大模型绘图】正在调度 SD 1.5 批量绘制场景插画...")
 
-                    illustration_mgr = IllustrationManager(
-                        cache_dir=output_base / "illustrations_cache",
-                        default_style=storybook_style,
-                        llm_model=storybook_llm_model,
-                        use_lcm=use_lcm,
-                        upscale_enabled=enable_upscale,
-                        aspect_ratio="landscape" if "landscape" in layout_name else "portrait",
-                        context_scenes=context_scenes
-                    )
+                    # 确保 scenes 与 illustration_mgr 就绪
+                    if not storybook_scenes:
+                        fallback_splitter = SceneSplitter(paragraphs_per_scene=paragraphs_per_scene)
+                        storybook_scenes = fallback_splitter.split(ep_units)
+                    if not illustration_mgr:
+                        illustration_mgr = IllustrationManager(
+                            cache_dir=output_base / "illustrations_cache",
+                            default_style=storybook_style,
+                            llm_model=storybook_llm_model,
+                            use_lcm=use_lcm,
+                            upscale_enabled=enable_upscale,
+                            aspect_ratio="landscape" if "landscape" in layout_name else "portrait",
+                            context_scenes=context_scenes
+                        )
                     book_illus_dir = book_dir / f"ep_{ep_order:02d}_illustrations"
 
                     def _on_illus_progress(cur, tot, msg):
@@ -558,7 +625,7 @@ class ProductionWorker(QThread):
 
                     try:
                         scenes = illustration_mgr.prepare_scene_illustrations(
-                            scenes=scenes,
+                            scenes=storybook_scenes,
                             book_illustrations_dir=book_illus_dir,
                             style=storybook_style,
                             progress_callback=_on_illus_progress,
@@ -671,6 +738,7 @@ class TaskManagerBridge(QObject):
     """
     sig_status_changed = Signal(str)
     sig_progress_updated = Signal(float, str)
+    sig_dual_progress_updated = Signal(str, str)
     sig_preview_ready = Signal(str)
     sig_plan_ready = Signal(object)
     sig_task_completed = Signal(str)
@@ -686,6 +754,8 @@ class TaskManagerBridge(QObject):
             worker.sig_status_changed.connect(self.sig_status_changed)
         if hasattr(worker, "sig_progress_updated"):
             worker.sig_progress_updated.connect(self.sig_progress_updated)
+        if hasattr(worker, "sig_dual_progress_updated"):
+            worker.sig_dual_progress_updated.connect(self.sig_dual_progress_updated)
         if hasattr(worker, "sig_preview_ready"):
             worker.sig_preview_ready.connect(self.sig_preview_ready)
         if hasattr(worker, "sig_plan_ready"):

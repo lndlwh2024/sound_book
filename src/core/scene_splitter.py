@@ -41,6 +41,7 @@ class ScenePlan:
     unit_ids: List[str] = field(default_factory=list)
     prompt: str = ""
     image_path: Optional[str] = None
+    first_sentence: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         """序列化为可持久化字典，供分集清单 Manifest 存档"""
@@ -56,6 +57,7 @@ class ScenePlan:
             "unit_ids": self.unit_ids,
             "prompt": self.prompt,
             "image_path": self.image_path,
+            "first_sentence": self.first_sentence,
         }
 
 
@@ -160,7 +162,8 @@ class SceneSplitter:
                     end_time=round(current_time_cursor, 3),
                     duration=round(current_scene_duration, 3),
                     full_text=" ".join(current_texts),
-                    unit_ids=list(current_unit_ids)
+                    unit_ids=list(current_unit_ids),
+                    first_sentence=current_texts[0] if current_texts else ""
                 )
                 scenes.append(scene_plan)
 
@@ -187,7 +190,8 @@ class SceneSplitter:
                 end_time=round(current_time_cursor, 3),
                 duration=round(scene_duration, 3),
                 full_text=" ".join(current_texts),
-                unit_ids=list(current_unit_ids)
+                unit_ids=list(current_unit_ids),
+                first_sentence=current_texts[0] if current_texts else ""
             )
             scenes.append(scene_plan)
 
@@ -195,4 +199,108 @@ class SceneSplitter:
             f"场景切分完成：共将 {len(units)} 个语音切片聚类为 {len(scenes)} 个小人书分镜，"
             f"总时长约 {current_time_cursor:.2f} 秒，平均每镜 {current_time_cursor/max(1, len(scenes)):.1f} 秒"
         )
+        return scenes
+
+    def split_by_text(
+        self,
+        units: List[Union[SpeechUnit, Dict[str, Any]]],
+        paragraphs_per_scene: Optional[int] = None
+    ) -> List[ScenePlan]:
+        """
+        Step A 专用：基于自然文本对句子进行分镜场景聚类（不依赖任何音频物理时长）。
+
+        【为什么这样设计】
+        1. 落实两段式管线设计：在 TTS 启动前，直接按纯文本句子数聚类 SceneUnit，
+           供 CPU 并发预先提炼 Prompt，此时无需等待 GPU 生成音频文件；
+        2. 记录 first_sentence，专供前端状态栏展示当前分镜正在提炼的句首内容。
+        """
+        if not units:
+            return []
+
+        target_step = max(1, paragraphs_per_scene or self.paragraphs_per_scene)
+        scenes: List[ScenePlan] = []
+        scene_idx = 1
+        total_units = len(units)
+
+        for start_idx in range(0, total_units, target_step):
+            end_idx = min(start_idx + target_step - 1, total_units - 1)
+            group_units = units[start_idx:end_idx + 1]
+
+            texts = []
+            u_ids = []
+            for idx_in_grp, u in enumerate(group_units):
+                cur_idx = start_idx + idx_in_grp
+                if isinstance(u, dict):
+                    t = u.get("text", "")
+                    uid = u.get("unit_id", f"unit_{cur_idx:04d}")
+                else:
+                    t = getattr(u, "text", "")
+                    uid = getattr(u, "unit_id", f"unit_{cur_idx:04d}")
+                texts.append(t.strip())
+                u_ids.append(uid)
+
+            first_sent = texts[0] if texts else ""
+            full_txt = " ".join(texts)
+
+            scene = ScenePlan(
+                scene_index=scene_idx,
+                scene_id=f"scene_{scene_idx:03d}",
+                start_unit_index=start_idx,
+                end_unit_index=end_idx,
+                start_time=0.0,
+                end_time=0.0,
+                duration=0.0,
+                full_text=full_txt,
+                unit_ids=u_ids,
+                first_sentence=first_sent
+            )
+            scenes.append(scene)
+            scene_idx += 1
+
+        logger.info(f"[Step A 文本分镜聚类] 已将 {total_units} 个文本切片预划分为 {len(scenes)} 个分镜场景")
+        return scenes
+
+    def bind_timestamps(
+        self,
+        scenes: List[ScenePlan],
+        sub_items_or_units: List[Any]
+    ) -> List[ScenePlan]:
+        """
+        Step B 专用：将 TTS 合成完成后的真实物理时间轴绑定至已提炼好 Prompt 的分镜场景。
+
+        【为什么这样设计】
+        1. 落实零开销原则：纯内存字段赋值，执行耗时 < 1 毫秒；
+        2. 绝对不重新触发大模型 Prompt 生成；
+        3. 保证 Scene start/end 严格等于对应首末 SpeechUnit 的起止时间，保持音画严格无缝衔接。
+        """
+        if not scenes or not sub_items_or_units:
+            return scenes
+
+        total_items = len(sub_items_or_units)
+        for scene in scenes:
+            s_idx = max(0, min(scene.start_unit_index, total_items - 1))
+            e_idx = max(0, min(scene.end_unit_index, total_items - 1))
+
+            first_item = sub_items_or_units[s_idx]
+            last_item = sub_items_or_units[e_idx]
+
+            if hasattr(first_item, "start_time"):
+                start_t = float(first_item.start_time)
+            elif isinstance(first_item, dict):
+                start_t = float(first_item.get("start_time", 0.0))
+            else:
+                start_t = 0.0
+
+            if hasattr(last_item, "end_time"):
+                end_t = float(last_item.end_time)
+            elif isinstance(last_item, dict):
+                end_t = float(last_item.get("end_time", 0.0))
+            else:
+                end_t = start_t + 5.0
+
+            scene.start_time = round(start_t, 3)
+            scene.end_time = round(max(start_t + 0.1, end_t), 3)
+            scene.duration = round(scene.end_time - scene.start_time, 3)
+
+        logger.info(f"[Step B 时序绑定] 成功为 {len(scenes)} 个分镜场景绑定真实 TTS 时间轴 (总时长 {scenes[-1].end_time:.2f}s)")
         return scenes

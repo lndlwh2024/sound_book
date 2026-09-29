@@ -287,14 +287,16 @@ def test_main_window_storybook_compact_row(qapp):
     """
     window = MainWindow()
 
-    # 1. 验证控件属性
+    # 1. 验证控件属性与安全固定宽度
     assert hasattr(window, "chk_storybook_mode")
     assert window.chk_storybook_mode.text() == ""
     assert hasattr(window, "spn_paras_per_scene")
     assert window.spn_paras_per_scene.suffix() == " 句/分镜"
+    assert window.spn_paras_per_scene.maximumWidth() == 78
     assert hasattr(window, "cmb_context_scenes")
     assert window.cmb_context_scenes.count() == 5
     assert window.cmb_context_scenes.currentData() == 2
+    assert window.cmb_context_scenes.maximumWidth() == 112
 
     # 2. 验证配置字典提取
     cfg = window._get_current_config()
@@ -310,6 +312,50 @@ def test_main_window_storybook_compact_row(qapp):
     window.chk_storybook_mode.setChecked(True)
     assert window.cmb_context_scenes.isEnabled()
     assert window.spn_paras_per_scene.isEnabled()
+
+
+def test_main_window_dual_mode_status_display(qapp):
+    """
+    测试 v3.3.7 双核并发状态栏双行排版与智能首尾截断特性：
+    1. 并行广播时自动切换为 10.5px 紧凑双行排版；
+    2. 上行保持 GPU 语音合成文案；
+    3. 下行展示 CPU 正在预提炼场景意象(分镜数/总分镜数)_ 首句；
+    4. 超宽时智能截断为：前缀 + 开头 + ... + 首句最后10个字；
+    5. 退出并发态后平滑恢复单行排版。
+    """
+    window = MainWindow()
+
+    tts_msg = '【4/12 语音合成 (GPU)】第 01 集 · 朗读 5/38 句 | 原文: "李白乘舟将欲行，忽闻岸上踏歌声。"(共18字)'
+    prompt_msg = 'CPU 正在预提炼场景意象(5/12)_ 桃花潭水深千尺，不及汪伦送我情。'
+
+    # 1. 进入双行并发
+    window._on_worker_dual_progress_updated(tts_msg, prompt_msg)
+    assert window._is_dual_mode is True
+    status_text = window.lbl_status.text()
+    assert "\n" in status_text
+    lines = status_text.split("\n")
+    assert len(lines) == 2
+    assert "【4/12 语音合成 (GPU)】" in lines[0]
+    assert "CPU 正在预提炼场景意象(5/12)_" in lines[1]
+    assert "10.5px" in window.lbl_status.styleSheet()
+
+    # 2. 验证超长文本在有限宽度下的首尾截断（保留前缀 + 开头 + ... + 尾部10字）
+    long_first_sent = "一二三四五六七八九十" * 10 + "这是该分镜首句的关键尾部十个字"
+    long_prompt_msg = f"CPU 正在预提炼场景意象(8/15)_ {long_first_sent}"
+    # 模拟限制宽度为 300px
+    from PySide6.QtGui import QFontMetrics
+    fm = QFontMetrics(window.lbl_status.font())
+    elided = window._elide_single_line(long_prompt_msg, fm, target_avail=280)
+    assert "CPU 正在预提炼场景意象(8/15)_ " in elided
+    assert "..." in elided
+    assert "关键尾部十个字" in elided
+
+    # 3. 退出双行并发，恢复单行
+    window._on_worker_dual_progress_updated("", "")
+    assert window._is_dual_mode is False
+    window._on_worker_progress_updated(70.0, "【6/12 时序与字幕】正在对齐并绑定时间轴...")
+    assert "\n" not in window.lbl_status.text()
+    assert "13px" in window.lbl_status.styleSheet()
 
 
 
