@@ -242,12 +242,18 @@ def download_model(backend_key: str):
     # 应用断点续传 Patch
     patch_huggingface_resumption()
 
+    # 针对 SD 1.5 官方大杂烩仓库，精准排除第三方 WebUI 专用的巨型单文件底模 (7.35GB / 4.07GB) 与重复格式
+    ignore_patterns = []
+    if backend_key == "sd15":
+        ignore_patterns = ["*.ckpt", "*pruned*", "*non_ema*", "safety_checker/*"]
+
     try:
         snapshot_download(
             repo_id=repo_id,
             local_files_only=False,
             resume_download=True,
             max_workers=2,
+            ignore_patterns=ignore_patterns,
             tqdm_class=HfDownloadProgressHook
         )
         print(f"__DONE__{json.dumps({'backend': backend_key, 'desc': desc}, ensure_ascii=False)}", flush=True)
