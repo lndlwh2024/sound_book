@@ -543,53 +543,53 @@ class ProductionWorker(QThread):
                                 break
                             u_wav = (ep_units_dir / f"unit_{idx:04d}.wav").resolve()
                             if not u_wav.exists() or u_wav.stat().st_size <= 1000:
-                            clean_text = u.text.strip().replace('\n', ' ')
-                            tot_chars = len(clean_text)
-                            # 【为什么这样设计】
-                            # 响应问题二：移除 22 字的源头硬编码腰斩截断，
-                            # 后端对外发射完整的正文文本（仅保留 200 字极端超长兜底保护），
-                            # 状态栏在右侧拥有 800~1100px 广阔空间，由前端通过 QFontMetrics 动态测量与自适应展开。
-                            if tot_chars > 200:
-                                preview_fmt = f"{clean_text[:90]}...{clean_text[-90:]}(共{tot_chars}字)"
+                                clean_text = u.text.strip().replace('\n', ' ')
+                                tot_chars = len(clean_text)
+                                # 【为什么这样设计】
+                                # 响应问题二：移除 22 字的源头硬编码腰斩截断，
+                                # 后端对外发射完整的正文文本（仅保留 200 字极端超长兜底保护），
+                                # 状态栏在右侧拥有 800~1100px 广阔空间，由前端通过 QFontMetrics 动态测量与自适应展开。
+                                if tot_chars > 200:
+                                    preview_fmt = f"{clean_text[:90]}...{clean_text[-90:]}(共{tot_chars}字)"
+                                else:
+                                    preview_fmt = f"{clean_text}(共{tot_chars}字)"
+
+                                cur_tts_text = f"【4/12 语音合成 (GPU)】第 {ep_order:02d} 集 · 朗读 {idx+1}/{total_u} 句 | 原文: \"{preview_fmt}\""
+                                self.sig_progress_updated.emit(
+                                    20.0 + ((idx + 1) / max(1, total_u)) * 45.0,
+                                    cur_tts_text
+                                )
+                                if storybook_enabled:
+                                    self.sig_dual_progress_updated.emit(cur_tts_text, cur_prompt_text)
+
+                                # 【核心设计：读显分离】
+                                # u.text 严格保持阿拉伯数字格式，确保 SRT 字幕与画面保持原书排版；
+                                # 送入 F5 大模型推理时使用 normalize_for_tts 转换为标准中文口语词，彻底杜绝英文读音
+                                from ..text.normalizer import normalize_for_tts
+                                spoken_text = normalize_for_tts(u.text)
+
+                                res = tts_backend.synthesize(
+                                    text=spoken_text,
+                                    output_path=u_wav,
+                                    voice=voice_profile,
+                                    speed=speech_speed,
+                                    options={
+                                        "nfe_step": nfe_step,
+                                        "cfg_strength": cfg_strength
+                                    }
+                                )
+                                from ..audio.ffmpeg_utils import get_audio_info
+                                phys_info = get_audio_info(u_wav)
+                                if phys_info.get("duration", 0) > 0:
+                                    u.audio_duration = phys_info["duration"]
+                                elif res.success and res.duration > 0:
+                                    u.audio_duration = res.duration
+                                else:
+                                    u.audio_duration = max(1.5, len(u.text) * 0.2)
                             else:
-                                preview_fmt = f"{clean_text}(共{tot_chars}字)"
-
-                            cur_tts_text = f"【4/12 语音合成 (GPU)】第 {ep_order:02d} 集 · 朗读 {idx+1}/{total_u} 句 | 原文: \"{preview_fmt}\""
-                            self.sig_progress_updated.emit(
-                                20.0 + ((idx + 1) / max(1, total_u)) * 45.0,
-                                cur_tts_text
-                            )
-                            if storybook_enabled:
-                                self.sig_dual_progress_updated.emit(cur_tts_text, cur_prompt_text)
-
-                            # 【核心设计：读显分离】
-                            # u.text 严格保持阿拉伯数字格式，确保 SRT 字幕与画面保持原书排版；
-                            # 送入 F5 大模型推理时使用 normalize_for_tts 转换为标准中文口语词，彻底杜绝英文读音
-                            from ..text.normalizer import normalize_for_tts
-                            spoken_text = normalize_for_tts(u.text)
-
-                            res = tts_backend.synthesize(
-                                text=spoken_text,
-                                output_path=u_wav,
-                                voice=voice_profile,
-                                speed=speech_speed,
-                                options={
-                                    "nfe_step": nfe_step,
-                                    "cfg_strength": cfg_strength
-                                }
-                            )
-                            from ..audio.ffmpeg_utils import get_audio_info
-                            phys_info = get_audio_info(u_wav)
-                            if phys_info.get("duration", 0) > 0:
-                                u.audio_duration = phys_info["duration"]
-                            elif res.success and res.duration > 0:
-                                u.audio_duration = res.duration
-                            else:
-                                u.audio_duration = max(1.5, len(u.text) * 0.2)
-                        else:
-                            from ..audio.ffmpeg_utils import get_audio_info
-                            info = get_audio_info(u_wav)
-                            u.audio_duration = info.get("duration", max(1.5, len(u.text) * 0.2))
+                                from ..audio.ffmpeg_utils import get_audio_info
+                                info = get_audio_info(u_wav)
+                                u.audio_duration = info.get("duration", max(1.5, len(u.text) * 0.2))
                         unit_wavs.append(u_wav)
 
                         # 【GPU 硬件温控安全挂起与自愈机制】
@@ -632,20 +632,20 @@ class ProductionWorker(QThread):
 
                                 if self._pause_requested:
                                     break
-                finally:
-                    tts_backend.stop_session()
-                    if prompt_thread and prompt_thread.is_alive():
-                        logger.info("语音合成结束，正在等待 CPU 场景意象提炼线程汇合...")
-                        prompt_thread.join(timeout=180.0)
-                    if prompt_thread_err:
-                        logger.error(f"CPU 场景意象预提炼发生异常: {prompt_thread_err}")
-                    # 主动释放 Qwen 进程，释放 ~4GB 物理内存，为下游 SD 绘图腾出充裕空间
-                    if illustration_mgr and hasattr(illustration_mgr, "release_llm_resources"):
-                        illustration_mgr.release_llm_resources()
-            else:
-                for u in ep_units:
-                    if u.audio_duration <= 0:
-                        u.audio_duration = max(1.5, len(u.text) * 0.2)
+                    finally:
+                        tts_backend.stop_session()
+                        if prompt_thread and prompt_thread.is_alive():
+                            logger.info("语音合成结束，正在等待 CPU 场景意象提炼线程汇合...")
+                            prompt_thread.join(timeout=180.0)
+                        if prompt_thread_err:
+                            logger.error(f"CPU 场景意象预提炼发生异常: {prompt_thread_err}")
+                        # 主动释放 Qwen 进程，释放 ~4GB 物理内存，为下游 SD 绘图腾出充裕空间
+                        if illustration_mgr and hasattr(illustration_mgr, "release_llm_resources"):
+                            illustration_mgr.release_llm_resources()
+                else:
+                    for u in ep_units:
+                        if u.audio_duration <= 0:
+                            u.audio_duration = max(1.5, len(u.text) * 0.2)
 
             # 恢复单行状态并进入时序与字幕节点
             self.sig_dual_progress_updated.emit("", "")
