@@ -349,6 +349,13 @@ class IllustrationManager:
         chosen_style = style or self.default_style
         total = len(scenes)
 
+        # 预先确保大模型引擎初始化就绪，保证从第 1 幕开始进度回调即能准确展示 (Qwen2.5-1.5B CPU)
+        if hasattr(self.prompt_generator, "_ensure_llm_ready"):
+            try:
+                self.prompt_generator._ensure_llm_ready()
+            except Exception:
+                pass
+
         for idx, scene in enumerate(scenes, start=1):
             i = idx - 1
             hist_texts = None

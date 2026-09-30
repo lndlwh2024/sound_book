@@ -8,8 +8,13 @@
 2. 风格化控制：内置水墨、复古连环画、动漫、古典油画等多套提示词母版，精准契合"小人书"的历史人文沉浸感；
 3. 负向质量防护：自动拼装负面提示词（Negative Prompt），避免画面出现杂乱文字水印、形变或低劣构图。
 """
+import os
+import sys
 import re
+import json
+import time
 import logging
+from pathlib import Path
 from typing import Dict, List, Optional, Set
 
 logger = logging.getLogger(__name__)
@@ -165,12 +170,20 @@ class PromptGenerator:
         self._llm_init_attempted = False
         self._llm_is_ready = False
 
+    def get_active_engine_name(self) -> str:
+        """获取当前活跃的意象提炼引擎名称"""
+        if self._llm_is_ready:
+            if "0.5B" in str(self.llm_model):
+                return "Qwen2.5-0.5B (CPU)"
+            return "Qwen2.5-1.5B (CPU)"
+        return "rjieba 离线词典"
+
     def _resolve_f5_python(self) -> str:
         """寻找具备 transformers 依赖的 envs/f5 Python 解释器"""
         project_root = Path(__file__).resolve().parent.parent.parent
         f5_py = project_root / "envs" / "f5" / "Scripts" / "python.exe"
         if f5_py.exists():
-            return str(f5_py)
+            return str(f5_py.resolve())
         return sys.executable
 
     def _ensure_llm_ready(self) -> bool:
@@ -179,23 +192,25 @@ class PromptGenerator:
         【为什么这样设计】
         1. 保持管线流程 100% 不变：意象提炼仍为原 Step A 内部标准环节；
         2. 解决依赖隔离：调用 envs/f5 解释器运行 Qwen，解决主环境缺少 transformers 导致的秒退回 bug；
-        3. 若模型未就绪或无法加载，优雅回退到 [rjieba 离线词典映射] 备选方案，绝对保证生产流水线平稳交付。
+        3. 持续队列监听：使用循环从队列持续获取子进程输出直到得到 ready/error 应答，杜绝单行截断；
+        4. 异常透传警示：若加载失败，在日志中明确记录真实异常原因并提示用户。
         """
         if self._llm_init_attempted:
             return self._llm_is_ready
 
         self._llm_init_attempted = True
-        if not self.llm_model or self.llm_model == "offline_rjieba":
-            logger.info("意象提炼当前配置为 [offline_rjieba] 模式，使用离线词典映射")
+        if not self.llm_model or self.llm_model == "offline_rjieba" or self.llm_model == "rjieba":
+            logger.info("意象提炼当前配置为 [rjieba] 模式，使用离线词典映射")
             return False
 
         try:
             import subprocess
-            import json
+            import queue
+            import threading
 
             worker_script = Path(__file__).resolve().parent.parent.parent / "workers" / "qwen_worker.py"
             if not worker_script.exists():
-                logger.info(f"未找到 Qwen Worker 脚本 ({worker_script})，将回退至 [rjieba 离线词典映射]")
+                logger.warning(f"未找到 Qwen Worker 脚本 ({worker_script})，将回退至 [rjieba 离线词典映射]")
                 return False
 
             python_exe = self._resolve_f5_python()
@@ -229,34 +244,59 @@ class PromptGenerator:
             self._llm_worker_process.stdin.write(json.dumps(init_cmd) + "\n")
             self._llm_worker_process.stdin.flush()
 
-            # 等待就绪响应 (最长等待 120 秒)
-            import queue
-            import threading
+            # 等待就绪响应 (最长等待 180 秒，支持大模型完整载入物理内存)
             resp_q = queue.Queue()
 
             def _read_init():
                 try:
-                    line = self._llm_worker_process.stdout.readline()
-                    resp_q.put(line)
+                    while self._llm_worker_process and self._llm_worker_process.poll() is None:
+                        line = self._llm_worker_process.stdout.readline()
+                        if not line:
+                            break
+                        resp_q.put(line)
+                        try:
+                            d = json.loads(line.strip())
+                            if d.get("status") in ("ready", "error"):
+                                break
+                        except Exception:
+                            pass
                 except Exception as err:
                     resp_q.put(err)
 
             t = threading.Thread(target=_read_init, daemon=True)
             t.start()
 
-            raw_resp = resp_q.get(timeout=120.0)
-            if isinstance(raw_resp, str) and raw_resp.strip():
-                data = json.loads(raw_resp.strip())
-                if data.get("status") == "ready":
-                    self._llm_is_ready = True
-                    logger.info(f"Qwen 意象提炼大模型成功就绪并驻留内存！(模型: {self.llm_model})")
-                    return True
+            start_wait = time.time()
+            while time.time() - start_wait < 180.0:
+                try:
+                    raw_resp = resp_q.get(timeout=2.0)
+                except queue.Empty:
+                    if self._llm_worker_process.poll() is not None:
+                        break
+                    continue
 
-            logger.info("Qwen 模型未就绪或未下载，将无缝回退至 [rjieba 离线词典映射] 备选方案")
+                if isinstance(raw_resp, Exception):
+                    logger.error(f"读取 Qwen Worker 响应发生异常: {raw_resp}")
+                    break
+
+                if isinstance(raw_resp, str) and raw_resp.strip():
+                    try:
+                        data = json.loads(raw_resp.strip())
+                        if data.get("status") == "ready":
+                            self._llm_is_ready = True
+                            logger.info(f"Qwen 意象提炼大模型成功就绪并驻留内存！(模型: {self.llm_model})")
+                            return True
+                        elif data.get("status") == "error":
+                            logger.error(f"Qwen Worker 模型加载返回错误: {data.get('error', '未知错误')}")
+                            break
+                    except Exception:
+                        pass
+
+            logger.warning("Qwen 模型未就绪或加载超时，将回退至 [rjieba 离线词典映射] 备选方案")
             self._terminate_llm_worker()
             return False
         except Exception as e:
-            logger.info(f"本地 LLM 权重未就绪或加载超时 ({e})，将无缝回退至 [rjieba 离线词典映射] 备选方案")
+            logger.error(f"启动 CPU 意象提炼大模型失败 ({e})，将回退至 [rjieba 离线词典映射] 备选方案", exc_info=True)
             self._terminate_llm_worker()
             return False
 

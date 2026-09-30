@@ -349,3 +349,59 @@ def test_sd_worker_tqdm_hook_and_progress():
         assert last["total"] == 1000
     finally:
         sd_mod.send_response = original_send
+
+
+def test_prompt_generator_engine_naming():
+    """测试 PromptGenerator 在就绪前后获取活跃引擎名称的逻辑"""
+    from src.ai.prompt_generator import PromptGenerator
+
+    pg = PromptGenerator(default_style="chinese_ink", llm_model="Qwen/Qwen2.5-1.5B-Instruct")
+    # 未就绪前默认返回 rjieba 离线词典
+    assert pg.get_active_engine_name() == "rjieba 离线词典"
+
+    # 标记就绪后应正确反映 Qwen2.5-1.5B (CPU)
+    pg._llm_is_ready = True
+    assert pg.get_active_engine_name() == "Qwen2.5-1.5B (CPU)"
+
+    # 切换至 0.5B
+    pg2 = PromptGenerator(default_style="chinese_ink", llm_model="Qwen/Qwen2.5-0.5B-Instruct")
+    pg2._llm_is_ready = True
+    assert pg2.get_active_engine_name() == "Qwen2.5-0.5B (CPU)"
+
+
+def test_illustration_manager_pregenerate_prompts_flow():
+    """测试 IllustrationManager pregenerate_prompts 能够正常调用 build_prompt 提炼每幕分镜"""
+    from src.ai.illustration_manager import IllustrationManager
+    from src.core.scene_splitter import ScenePlan
+
+    scenes = [
+        ScenePlan(
+            scene_index=1,
+            scene_id="scene_001",
+            start_unit_index=0,
+            end_unit_index=2,
+            start_time=0.0,
+            end_time=6.0,
+            duration=6.0,
+            full_text="白衣书生站在小舟船头，细雨霏霏，湖水荡漾。",
+            first_sentence="白衣书生站在小舟船头"
+        )
+    ]
+
+    im = IllustrationManager(
+        default_style="chinese_ink",
+        llm_model="offline_rjieba",  # 使用词典保底模式进行确定性单测
+        context_scenes=2
+    )
+
+    progress_records = []
+    def on_p(c, t, s):
+        progress_records.append((c, t, s))
+
+    res = im.pregenerate_prompts(scenes, on_progress=on_p)
+    assert len(res) == 1
+    assert len(res[0].prompt) > 0
+    assert len(progress_records) == 1
+    assert progress_records[0][0] == 1
+    assert "白衣书生" in progress_records[0][2]
+

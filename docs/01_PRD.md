@@ -409,6 +409,10 @@ sequenceDiagram
    - **下载工作进程管道输出纯净化**：`HfDownloadProgressHook` 覆写底层 `display()` 为空操作，并将内部 `file` 重定向至独立内存缓冲区 `io.StringIO()`，彻底杜绝 tqdm 字符画进度条（带 `\r` 且无换行）向管道合并输出，过滤非字节级小文件计数器；
    - **主进程管道解析容错增强**：`ModelManager.download_core_model` 将原本严格的前缀匹配升级为包含式安全截取（`if "__PROGRESS__" in line_str:`），无论管道前缀混入任何终端控制符均能 100% 提取有效 JSON 负载，彻底解决高速下载时状态栏流式进度不更新的假死假象；
    - **主生产流水线进度条生命周期隔离**：模型下载属于环境与权重的旁路准备，非正式有声书生产任务。模型下载就绪或完成时发射 `-1.0` 信号更新提示文字，并在 `_on_model_download_completed` 中显式调用 `self.progress_bar.setValue(0)` 清零复位，彻底杜绝主进度条滞留 100% 误导用户以为生产已结束的界面状态紊乱。
+9. **CPU 意象提炼大模型子进程生命周期与真实提炼规范 (v3.3.15)**：
+   - **核心依赖命名空间完整性**：在 `PromptGenerator` 模块顶部规范补齐 `import os`, `import sys`, `from pathlib import Path`，彻底消除定位解释器时抛出 `NameError: name 'Path' is not defined` 导致静默跳过大模型降级至离线分词的隐蔽 Bug；
+   - **就绪握手流式队列监听**：`_ensure_llm_ready` 采用独立线程流式队列持续读取直到接收到终态 `status: ready`，超时时间放宽至 180 秒以充分支持 3GB 大模型自本地磁盘载入 40GB 宿主物理内存，彻底消除单行 `readline()` 丢包误判；
+   - **状态栏动态引擎透明感知**：在两段式并发 Step A 的双行状态栏中，第二行明确标注当前活跃引擎名称 `(Qwen2.5-1.5B CPU)` 或 `(rjieba 离线词典)`，并实时展示大模型驻留、逐幕深度提炼、全部就绪全流程，杜绝静默欺骗。
 
 ---
 

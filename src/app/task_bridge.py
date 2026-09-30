@@ -384,21 +384,27 @@ class ProductionWorker(QThread):
 
                 def _on_prompt_progress(cur_s, tot_s, first_sent):
                     nonlocal cur_prompt_text
-                    cur_prompt_text = f"【5/12 意象预提炼 (CPU)】第 {ep_order:02d} 集 · 分镜 {cur_s}/{tot_s} 幕 | 场景: \"{first_sent}\""
+                    active_engine = getattr(illustration_mgr.prompt_generator, "get_active_engine_name", lambda: "CPU")()
+                    cur_prompt_text = f"【5/12 意象预提炼 ({active_engine})】第 {ep_order:02d} 集 · 分镜 {cur_s}/{tot_s} 幕 | 正在深度提炼: \"{first_sent}\""
                     self.sig_dual_progress_updated.emit(cur_tts_text, cur_prompt_text)
 
                 def _run_prompt_step_a():
                     nonlocal storybook_scenes, prompt_thread_err, cur_prompt_text
                     try:
                         logger.info(f"【CPU 意象预提炼】开始在后台预生成第 {ep_order:02d} 集 {len(storybook_scenes)} 幕场景 Prompt (Step A)...")
+                        engine_label = "Qwen2.5 (CPU)" if "qwen" in str(storybook_llm_model).lower() else "rjieba 词典"
+                        cur_prompt_text = f"【5/12 意象预提炼 ({engine_label})】第 {ep_order:02d} 集 · 正在拉起大模型并驻留内存..."
+                        self.sig_dual_progress_updated.emit(cur_tts_text, cur_prompt_text)
+
                         storybook_scenes = illustration_mgr.pregenerate_prompts(
                             storybook_scenes,
                             style=storybook_style,
                             on_progress=_on_prompt_progress
                         )
-                        cur_prompt_text = f"【5/12 意象预提炼 (CPU)】第 {ep_order:02d} 集 · 分镜 {len(storybook_scenes)}/{len(storybook_scenes)} 幕 | 全部预提炼就绪，等待语音合成汇合..."
+                        active_engine = getattr(illustration_mgr.prompt_generator, "get_active_engine_name", lambda: "CPU")()
+                        cur_prompt_text = f"【5/12 意象预提炼 ({active_engine})】第 {ep_order:02d} 集 · 分镜 {len(storybook_scenes)}/{len(storybook_scenes)} 幕 | 全部预提炼就绪，等待语音合成汇合..."
                         self.sig_dual_progress_updated.emit(cur_tts_text, cur_prompt_text)
-                        logger.info(f"【CPU 意象预提炼】第 {ep_order:02d} 集全部场景 Prompt 预提炼完成！")
+                        logger.info(f"【CPU 意象预提炼】第 {ep_order:02d} 集全部场景 Prompt 预提炼完成！引擎: {active_engine}")
                     except Exception as ex:
                         prompt_thread_err = ex
                         logger.error(f"CPU 预提炼场景意象异常: {ex}")
