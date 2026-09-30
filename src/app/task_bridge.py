@@ -842,7 +842,13 @@ class ModelDownloadWorker(QThread):
                 return
 
         if success_count == total_models:
-            # 下载完成，发出就绪完成信号，设置 -1.0 避免打满主生产进度条
+            # 下载完成自动触发冗余瘦身，确保磁盘不残留无用垃圾
+            try:
+                ModelManager.prune_redundant_assets()
+            except Exception:
+                pass
+
+            # 发出就绪完成信号，设置 -1.0 避免打满主生产进度条
             self.sig_progress_updated.emit(-1.0, "【模型就绪】恭喜！所有首选大模型已全部下载并就绪，可顺畅运行全部管线！")
             self.sig_download_completed.emit(True, "全部就绪")
 

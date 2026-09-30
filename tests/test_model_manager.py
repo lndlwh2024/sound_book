@@ -33,7 +33,10 @@ def test_cached_model_reuse(tmp_path):
 
     cache_dir = ModelManager.get_model_cache_dir("kokoro", config)
     cache_dir.mkdir(parents=True, exist_ok=True)
-    (cache_dir / "kokoro-v1_1-zh.pth").write_text("dummy weights content")
+    dummy_pth = cache_dir / "kokoro-v1_1-zh.pth"
+    with open(dummy_pth, "wb") as f:
+        f.seek(11 * 1024 * 1024 - 1)
+        f.write(b"\0")
 
     assert ModelManager.is_cached("kokoro", cache_dir) is True
 
@@ -180,5 +183,38 @@ def test_download_core_model_stream_parsing_robustness(monkeypatch):
     assert received_events[1]["percent"] == 25.0
     assert received_events[2]["percent"] == 100.0
     assert received_events[3]["type"] == "done"
+ 
+ 
+def test_prune_redundant_assets(tmp_path, monkeypatch):
+    """测试 prune_redundant_assets 能精准清理 ckpt, bin, safety_checker 等冗余文件"""
+    fake_home = tmp_path / "home"
+    monkeypatch.setattr(Path, "home", lambda: fake_home)
+
+    sd_dir = fake_home / ".cache" / "huggingface" / "hub" / "models--runwayml--stable-diffusion-v1-5" / "snapshots" / "snap1"
+    sd_dir.mkdir(parents=True, exist_ok=True)
+
+    # 1. 模拟冗余文件
+    redundant_ckpt = sd_dir / "v1-5-pruned-emaonly.ckpt"
+    redundant_ckpt.write_text("redundant ckpt")
+    unet_bin = sd_dir / "unet" / "diffusion_pytorch_model.bin"
+    unet_bin.parent.mkdir(parents=True, exist_ok=True)
+    unet_bin.write_text("redundant bin")
+    sc_dir = sd_dir / "safety_checker"
+    sc_dir.mkdir(parents=True, exist_ok=True)
+    (sc_dir / "model.safetensors").write_text("redundant safety checker")
+
+    # 2. 模拟合法核心文件
+    core_unet = sd_dir / "unet" / "diffusion_pytorch_model.safetensors"
+    core_unet.write_text("core unet")
+
+    # 执行修剪
+    count, freed_bytes = ModelManager.prune_redundant_assets()
+
+    # 验证修剪结果
+    assert count >= 3
+    assert not redundant_ckpt.exists()
+    assert not unet_bin.exists()
+    assert not sc_dir.exists()
+    assert core_unet.exists()
 
 

@@ -222,6 +222,54 @@ def clean_random_incomplete_files(repo_id: str):
         pass
 
 
+def prune_redundant_model_files(repo_id: str):
+    """
+    排查并清理指定 repo 缓存目录下冗余废弃的权重文件与审查模块目录。
+    【为什么这样设计】
+    针对 SD 1.5 仓库，彻底修剪第三方 WebUI ckpt、旧版 PyTorch bin、fp16/non_ema 重复包及已禁用的 safety_checker，
+    释放近 18GB 无效空间，杜绝新旧机器磁盘被无用垃圾撑满。
+    """
+    try:
+        import shutil
+        hf_cache_dir = Path.home() / ".cache" / "huggingface" / "hub" / f"models--{repo_id.replace('/', '--')}"
+        if not hf_cache_dir.exists():
+            return
+
+        targets = [
+            "v1-5-pruned-emaonly.ckpt",
+            "v1-5-pruned.ckpt",
+            "unet/diffusion_pytorch_model.bin",
+            "unet/diffusion_pytorch_model.fp16.bin",
+            "unet/diffusion_pytorch_model.fp16.safetensors",
+            "unet/diffusion_pytorch_model.non_ema.safetensors",
+            "unet/diffusion_pytorch_model.non_ema.bin",
+            "text_encoder/model.fp16.safetensors",
+            "text_encoder/pytorch_model.bin",
+            "text_encoder/pytorch_model.fp16.bin",
+            "vae/diffusion_pytorch_model.bin",
+            "vae/diffusion_pytorch_model.fp16.bin",
+            "safety_checker"
+        ]
+
+        snapshots_dir = hf_cache_dir / "snapshots"
+        if snapshots_dir.exists():
+            for snap in snapshots_dir.iterdir():
+                if not snap.is_dir():
+                    continue
+                for rel_path in targets:
+                    p = snap / rel_path
+                    if p.exists():
+                        try:
+                            if p.is_file():
+                                p.unlink()
+                            elif p.is_dir():
+                                shutil.rmtree(p)
+                        except Exception:
+                            pass
+    except Exception:
+        pass
+
+
 def download_model(backend_key: str):
     """执行单个模型的高速镜像下载（支持真断点续传）"""
     if backend_key not in OFFICIAL_MODELS:
@@ -236,16 +284,18 @@ def download_model(backend_key: str):
     # 启动通知
     print(f"__START__{json.dumps({'backend': backend_key, 'repo_id': repo_id, 'desc': desc, 'est_size_mb': info['estimated_size_mb']}, ensure_ascii=False)}", flush=True)
 
-    # 启动前清理历史随机 uuid 碎片，为用户释放磁盘空间
+    # 启动前清理历史随机 uuid 碎片与冗余废弃文件，为用户释放磁盘空间
     clean_random_incomplete_files(repo_id)
+    if backend_key == "sd15":
+        prune_redundant_model_files(repo_id)
 
     # 应用断点续传 Patch
     patch_huggingface_resumption()
 
-    # 针对 SD 1.5 官方大杂烩仓库，精准排除第三方 WebUI 专用的巨型单文件底模 (7.35GB / 4.07GB) 与重复格式
+    # 针对 SD 1.5 官方大杂烩仓库，精准排除第三方 WebUI 专用的巨型单文件底模 (7.35GB / 4.07GB)、PyTorch bin 及重复格式
     ignore_patterns = []
     if backend_key == "sd15":
-        ignore_patterns = ["*.ckpt", "*pruned*", "*non_ema*", "safety_checker/*"]
+        ignore_patterns = ["*.ckpt", "*pruned*", "*non_ema*", "safety_checker/*", "*.bin", "*.fp16.*"]
 
     try:
         snapshot_download(
@@ -256,6 +306,10 @@ def download_model(backend_key: str):
             ignore_patterns=ignore_patterns,
             tqdm_class=HfDownloadProgressHook
         )
+        # 下载成功后自动触发二次瘦身核查，确保不留任何偶发附带的冗余文件
+        if backend_key == "sd15":
+            prune_redundant_model_files(repo_id)
+
         print(f"__DONE__{json.dumps({'backend': backend_key, 'desc': desc}, ensure_ascii=False)}", flush=True)
     except Exception as e:
         print(f"__ERROR__{json.dumps({'backend': backend_key, 'desc': desc, 'error': str(e)}, ensure_ascii=False)}", flush=True)

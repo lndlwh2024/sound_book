@@ -174,6 +174,82 @@ class ModelManager:
         return cleaned_count, cleaned_bytes
 
     @classmethod
+    def prune_redundant_assets(cls, config: Optional[dict] = None) -> Tuple[int, int]:
+        """
+        全量扫描并修剪 SD 1.5 等大模型仓库中的冗余文件（如弃用的 ckpt、重复的 bin/fp16/non_ema 格式及违禁图审查 safety_checker 目录）。
+        【为什么这样设计】
+        1. 根治 HuggingFace 官方 SD 1.5 仓库因包含 WebUI 独立底模、PyTorch 旧二进制 bin 及 fp16 重复备份导致总体积膨胀至 22GB+ 的问题；
+        2. 代码管线完全使用 safetensors，且 safety_checker 已显式设为 None，修剪上述 17.8GB 冗余文件后不仅能为用户 C 盘腾出巨量空间，
+           而且在新电脑上能确保纯净、轻量的极速加载；
+        3. 自动回收断点下载过程中废弃的孤立未完成碎片。
+        返回: (修剪的文件/目录数量, 释放的总字节数)
+        """
+        import shutil
+        pruned_count = 0
+        pruned_bytes = 0
+
+        # 1. 清理未完成的历史碎片
+        c_count, c_bytes = cls.cleanup_incomplete_downloads()
+        pruned_count += c_count
+        pruned_bytes += c_bytes
+
+        # 2. 检查 HuggingFace hub 与项目本地 models 目录
+        scan_roots = []
+        hf_sd_dir = Path.home() / ".cache" / "huggingface" / "hub" / "models--runwayml--stable-diffusion-v1-5"
+        if hf_sd_dir.exists():
+            scan_roots.append(hf_sd_dir)
+
+        proj_sd_dir = cls.get_model_cache_dir("sd15", config)
+        if proj_sd_dir.exists():
+            scan_roots.append(proj_sd_dir)
+
+        targets_to_prune = [
+            "v1-5-pruned-emaonly.ckpt",
+            "v1-5-pruned.ckpt",
+            "unet/diffusion_pytorch_model.bin",
+            "unet/diffusion_pytorch_model.fp16.bin",
+            "unet/diffusion_pytorch_model.fp16.safetensors",
+            "unet/diffusion_pytorch_model.non_ema.safetensors",
+            "unet/diffusion_pytorch_model.non_ema.bin",
+            "text_encoder/model.fp16.safetensors",
+            "text_encoder/pytorch_model.bin",
+            "text_encoder/pytorch_model.fp16.bin",
+            "vae/diffusion_pytorch_model.bin",
+            "vae/diffusion_pytorch_model.fp16.bin",
+            "safety_checker"
+        ]
+
+        for root in scan_roots:
+            subdirs = [root]
+            snap_dir = root / "snapshots"
+            if snap_dir.exists():
+                subdirs.extend([s for s in snap_dir.iterdir() if s.is_dir()])
+
+            for d in subdirs:
+                for rel_path in targets_to_prune:
+                    target = d / rel_path
+                    if target.exists():
+                        try:
+                            if target.is_file():
+                                sz = target.stat().st_size
+                                target.unlink()
+                                pruned_count += 1
+                                pruned_bytes += sz
+                                logger.info(f"已清理冗余模型文件: {rel_path} ({sz / (1024*1024):.1f} MB)")
+                            elif target.is_dir():
+                                sz = sum(f.stat().st_size for f in target.rglob("*") if f.is_file())
+                                shutil.rmtree(target)
+                                pruned_count += 1
+                                pruned_bytes += sz
+                                logger.info(f"已清理冗余模型目录: {rel_path} ({sz / (1024*1024):.1f} MB)")
+                        except Exception as e:
+                            logger.debug(f"修剪冗余资产失败 {target}: {e}")
+
+        if pruned_bytes > 0:
+            logger.info(f"自动化冗余瘦身完成: 共清理 {pruned_count} 项，释放空间: {pruned_bytes / (1024**3):.2f} GB")
+        return pruned_count, pruned_bytes
+
+    @classmethod
     def is_model_ready(cls, backend: str, config: Optional[dict] = None) -> bool:
         """
         全盘扫描指定模型是否已经在本地就绪（兼顾项目 models/ 目录与 HuggingFace 全局缓存）。
@@ -221,8 +297,15 @@ class ModelManager:
     def get_core_models_status(cls, config: Optional[dict] = None) -> Dict[str, bool]:
         """
         获取核心任务必需的首选大模型清单及就绪状态。
+        自检时自动调用冗余修剪机制，杜绝无效大文件膨胀。
         包含：F5-TTS、Qwen2.5-1.5B、SD 1.5、LCM-LoRA
         """
+        # 状态自检时自动瘦身，确保新老机器磁盘纯净
+        try:
+            cls.prune_redundant_assets(config)
+        except Exception as e:
+            logger.debug(f"自检瘦身执行被跳过: {e}")
+
         return {
             "f5": cls.is_model_ready("f5", config),
             "qwen15": cls.is_model_ready("qwen15", config),
