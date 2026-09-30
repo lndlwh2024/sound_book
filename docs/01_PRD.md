@@ -413,6 +413,10 @@ sequenceDiagram
    - **核心依赖命名空间完整性**：在 `PromptGenerator` 模块顶部规范补齐 `import os`, `import sys`, `from pathlib import Path`，彻底消除定位解释器时抛出 `NameError: name 'Path' is not defined` 导致静默跳过大模型降级至离线分词的隐蔽 Bug；
    - **就绪握手流式队列监听**：`_ensure_llm_ready` 采用独立线程流式队列持续读取直到接收到终态 `status: ready`，超时时间放宽至 180 秒以充分支持 3GB 大模型自本地磁盘载入 40GB 宿主物理内存，彻底消除单行 `readline()` 丢包误判；
    - **状态栏动态引擎透明感知**：在两段式并发 Step A 的双行状态栏中，第二行明确标注当前活跃引擎名称 `(Qwen2.5-1.5B CPU)` 或 `(rjieba 离线词典)`，并实时展示大模型驻留、逐幕深度提炼、全部就绪全流程，杜绝静默欺骗。
+10. **子进程标准错误抽空与多核 CPU 推理死锁根治规范 (v3.3.16)**：
+   - **Windows 管道 4KB 溢出死锁彻底根治**：在 `PromptGenerator` 中为主进程挂载专用的 `_llm_stderr_thread` 守护线程，实时毫秒级流式抽空并消耗 Qwen 工作子进程的 `stderr`。彻底消除了由于 Windows 匿名管道只有 4096 字节缓冲区、transformers/PyTorch 历史上下文推理警告撑爆管道导致子进程主线程挂起在 `Wait Executive`（写阻塞睡眠）的致命死锁隐患；
+   - **多核 CPU 算力自动释放与 GUI 丝滑隔离**：在 `qwen_worker.py` 中注入 `torch.set_num_threads(max(1, (os.cpu_count() or 4) - 2))`，自动将多核心 CPU 计算性能释放给深度意象提炼，同时预留 2 核保证桌面 GUI 界面与前台任务调度丝滑流畅，消除 CPU 负载偏低且推理耗时异常的瓶颈；
+   - **标准输出持久队列与单次推理超时熔断**：通过 `_llm_stdout_queue` 集中管理所有输出流，彻底消除主线程与后台读取线程之间的竞态；将单幕提炼超时限制设为 60 秒（`queue.get(timeout=60.0)`），若子进程发生异常自动平滑降级至离线分词模式，绝不无限期卡死整条有声书生产流水线。
 
 ---
 

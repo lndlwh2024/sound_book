@@ -169,6 +169,9 @@ class PromptGenerator:
         self._llm_worker_process = None
         self._llm_init_attempted = False
         self._llm_is_ready = False
+        self._llm_stdout_queue = None
+        self._llm_stderr_thread = None
+        self._llm_stdout_thread = None
 
     def get_active_engine_name(self) -> str:
         """获取当前活跃的意象提炼引擎名称"""
@@ -192,8 +195,8 @@ class PromptGenerator:
         【为什么这样设计】
         1. 保持管线流程 100% 不变：意象提炼仍为原 Step A 内部标准环节；
         2. 解决依赖隔离：调用 envs/f5 解释器运行 Qwen，解决主环境缺少 transformers 导致的秒退回 bug；
-        3. 持续队列监听：使用循环从队列持续获取子进程输出直到得到 ready/error 应答，杜绝单行截断；
-        4. 异常透传警示：若加载失败，在日志中明确记录真实异常原因并提示用户。
+        3. 彻底消除 Windows 管道 4KB 溢出死锁：配备独立守护线程持续流式抽空 stderr，杜绝子进程被挂起；
+        4. 持久化队列监听与超时熔断：采用持久化队列管理 stdout，支持单次推理精确超时，杜绝主流水线假死。
         """
         if self._llm_init_attempted:
             return self._llm_is_ready
@@ -225,6 +228,7 @@ class PromptGenerator:
             if "HF_ENDPOINT" not in env:
                 env["HF_ENDPOINT"] = "https://hf-mirror.com"
             env["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
+            env["TRANSFORMERS_VERBOSITY"] = "error"
             env["PYTHONUNBUFFERED"] = "1"
 
             self._llm_worker_process = subprocess.Popen(
@@ -239,37 +243,44 @@ class PromptGenerator:
                 env=env
             )
 
+            # 1. 彻底根治 Windows 管道 4KB 溢出死锁：配备独立线程流式秒级清空 stderr
+            def _drain_stderr():
+                try:
+                    for s_line in iter(self._llm_worker_process.stderr.readline, ''):
+                        if s_line.strip():
+                            logger.debug(f"[Qwen Worker stderr] {s_line.strip()}")
+                except Exception:
+                    pass
+
+            self._llm_stderr_thread = threading.Thread(target=_drain_stderr, daemon=True)
+            self._llm_stderr_thread.start()
+
+            # 2. 建立统一的持久化 stdout 队列与监听线程
+            self._llm_stdout_queue = queue.Queue()
+
+            def _read_stdout():
+                try:
+                    while self._llm_worker_process and self._llm_worker_process.poll() is None:
+                        line = self._llm_worker_process.stdout.readline()
+                        if not line:
+                            break
+                        self._llm_stdout_queue.put(line)
+                except Exception as err:
+                    self._llm_stdout_queue.put(err)
+
+            self._llm_stdout_thread = threading.Thread(target=_read_stdout, daemon=True)
+            self._llm_stdout_thread.start()
+
             # 发送 init 初始化命令
             init_cmd = {"action": "init", "model_id": model_name_or_path}
             self._llm_worker_process.stdin.write(json.dumps(init_cmd) + "\n")
             self._llm_worker_process.stdin.flush()
 
             # 等待就绪响应 (最长等待 180 秒，支持大模型完整载入物理内存)
-            resp_q = queue.Queue()
-
-            def _read_init():
-                try:
-                    while self._llm_worker_process and self._llm_worker_process.poll() is None:
-                        line = self._llm_worker_process.stdout.readline()
-                        if not line:
-                            break
-                        resp_q.put(line)
-                        try:
-                            d = json.loads(line.strip())
-                            if d.get("status") in ("ready", "error"):
-                                break
-                        except Exception:
-                            pass
-                except Exception as err:
-                    resp_q.put(err)
-
-            t = threading.Thread(target=_read_init, daemon=True)
-            t.start()
-
             start_wait = time.time()
             while time.time() - start_wait < 180.0:
                 try:
-                    raw_resp = resp_q.get(timeout=2.0)
+                    raw_resp = self._llm_stdout_queue.get(timeout=2.0)
                 except queue.Empty:
                     if self._llm_worker_process.poll() is not None:
                         break
@@ -315,6 +326,9 @@ class PromptGenerator:
                     pass
         self._llm_worker_process = None
         self._llm_is_ready = False
+        self._llm_stdout_queue = None
+        self._llm_stderr_thread = None
+        self._llm_stdout_thread = None
 
     def __del__(self):
         try:
@@ -375,8 +389,7 @@ class PromptGenerator:
                 outputs = self._llm_pipeline(
                     prompt,
                     max_new_tokens=45,
-                    do_sample=False,
-                    temperature=0.2
+                    do_sample=False
                 )
                 if outputs and isinstance(outputs, list) and "generated_text" in outputs[0]:
                     full_text = outputs[0]["generated_text"]
@@ -391,10 +404,11 @@ class PromptGenerator:
                 logger.warning(f"注入的 _llm_pipeline 推理异常: {e}")
             return None
 
-        if not self._ensure_llm_ready() or not self._llm_worker_process:
+        if not self._ensure_llm_ready() or not self._llm_worker_process or self._llm_stdout_queue is None:
             return None
 
         import json
+        import queue
         cmd = {
             "action": "extract",
             "scene_text": scene_text,
@@ -403,11 +417,24 @@ class PromptGenerator:
         try:
             self._llm_worker_process.stdin.write(json.dumps(cmd) + "\n")
             self._llm_worker_process.stdin.flush()
-            resp_line = self._llm_worker_process.stdout.readline().strip()
-            if resp_line:
-                data = json.loads(resp_line)
+
+            # 使用带有超时控制的队列获取，默认单次推理上限 60 秒，避免子进程假死卡住整体流水线
+            try:
+                raw_resp = self._llm_stdout_queue.get(timeout=60.0)
+            except queue.Empty:
+                logger.warning("Qwen Worker 意象提炼响应超时(60s)，降级回退离线模式")
+                return None
+
+            if isinstance(raw_resp, Exception):
+                logger.warning(f"读取 Qwen Worker 发生底层异常: {raw_resp}")
+                return None
+
+            if isinstance(raw_resp, str) and raw_resp.strip():
+                data = json.loads(raw_resp.strip())
                 if data.get("status") == "ok":
                     return data.get("result")
+                else:
+                    logger.warning(f"Qwen Worker 意象提炼返回错误状态: {data.get('error')}")
         except Exception as e:
             logger.warning(f"向 Qwen Worker 请求意象提炼异常: {e}")
         return None

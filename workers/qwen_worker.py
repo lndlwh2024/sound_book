@@ -21,6 +21,16 @@ if "HF_ENDPOINT" not in os.environ:
     os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
 if "HF_HUB_DISABLE_SYMLINKS_WARNING" not in os.environ:
     os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
+os.environ["TRANSFORMERS_VERBOSITY"] = "error"
+os.environ["PYTHONUNBUFFERED"] = "1"
+
+# 调优 CPU 多核算力调度（预留 2 核保证 GUI 与系统丝滑，其余核心全力投入 Qwen 推理）
+try:
+    import torch
+    num_threads = max(1, (os.cpu_count() or 4) - 2)
+    torch.set_num_threads(num_threads)
+except Exception:
+    pass
 
 # 在 Windows 独立执行时安全设置 UTF-8 标准 IO
 if sys.platform == "win32":
@@ -42,6 +52,7 @@ logging.basicConfig(
     stream=sys.stderr
 )
 logger = logging.getLogger("qwen_worker")
+logging.getLogger("transformers").setLevel(logging.ERROR)
 
 _tokenizer = None
 _model = None
@@ -150,7 +161,6 @@ def extract_visual_scene(scene_text: str, history_texts: Optional[List[str]] = N
             prompt,
             max_new_tokens=45,
             do_sample=False,
-            temperature=0.2,
             pad_token_id=_pipeline.tokenizer.eos_token_id
         )
         full_text = outputs[0]["generated_text"]
