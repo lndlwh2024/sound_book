@@ -75,9 +75,9 @@ class HfDownloadProgressHook(base_tqdm):
         # 将底层 tqdm 输出重定向至独立内存缓冲区，杜绝终端字符画污染父进程管道
         kwargs["file"] = io.StringIO()
         super().__init__(*args, **kwargs)
-        self._start_time = time.time()
         self._last_report = 0.0
-        self._initial_offset = self.n
+        self._last_n = self.n
+        self._ema_speed_bps = 0.0
 
     def display(self, msg=None, pos=None):
         """彻底静默底层字符画控制台输出，由 update() 统一定向输出纯净 JSON"""
@@ -92,14 +92,36 @@ class HfDownloadProgressHook(base_tqdm):
         if total_val > 0 and total_val < 1024 and getattr(self, "unit", "") != "B":
             return
 
-        # 限制每 200ms 最多发送一次进度，兼顾高实时性与管道开销
-        if now - self._last_report >= 0.2 or (total_val > 0 and self.n >= total_val):
+        if self._last_report == 0.0:
             self._last_report = now
-            elapsed = max(now - self._start_time, 0.001)
-            # 计算本次会话的有效下载速度（排除初始断点续传的已有字节）
-            session_downloaded = max(0, self.n - self._initial_offset)
-            speed_bps = session_downloaded / elapsed
-            speed_str = f"{speed_bps / (1024 * 1024):.1f} MB/s" if speed_bps > 1024*1024 else f"{speed_bps / 1024:.1f} KB/s"
+            self._last_n = self.n
+            return
+
+        delta_t = now - self._last_report
+        # 限制每 250ms 最多发送一次进度，兼顾高灵敏度与管道开销
+        if delta_t >= 0.25 or (total_val > 0 and self.n >= total_val):
+            delta_n = max(0, self.n - self._last_n)
+            inst_bps = delta_n / delta_t if delta_t > 0 else 0.0
+
+            # 指数移动平均 (EMA, alpha=0.35) 滤波平滑，消除网络瞬时抖动
+            if self._ema_speed_bps <= 0.0:
+                self._ema_speed_bps = inst_bps
+            else:
+                self._ema_speed_bps = 0.65 * self._ema_speed_bps + 0.35 * inst_bps
+
+            self._last_report = now
+            self._last_n = self.n
+
+            # 用户核心诉求：下载网速严格显示与 Windows 任务管理器一致的 Mbps 单位
+            # 1 Byte = 8 Bits, 1 Mbps = 1,000,000 bits/s (工业网络标准)
+            speed_mbps = (self._ema_speed_bps * 8.0) / 1_000_000.0
+            if speed_mbps >= 1.0:
+                speed_str = f"{speed_mbps:.1f} Mbps"
+            elif speed_mbps >= 0.01:
+                speed_kbps = speed_mbps * 1000.0
+                speed_str = f"{speed_kbps:.0f} Kbps"
+            else:
+                speed_str = "0 Mbps"
 
             percent = (self.n / total_val * 100.0) if total_val > 0 else 0.0
             data = {

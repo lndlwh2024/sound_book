@@ -803,17 +803,19 @@ class ModelDownloadWorker(QThread):
                 elif p_type == "progress":
                     downloaded = data.get("downloaded", 0)
                     total = data.get("total", 0)
-                    speed = data.get("speed", "0 KB/s")
+                    speed = data.get("speed", "0 Mbps")
                     percent = data.get("percent", 0.0)
+                    file_name = data.get("file", "")
                     down_gb = downloaded / (1024 * 1024 * 1024)
                     tot_gb = total / (1024 * 1024 * 1024)
 
+                    comp_label = f" | 组件 [{file_name}]:" if file_name else " | 组件进度:"
                     if total > 0:
                         size_info = f"{down_gb:.2f}GB / {tot_gb:.2f}GB ({percent:.1f}%)"
                     else:
                         size_info = f"{down_gb:.2f}GB"
 
-                    progress_text = f"【模型下载】正在下载 ({idx}/{total_models}) {desc} (总大小 {est_gb_str}) | 进度: {size_info} 速度: {speed}"
+                    progress_text = f"【模型下载 ({idx}/{total_models})】{desc} (整包 {est_gb_str}){comp_label} {size_info} | 实时速率: {speed}"
                     overall_percent = ((idx - 1) + (percent / 100.0)) / total_models * 100.0
                     self.sig_progress_updated.emit(overall_percent, progress_text)
                 elif p_type == "start":
