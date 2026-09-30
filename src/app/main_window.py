@@ -607,7 +607,7 @@ class MainWindow(QMainWindow):
     def __init__(self, bridge: Optional[TaskManagerBridge] = None):
         super().__init__()
         self.bridge = bridge or TaskManagerBridge()
-        self.setWindowTitle("书声 (ShuSheng) v3.3.10 - 自动化有声视频生产工具 (小人书 AI 连环画增强版)")
+        self.setWindowTitle("书声 (ShuSheng) v3.3.11 - 自动化有声视频生产工具 (小人书 AI 连环画增强版)")
         self._raw_status_text = "空闲就绪 (IDLE)"
         self._is_producing = False
         self._is_dual_mode = False
@@ -663,6 +663,7 @@ class MainWindow(QMainWindow):
         self._refresh_hardware_diag()
         self._refresh_visual_preview()
         self._on_voice_profile_changed()
+        self._refresh_model_ready_btn()
 
     def _init_ui(self) -> None:
         """初始化全局深色科技主题界面布局"""
@@ -1226,6 +1227,17 @@ class MainWindow(QMainWindow):
         engine_box.setSpacing(6)
         engine_box.addWidget(self.cmb_tts_engine, 1)
         engine_box.addWidget(self.btn_azure_config, 0)
+
+        # 【为什么这样设计】
+        # 响应用户需求 3：在 TTS 引擎右侧新增【模型就绪 / 下载】独立按钮
+        # 实时检测 F5-TTS、Qwen2.5-1.5B、SD1.5 与 LCM-LoRA 首选大模型就绪状态；
+        # 未就绪显示【📥 下载首选模型】(可点击)，点击启动完全独立的旁路下载分支；
+        # 已就绪显示【✅ 模型已就绪】(不可点击置灰)，绝不影响此前跑通的主管线。
+        self.btn_model_ready = QPushButton("🔍 检测中...")
+        self.btn_model_ready.setFixedHeight(28)
+        self.btn_model_ready.setToolTip("检测/下载制作全流程必需的首选大模型（F5-TTS, Qwen2.5-1.5B, SD1.5, LCM-LoRA）")
+        self.btn_model_ready.clicked.connect(self._on_download_models_clicked)
+        engine_box.addWidget(self.btn_model_ready, 0)
 
         lbl_voice_profile = QLabel("音色预设:")
         lbl_voice_profile.setFixedWidth(68)
@@ -1929,6 +1941,8 @@ class MainWindow(QMainWindow):
         self.bridge.sig_task_completed.connect(self._on_worker_task_completed)
         self.bridge.sig_task_paused.connect(self._on_worker_task_paused)
         self.bridge.sig_error.connect(self._on_worker_error)
+        if hasattr(self.bridge, "sig_download_completed"):
+            self.bridge.sig_download_completed.connect(self._on_model_download_completed)
 
     # ---------------- 动态交互与计时动画 ----------------
 
@@ -2023,6 +2037,94 @@ class MainWindow(QMainWindow):
             self.txt_hardware_diag.setText(f"获取系统硬件信息失败: {e}")
 
     # ---------------- 交互响应方法 ----------------
+
+    def _refresh_model_ready_btn(self):
+        """
+        全量检测核心大模型（F5-TTS, Qwen2.5-1.5B, SD1.5, LCM-LoRA）的就绪状态，
+        并自适应刷新 TTS 引擎右侧的【模型就绪 / 下载】按钮 UI：
+        未就绪 -> 显示【📥 下载首选模型】(可点击)
+        已就绪 -> 显示【✅ 模型已就绪】(不可点击置灰)
+        """
+        try:
+            from src.utils.model_manager import ModelManager
+            all_ready, missing = ModelManager.is_all_core_models_ready()
+            if all_ready:
+                self.btn_model_ready.setText("✅ 模型已就绪")
+                self.btn_model_ready.setEnabled(False)
+                self.btn_model_ready.setToolTip("所有核心首选大模型 (F5-TTS, Qwen2.5-1.5B, SD1.5, LCM-LoRA) 均已就绪！")
+                self.btn_model_ready.setStyleSheet("""
+                    QPushButton {
+                        background-color: #1E2822;
+                        border: 1px solid #2E5A44;
+                        color: #6BD99F;
+                        border-radius: 4px;
+                        padding: 3px 10px;
+                        font-weight: 500;
+                    }
+                    QPushButton:disabled {
+                        background-color: #1A241E;
+                        border: 1px solid #264A38;
+                        color: #55B382;
+                    }
+                """)
+            else:
+                missing_str = ", ".join(missing)
+                self.btn_model_ready.setText("📥 下载首选模型")
+                self.btn_model_ready.setEnabled(True)
+                self.btn_model_ready.setToolTip(f"点击一键下载缺失的核心大模型 ({missing_str})，无需执行 TTS 任务即可提前就绪")
+                self.btn_model_ready.setStyleSheet("""
+                    QPushButton {
+                        background-color: #1C2B3A;
+                        border: 1px solid #2B5784;
+                        color: #58A6FF;
+                        border-radius: 4px;
+                        padding: 3px 10px;
+                        font-weight: 500;
+                    }
+                    QPushButton:hover {
+                        background-color: #24384D;
+                        border: 1px solid #388BFD;
+                        color: #79C0FF;
+                    }
+                """)
+        except Exception as e:
+            logger.error(f"刷新模型就绪按钮异常: {e}")
+
+    def _on_download_models_clicked(self):
+        """
+        触发旁路首选模型下载任务。
+        【为什么这样设计】
+        1. 严格响应用户需求 3：在 TTS 引擎右侧新增独立旁路分支，绝不干扰已跑通的主生产流水线；
+        2. 当用户点击时，按序在后台子进程拉取所有必需核心大模型；
+        3. 状态栏文字实时显示当前下载模型的名称、总大小、当下已下载大小及速率；
+        4. 下载过程中按钮变为【⏳ 模型下载中...】并禁用；
+        5. 完成后自动触发 _on_model_download_completed 刷新按钮为【✅ 模型已就绪】。
+        """
+        if hasattr(self.bridge, "worker") and self.bridge.worker and self.bridge.worker.isRunning():
+            QMessageBox.warning(self, "流水线正在运行", "后台已有任务正在执行，请等待其完成后再启动模型下载。")
+            return
+
+        self.btn_model_ready.setText("⏳ 模型下载中...")
+        self.btn_model_ready.setEnabled(False)
+        self.btn_model_ready.setStyleSheet("""
+            QPushButton {
+                background-color: #2B261A;
+                border: 1px solid #5A4E2E;
+                color: #D29922;
+                border-radius: 4px;
+                padding: 3px 10px;
+            }
+        """)
+        self.status_bar.set_single_status("【模型下载】正在初始化首选大模型镜像下载器...")
+        self.bridge.start_model_download()
+
+    def _on_model_download_completed(self, success: bool, msg: str):
+        """模型下载任务完成回调"""
+        self._refresh_model_ready_btn()
+        if success:
+            logger.info("首选核心大模型已全部下载就绪")
+        else:
+            logger.warning(f"首选核心大模型下载未全部完成: {msg}")
 
     def _on_engine_changed(self, idx: int):
         """切换引擎时：云端引擎显示凭据按钮并检查配置，本地引擎检测模型可用性"""
@@ -2971,8 +3073,8 @@ class MainWindow(QMainWindow):
         if fm.horizontalAdvance(raw) <= target_avail:
             return raw
 
-        # 优先匹配 原文: "..." 结构
-        m = re.search(r'^(.*?原文:\s*")(.*?)((?:\(共\d+字\))?"\s*)$', raw)
+        # 优先匹配 原文: "..." 或 场景: "..." 结构
+        m = re.search(r'^(.*?(?:原文|场景):\s*")(.*?)((?:\(共\d+字\))?"\s*)$', raw)
         if m:
             prefix = m.group(1)
             body = m.group(2)

@@ -384,7 +384,7 @@ class ProductionWorker(QThread):
 
                 def _on_prompt_progress(cur_s, tot_s, first_sent):
                     nonlocal cur_prompt_text
-                    cur_prompt_text = f"CPU 正在预提炼场景意象({cur_s}/{tot_s})_ {first_sent}"
+                    cur_prompt_text = f"【5/12 意象预提炼 (CPU)】第 {ep_order:02d} 集 · 分镜 {cur_s}/{tot_s} 幕 | 场景: \"{first_sent}\""
                     self.sig_dual_progress_updated.emit(cur_tts_text, cur_prompt_text)
 
                 def _run_prompt_step_a():
@@ -396,7 +396,7 @@ class ProductionWorker(QThread):
                             style=storybook_style,
                             on_progress=_on_prompt_progress
                         )
-                        cur_prompt_text = f"CPU 正在预提炼场景意象({len(storybook_scenes)}/{len(storybook_scenes)})_ 全部预提炼就绪，等待语音合成汇合..."
+                        cur_prompt_text = f"【5/12 意象预提炼 (CPU)】第 {ep_order:02d} 集 · 分镜 {len(storybook_scenes)}/{len(storybook_scenes)} 幕 | 全部预提炼就绪，等待语音合成汇合..."
                         self.sig_dual_progress_updated.emit(cur_tts_text, cur_prompt_text)
                         logger.info(f"【CPU 意象预提炼】第 {ep_order:02d} 集全部场景 Prompt 预提炼完成！")
                     except Exception as ex:
@@ -731,10 +731,107 @@ class ProductionWorker(QThread):
         self.sig_task_completed.emit(str(output_base.absolute()))
 
 
+class ModelDownloadWorker(QThread):
+    """
+    独立的核心模型下载工作线程（旁路任务）。
+    【为什么这样设计】
+    1. 遵循用户要求增加旁路下载分支，独立于有声书制作流水线，用户可随时一键就绪必要首选大模型；
+    2. 按序轮询并下载未就绪的核心模型（F5-TTS, Qwen2.5-1.5B, SD1.5, LCM-LoRA），断点续传；
+    3. 实时向表现层回传当前模型名称、总大小、已下载大小及下载速率；
+    4. 绝不阻塞主界面，也不改变原有的任何生产管线代码与逻辑。
+    """
+    sig_status_changed = Signal(str)
+    sig_progress_updated = Signal(float, str)
+    sig_model_completed = Signal(str)
+    sig_download_completed = Signal(bool, str)
+
+    def __init__(self):
+        super().__init__()
+        self._is_cancelled = False
+
+    def cancel(self) -> None:
+        """用户取消或终止下载流程"""
+        self._is_cancelled = True
+
+    def run(self) -> None:
+        from src.utils.model_manager import ModelManager
+
+        status = ModelManager.get_core_models_status()
+        missing = [k for k, v in status.items() if not v]
+
+        if not missing:
+            self.sig_progress_updated.emit(100.0, "【模型就绪】所有首选大模型均已就绪，无需重复下载！")
+            self.sig_download_completed.emit(True, "所有模型已就绪")
+            return
+
+        total_models = len(missing)
+        success_count = 0
+
+        for idx, backend in enumerate(missing, start=1):
+            if self._is_cancelled:
+                self.sig_progress_updated.emit(-1.0, "【模型下载】用户已中断下载任务")
+                self.sig_download_completed.emit(False, "下载已中断")
+                return
+
+            info = ModelManager.OFFICIAL_MODELS.get(backend, {})
+            desc = info.get("description", backend)
+            est_mb = info.get("estimated_size_mb", 0.0)
+            est_gb_str = f"~{est_mb / 1024:.1f}GB" if est_mb >= 1024 else f"~{est_mb:.0f}MB"
+
+            self.sig_progress_updated.emit(
+                float(idx - 1) / total_models * 100.0,
+                f"【模型下载】正在准备下载 ({idx}/{total_models}) {desc} (总大小 {est_gb_str})..."
+            )
+
+            def _on_progress(data: dict):
+                p_type = data.get("type")
+                if p_type == "progress":
+                    downloaded = data.get("downloaded", 0)
+                    total = data.get("total", 0)
+                    speed = data.get("speed", "0 KB/s")
+                    percent = data.get("percent", 0.0)
+                    down_gb = downloaded / (1024 * 1024 * 1024)
+                    tot_gb = total / (1024 * 1024 * 1024)
+
+                    if total > 0:
+                        size_info = f"{down_gb:.2f}GB / {tot_gb:.2f}GB ({percent:.1f}%)"
+                    else:
+                        size_info = f"{down_gb:.2f}GB"
+
+                    progress_text = f"【模型下载】正在下载 ({idx}/{total_models}) {desc} (总大小 {est_gb_str}) | 进度: {size_info} 速度: {speed}"
+                    overall_percent = ((idx - 1) + (percent / 100.0)) / total_models * 100.0
+                    self.sig_progress_updated.emit(overall_percent, progress_text)
+                elif p_type == "start":
+                    self.sig_progress_updated.emit(
+                        float(idx - 1) / total_models * 100.0,
+                        f"【模型下载】开始连接镜像下载: {desc} (总大小 {est_gb_str})..."
+                    )
+
+            success = ModelManager.download_core_model(backend, progress_callback=_on_progress)
+            if success:
+                success_count += 1
+                self.sig_model_completed.emit(backend)
+                self.sig_progress_updated.emit(
+                    float(idx) / total_models * 100.0,
+                    f"【模型下载】({idx}/{total_models}) {desc} 已成功下载并就绪！"
+                )
+            else:
+                self.sig_progress_updated.emit(
+                    -1.0,
+                    f"【模型下载】下载 {desc} 失败，请检查网络后重试"
+                )
+                self.sig_download_completed.emit(False, f"下载 {desc} 失败")
+                return
+
+        if success_count == total_models:
+            self.sig_progress_updated.emit(100.0, "【模型就绪】恭喜！所有首选大模型已全部下载并就绪，可顺畅运行全部管线！")
+            self.sig_download_completed.emit(True, "全部就绪")
+
+
 class TaskManagerBridge(QObject):
     """
     GUI 表现层与后台 Worker 的专用桥接器。
-    负责管理 PlanWorker 与 ProductionWorker 线程的生命周期、信号转发与安全销毁。
+    负责管理 PlanWorker、ProductionWorker 与 ModelDownloadWorker 线程的生命周期、信号转发与安全销毁。
     """
     sig_status_changed = Signal(str)
     sig_progress_updated = Signal(float, str)
@@ -744,6 +841,7 @@ class TaskManagerBridge(QObject):
     sig_task_completed = Signal(str)
     sig_task_paused = Signal()
     sig_error = Signal(str, str)
+    sig_download_completed = Signal(bool, str)
 
     def __init__(self):
         super().__init__()
@@ -766,6 +864,8 @@ class TaskManagerBridge(QObject):
             worker.sig_task_paused.connect(self.sig_task_paused)
         if hasattr(worker, "sig_error"):
             worker.sig_error.connect(self.sig_error)
+        if hasattr(worker, "sig_download_completed"):
+            worker.sig_download_completed.connect(self.sig_download_completed)
 
     def generate_plan(self, task_config: Dict[str, Any]) -> None:
         """仅生成生产规划，绝不启动 TTS"""
@@ -789,6 +889,20 @@ class TaskManagerBridge(QObject):
         self.worker.start()
         logger.info("后台生产 ProductionWorker 线程已启动")
 
+    def start_model_download(self) -> None:
+        """
+        启动旁路核心模型下载工作线程。
+        若当前正在运行生产流水线，则安全阻断，避免争抢网络或 GPU 算力。
+        """
+        if self.worker and self.worker.isRunning():
+            logger.warning("已有后台流水线正在运行中，无法同时执行模型下载")
+            return
+
+        self.worker = ModelDownloadWorker()
+        self._connect_worker_signals(self.worker)
+        self.worker.start()
+        logger.info("后台模型下载 ModelDownloadWorker 线程已启动")
+
     def start_task(self, task_config: Dict[str, Any]) -> None:
         """向后兼容接口"""
         self.start_production(task_config)
@@ -797,3 +911,9 @@ class TaskManagerBridge(QObject):
         """向工作线程发出安全暂停请求"""
         if self.worker and self.worker.isRunning() and hasattr(self.worker, "request_safe_pause"):
             self.worker.request_safe_pause()
+
+
+# 兼容外部引用的别名
+TaskBridge = TaskManagerBridge
+
+

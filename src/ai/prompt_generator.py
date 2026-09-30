@@ -161,60 +161,161 @@ class PromptGenerator:
         self.llm_model = llm_model
         self.models_dir = models_dir
         self._llm_pipeline = None
+        self._llm_worker_process = None
         self._llm_init_attempted = False
+        self._llm_is_ready = False
+
+    def _resolve_f5_python(self) -> str:
+        """寻找具备 transformers 依赖的 envs/f5 Python 解释器"""
+        project_root = Path(__file__).resolve().parent.parent.parent
+        f5_py = project_root / "envs" / "f5" / "Scripts" / "python.exe"
+        if f5_py.exists():
+            return str(f5_py)
+        return sys.executable
 
     def _ensure_llm_ready(self) -> bool:
         """
-        延迟初始化 CPU 运行的 Qwen2.5 模型管道。
+        延迟初始化 CPU 运行的 Qwen2.5 模型独立工作进程。
         【为什么这样设计】
-        仅在首次需要生成插画提示词时才载入物理内存，杜绝启动界面时的内存冻结；
-        若环境未就绪或未下载权重，仅记录 INFO 日志并返回 False，绝不阻断主流程。
+        1. 保持管线流程 100% 不变：意象提炼仍为原 Step A 内部标准环节；
+        2. 解决依赖隔离：调用 envs/f5 解释器运行 Qwen，解决主环境缺少 transformers 导致的秒退回 bug；
+        3. 若模型未就绪或无法加载，优雅回退到 [rjieba 离线词典映射] 备选方案，绝对保证生产流水线平稳交付。
         """
         if self._llm_init_attempted:
-            return self._llm_pipeline is not None
+            return self._llm_is_ready
 
         self._llm_init_attempted = True
         if not self.llm_model or self.llm_model == "offline_rjieba":
-            logger.info("意象提炼当前配置为 [offline_rjieba] 模式，跳过本地 LLM 加载")
+            logger.info("意象提炼当前配置为 [offline_rjieba] 模式，使用离线词典映射")
             return False
 
         try:
-            import torch
-            from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline
-            import os
-            from pathlib import Path
+            import subprocess
+            import json
 
+            worker_script = Path(__file__).resolve().parent.parent.parent / "workers" / "qwen_worker.py"
+            if not worker_script.exists():
+                logger.info(f"未找到 Qwen Worker 脚本 ({worker_script})，将回退至 [rjieba 离线词典映射]")
+                return False
+
+            python_exe = self._resolve_f5_python()
             model_name_or_path = self.llm_model
-
-            # 优先检查本地是否存在自定义下载的权重目录
             if self.models_dir:
                 cand = Path(self.models_dir) / "llm" / Path(self.llm_model).name
                 if cand.exists() and cand.is_dir():
                     model_name_or_path = str(cand.resolve())
 
-            # 仅当路径存在或是 huggingface repo 格式时尝试加载
-            logger.info(f"正在尝试加载 CPU 意象提炼模型: {model_name_or_path} (仅占用物理内存，显存 0MB)...")
-            tokenizer_inst = AutoTokenizer.from_pretrained(model_name_or_path, trust_remote_code=True)
-            model_inst = AutoModelForCausalLM.from_pretrained(
-                model_name_or_path,
-                device_map="cpu",
-                torch_dtype=torch.float32,
-                low_cpu_mem_usage=True,
-                trust_remote_code=True
+            logger.info(f"正在拉起 CPU 意象提炼大模型子进程: {model_name_or_path} (解释器: {python_exe})...")
+            env = os.environ.copy()
+            if "HF_ENDPOINT" not in env:
+                env["HF_ENDPOINT"] = "https://hf-mirror.com"
+            env["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
+            env["PYTHONUNBUFFERED"] = "1"
+
+            self._llm_worker_process = subprocess.Popen(
+                [python_exe, str(worker_script)],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                bufsize=1,
+                env=env
             )
 
-            self._llm_pipeline = pipeline(
-                "text-generation",
-                model=model_inst,
-                tokenizer=tokenizer_inst,
-                device="cpu"
-            )
-            logger.info(f"Qwen 意象提炼模型成功驻留内存！(模型: {self.llm_model})")
-            return True
-        except Exception as e:
-            logger.info(f"本地 LLM 权重未就绪或未下载 ({e})，将无缝回退至 [rjieba 离线词典映射] 备选方案")
-            self._llm_pipeline = None
+            # 发送 init 初始化命令
+            init_cmd = {"action": "init", "model_id": model_name_or_path}
+            self._llm_worker_process.stdin.write(json.dumps(init_cmd) + "\n")
+            self._llm_worker_process.stdin.flush()
+
+            # 等待就绪响应 (最长等待 120 秒)
+            import queue
+            import threading
+            resp_q = queue.Queue()
+
+            def _read_init():
+                try:
+                    line = self._llm_worker_process.stdout.readline()
+                    resp_q.put(line)
+                except Exception as err:
+                    resp_q.put(err)
+
+            t = threading.Thread(target=_read_init, daemon=True)
+            t.start()
+
+            raw_resp = resp_q.get(timeout=120.0)
+            if isinstance(raw_resp, str) and raw_resp.strip():
+                data = json.loads(raw_resp.strip())
+                if data.get("status") == "ready":
+                    self._llm_is_ready = True
+                    logger.info(f"Qwen 意象提炼大模型成功就绪并驻留内存！(模型: {self.llm_model})")
+                    return True
+
+            logger.info("Qwen 模型未就绪或未下载，将无缝回退至 [rjieba 离线词典映射] 备选方案")
+            self._terminate_llm_worker()
             return False
+        except Exception as e:
+            logger.info(f"本地 LLM 权重未就绪或加载超时 ({e})，将无缝回退至 [rjieba 离线词典映射] 备选方案")
+            self._terminate_llm_worker()
+            return False
+
+    def _terminate_llm_worker(self):
+        """安全注销 Qwen Worker 子进程"""
+        if self._llm_worker_process and self._llm_worker_process.poll() is None:
+            try:
+                import json
+                self._llm_worker_process.stdin.write(json.dumps({"action": "stop"}) + "\n")
+                self._llm_worker_process.stdin.flush()
+                self._llm_worker_process.wait(timeout=2.0)
+            except Exception:
+                try:
+                    self._llm_worker_process.kill()
+                except Exception:
+                    pass
+        self._llm_worker_process = None
+        self._llm_is_ready = False
+
+    def __del__(self):
+        try:
+            self._terminate_llm_worker()
+        except Exception:
+            pass
+
+
+    def _format_llm_prompt(self, scene_text: str, history_texts: Optional[List[str]] = None) -> str:
+        """格式化供大语言模型提取视觉意象的 Prompt"""
+        snippet = scene_text.strip()[:300]
+        hist_blocks = []
+        if history_texts and len(history_texts) > 0:
+            hist_count = len(history_texts)
+            for h_idx, h_text in enumerate(history_texts):
+                rel_idx = h_idx - hist_count
+                h_snip = h_text.strip()[:180].replace("\n", " ")
+                hist_blocks.append(f"Scene {rel_idx}:\n{h_snip}")
+
+        if hist_blocks:
+            context_section = "【历史上下文，仅用于理解】（人物、地点、时代与连续性）\n" + "\n\n".join(hist_blocks) + "\n\n"
+            rule_requirement = (
+                "核心要求：\n"
+                "1. 历史上下文仅用于理解上下文关系；\n"
+                "2. 只能为【当前需要生成图片的内容】提炼画面；\n"
+                "3. 严禁把历史 Scene 中已经结束或发生的动作画入当前图片；\n"
+                "4. 输出极简明确的英文视觉主干短语 (不超过 35 个英文单词)。"
+            )
+        else:
+            context_section = ""
+            rule_requirement = "核心要求：请仅输出极简明确的英文视觉主干短语 (不超过 35 个英文单词)，描述画面核心人物与主体动作。"
+
+        return (
+            f"你是一位精通连环画视觉分镜的专业导演。请阅读以下小说片段，提炼出最适合绘制单幅插画的核心视觉焦点。\n\n"
+            f"{context_section}"
+            f"【当前需要生成图片的内容】\n{snippet}\n\n"
+            f"{rule_requirement}\n\n"
+            f"格式示范：\n"
+            f"A solitary scholar in flowing white hanfu standing on the bow of a wooden boat, misty lake, ancient mountains\n\n"
+            f"请直接输出英文画面主干，不要有任何开场白或解释："
+        )
 
     def extract_visual_scene_with_llm(
         self,
@@ -224,66 +325,51 @@ class PromptGenerator:
         """
         使用 Qwen 模型提炼出核心画面英文描述。
         【为什么这样设计】
-        落实用户最新需求：支持向前引入 M 个历史场景作为辅助上下文，
-        在提示词中明确划分【历史上下文，仅用于理解】与【当前需要生成图片的内容】，
-        严格要求大模型只为当前 Scene 生成绘图 Prompt，严禁将历史场景的动作画入当前图片。
+        1. 优先检测是否存在测试 mock 或显式注入的 _llm_pipeline，若有则优先本地推理；
+        2. 生产环境中通过独立子进程调度 workers/qwen_worker.py 在 envs/f5 环境中运行；
+        3. 落实用户需求：向前引入 M 个历史场景，明确划分历史理解与当前分镜，严禁动作污染。
         """
-        if not self._ensure_llm_ready():
+        if hasattr(self, "_llm_pipeline") and self._llm_pipeline is not None:
+            prompt = self._format_llm_prompt(scene_text, history_texts)
+            try:
+                outputs = self._llm_pipeline(
+                    prompt,
+                    max_new_tokens=45,
+                    do_sample=False,
+                    temperature=0.2
+                )
+                if outputs and isinstance(outputs, list) and "generated_text" in outputs[0]:
+                    full_text = outputs[0]["generated_text"]
+                    new_text = full_text[len(prompt):].strip() if full_text.startswith(prompt) else full_text.strip()
+                    lines = [l.strip() for l in new_text.splitlines() if l.strip()]
+                    if lines:
+                        ans = lines[0].replace('"', '').replace("'", "").strip()
+                        if ans.endswith('.'):
+                            ans = ans[:-1]
+                        return ans
+            except Exception as e:
+                logger.warning(f"注入的 _llm_pipeline 推理异常: {e}")
             return None
 
-        # 截取当前场景正文前 300 字作为视觉意象核心
-        snippet = scene_text.strip()[:300]
+        if not self._ensure_llm_ready() or not self._llm_worker_process:
+            return None
 
-        # 若存在历史上下文，按顺序组装结构化上下文
-        if history_texts and len(history_texts) > 0:
-            hist_blocks = []
-            hist_count = len(history_texts)
-            for idx, h_text in enumerate(history_texts):
-                offset = idx - hist_count  # 例如 -2, -1
-                h_snippet = h_text.strip()[:200]
-                hist_blocks.append(f"Scene {offset}:\n{h_snippet}")
-
-            history_section = "\n\n".join(hist_blocks)
-            prompt_instruction = (
-                "You are an expert visual director for classical storybook illustrations.\n\n"
-                "【历史上下文，仅用于理解】\n"
-                f"{history_section}\n\n"
-                "【当前需要生成图片的内容】\n"
-                f"{snippet}\n\n"
-                "要求：\n"
-                "1. 历史内容仅用于理解人物身份、时代、地点、指代和连续关系；\n"
-                "2. 只能且仅为【当前需要生成图片的内容】生成绘图 Prompt；\n"
-                "3. 严禁把历史 Scene 中已经结束或发生的动作画入当前图片；\n"
-                "4. Output ONLY 15-25 English words describing subjects, environment, and atmosphere of the CURRENT scene. "
-                "Separated by commas. No explanations, no Chinese.\n\n"
-                "Visual Prompt:"
-            )
-        else:
-            prompt_instruction = (
-                "You are a visual director for classical storybook illustrations. "
-                "Read the following Chinese narrative and summarize it into ONE concise visual scene prompt for Stable Diffusion. "
-                "Rules: Output ONLY 15-25 English words describing subjects, environment, and atmosphere. Separated by commas. No explanations, no Chinese.\n\n"
-                f"Narrative: {snippet}\n\n"
-                "Visual Prompt:"
-            )
-
+        import json
+        cmd = {
+            "action": "extract",
+            "scene_text": scene_text,
+            "history_texts": history_texts or []
+        }
         try:
-            outputs = self._llm_pipeline(
-                prompt_instruction,
-                max_new_tokens=40,
-                temperature=0.3,
-                top_p=0.9,
-                do_sample=True,
-                return_full_text=False
-            )
-            raw_gen = outputs[0]["generated_text"].strip()
-            # 过滤多余换行与非法字符
-            cleaned = re.sub(r'[\r\n]+', ', ', raw_gen)
-            cleaned = re.sub(r'[^a-zA-Z0-9,\s\-]', '', cleaned).strip(' ,')
-            if len(cleaned.split()) >= 3:
-                return cleaned
+            self._llm_worker_process.stdin.write(json.dumps(cmd) + "\n")
+            self._llm_worker_process.stdin.flush()
+            resp_line = self._llm_worker_process.stdout.readline().strip()
+            if resp_line:
+                data = json.loads(resp_line)
+                if data.get("status") == "ok":
+                    return data.get("result")
         except Exception as e:
-            logger.warning(f"Qwen 意象提炼推理异常: {e}，回退至词典方案")
+            logger.warning(f"向 Qwen Worker 请求意象提炼异常: {e}")
         return None
 
     def extract_keywords(self, text: str, max_keywords: int = 8) -> List[str]:

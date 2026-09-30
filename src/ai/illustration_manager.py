@@ -191,6 +191,26 @@ class IllustrationManager:
             # 动态活跃度超时驱动（只要有进度更新永不超时；连续 90 秒无任何响应才判定为网络故障）
             idle_timeout = 90.0
 
+            # 物理磁盘缓存文件增长检测（双重保险）：
+            # 即使进度条输出被偶发屏蔽，只要检测到本地模型缓存目录物理字节正在增加，证明下载正在进行，自动续期！
+            hf_sd_cache_dir = Path.home() / ".cache" / "huggingface" / "hub" / "models--runwayml--stable-diffusion-v1-5"
+            last_disk_bytes = 0
+            last_disk_check_time = 0.0
+
+            def _get_cache_dir_size(d: Path) -> int:
+                if not d.exists():
+                    return 0
+                total_sz = 0
+                try:
+                    for entry in os.scandir(d):
+                        if entry.is_file(follow_symlinks=False):
+                            total_sz += entry.stat().st_size
+                        elif entry.is_dir(follow_symlinks=False):
+                            total_sz += _get_cache_dir_size(Path(entry.path))
+                except Exception:
+                    pass
+                return total_sz
+
             while True:
                 # 实时检查子进程是否已提前异常退出
                 if self._worker_process.poll() is not None:
@@ -199,6 +219,22 @@ class IllustrationManager:
                     logger.error(err)
                     self._terminate_worker()
                     return False, err
+
+                # 双保险：每 1.5 秒检测一次本地缓存目录物理文件字节增长
+                now_t = time.time()
+                if now_t - last_disk_check_time >= 1.5:
+                    last_disk_check_time = now_t
+                    cur_disk_bytes = _get_cache_dir_size(hf_sd_cache_dir)
+                    if cur_disk_bytes > last_disk_bytes and last_disk_bytes > 0:
+                        last_active_time = now_t  # 磁盘流量持续入盘，立即续期活跃度！
+                        growth_mb = (cur_disk_bytes - last_disk_bytes) / (1024 * 1024 * 1.5)
+                        cur_gb = cur_disk_bytes / (1024 * 1024 * 1024)
+                        rate_txt = f", 速度 {growth_mb:.1f} MB/s" if growth_mb > 0.1 else ""
+                        ui_disk = f"【首次下载 SD 1.5 绘图大模型】正在全速下载写入磁盘... 已下载 {cur_gb:.2f}GB / 4.20GB{rate_txt}"
+                        logger.info(f"[SD Worker 磁盘下载流量] {ui_disk}")
+                        if status_callback:
+                            status_callback(ui_disk)
+                    last_disk_bytes = cur_disk_bytes
 
                 try:
                     raw_item = resp_queue.get(timeout=0.5)

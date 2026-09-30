@@ -107,7 +107,18 @@ def _setup_tqdm_hook():
 
         tqdm.tqdm = WorkerTqdm
         tqdm.auto.tqdm = WorkerTqdm
-        logger.info("已成功激活 WorkerTqdm 流式下载进度劫持")
+        try:
+            import huggingface_hub.utils.tqdm as hf_tqdm
+            hf_tqdm.tqdm = WorkerTqdm
+        except Exception:
+            pass
+        try:
+            import huggingface_hub.file_download as hf_fd
+            hf_fd.tqdm = WorkerTqdm
+            hf_fd.old_tqdm = WorkerTqdm
+        except Exception:
+            pass
+        logger.info("已成功激活 WorkerTqdm 流式下载进度劫持 (含 huggingface_hub 内部 tqdm 劫持)")
     except Exception as e:
         logger.debug(f"挂载 WorkerTqdm 异常: {e}")
 
