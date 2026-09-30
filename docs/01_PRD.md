@@ -401,6 +401,10 @@ sequenceDiagram
    - **真断点续传引擎**：重载底层 `_download_to_tmp_and_move`，彻底消除 HuggingFace 官方采用随机 UUID 导致未完成临时碎片累积且无法断点续传的问题；采用固定命名的持续临时文件（`.persistent.incomplete`），配合 HTTP Range 请求头，即使用户随时关闭客户端或断网，再次点击时 100% 自动从中断处追加写入，0 流量浪费；
    - **自动垃圾碎片清理**：新增 `ModelManager.cleanup_incomplete_downloads()`，自动扫描并清除历史遗留的带随机 UUID 的 `.incomplete` 无效垃圾碎片，自动为用户释放数 GB 磁盘空间；
    - **状态栏触发链路严密保护**：彻底修复 `main_window.py` 中 `_on_download_models_clicked` 属性调用与异常兜底，确保状态栏流式渲染百分比与下载速度，下载失败自动复位按钮。
+7. **HuggingFace 官方 `base_tqdm` 继承兼容与异常透明化规范 (v3.3.13)**：
+   - **合规继承官方 `base_tqdm`**：进度拦截钩子 `HfDownloadProgressHook` 严格继承官方 `tqdm.auto.tqdm`，拥有原生 `set_lock`、`get_lock` 等完整多线程类方法，杜绝模块自检阻断；
+   - **原生传参注入**：在模块顶层安全导入 `snapshot_download` 并直接传入 `tqdm_class=HfDownloadProgressHook`，彻底摒弃全局模块污染；
+   - **底层真实异常透传**：`ModelDownloadWorker` 捕获并透传子进程真实底层异常（如磁盘满、证书错误或指定文件不存在），直接在状态栏与实时日志面板呈现真实原因，彻底杜绝模糊的“网络失败”误导。
 
 ---
 

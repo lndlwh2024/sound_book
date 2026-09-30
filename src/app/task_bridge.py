@@ -783,9 +783,14 @@ class ModelDownloadWorker(QThread):
                 f"【模型下载】正在准备下载 ({idx}/{total_models}) {desc} (总大小 {est_gb_str})..."
             )
 
+            last_error = ""
+
             def _on_progress(data: dict):
+                nonlocal last_error
                 p_type = data.get("type")
-                if p_type == "progress":
+                if p_type == "error":
+                    last_error = str(data.get("error", ""))
+                elif p_type == "progress":
                     downloaded = data.get("downloaded", 0)
                     total = data.get("total", 0)
                     speed = data.get("speed", "0 KB/s")
@@ -816,11 +821,12 @@ class ModelDownloadWorker(QThread):
                     f"【模型下载】({idx}/{total_models}) {desc} 已成功下载并就绪！"
                 )
             else:
+                err_detail = f": {last_error}" if last_error else "，请检查网络或镜像连接后重试"
                 self.sig_progress_updated.emit(
                     -1.0,
-                    f"【模型下载】下载 {desc} 失败，请检查网络后重试"
+                    f"【模型下载】下载 {desc} 失败{err_detail}"
                 )
-                self.sig_download_completed.emit(False, f"下载 {desc} 失败")
+                self.sig_download_completed.emit(False, f"下载 {desc} 失败{err_detail}")
                 return
 
         if success_count == total_models:

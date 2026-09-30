@@ -3,10 +3,11 @@
 核心模型独立下载后台工作进程
 运行环境: envs/f5 (具备完整 huggingface_hub, torch 等大模型环境)
 职责:
-1. 具备真正的 HTTP Range 断点续传能力（重写临时文件机制，杜绝随机 UUID 垃圾累积）；
-2. 独立下载 F5-TTS, Qwen2.5-1.5B, SD1.5, LCM-LoRA 模型权重；
-3. 通过 stdout 实时输出 JSON 格式的下载进度、百分比与下载速度，绝不阻塞主界面；
-4. 任何时候进程被关闭或网络中断，下次启动自动从上次中断的字节处继续下载。
+1. 继承官方 base_tqdm，彻底消除 set_lock 等底层兼容性报错；
+2. 具备真正的 HTTP Range 断点续传能力（重写临时文件机制，杜绝随机 UUID 垃圾累积）；
+3. 独立下载 F5-TTS, Qwen2.5-1.5B, SD1.5, LCM-LoRA 模型权重；
+4. 通过 stdout 实时输出 JSON 格式的下载进度、百分比与下载速度，绝不阻塞主界面；
+5. 任何时候进程被关闭或网络中断，下次启动自动从上次中断的字节处继续下载。
 """
 import sys
 import os
@@ -26,6 +27,11 @@ if hasattr(sys.stderr, "reconfigure"):
 os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
 os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
 os.environ["PYTHONUNBUFFERED"] = "1"
+
+# 安全导入官方基类与核心下载库
+from tqdm.auto import tqdm as base_tqdm
+from huggingface_hub import snapshot_download
+import huggingface_hub.file_download as fd
 
 # 核心首选模型注册表
 OFFICIAL_MODELS = {
@@ -52,38 +58,24 @@ OFFICIAL_MODELS = {
 }
 
 
-class HfDownloadProgressHook:
+class HfDownloadProgressHook(base_tqdm):
     """
-    劫持 huggingface_hub 内部的 tqdm 进度条，
+    继承官方 base_tqdm，完全具备 set_lock/get_lock 等所有多线程类方法，
     支持 initial 断点续传初始偏移量，并将进度流式格式化为结构化 JSON 输出。
     """
-    def __init__(self, iterable=None, *args, **kwargs):
-        self.iterable = iterable
-        self.total = kwargs.get('total') or 0
-        self.n = kwargs.get('initial') or kwargs.get('n') or 0
-        self.desc = kwargs.get('desc') or ''
-        self.unit = kwargs.get('unit') or 'B'
-        self.unit_scale = kwargs.get('unit_scale') or False
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
         self._start_time = time.time()
         self._last_report = 0.0
         self._initial_offset = self.n
 
-    def __iter__(self):
-        for item in self.iterable:
-            yield item
-            self.update(1)
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        self.close()
-
     def update(self, n=1):
-        self.n += n
+        super().update(n)
         now = time.time()
+        total_val = self.total if (self.total and self.total > 0) else 0
+
         # 限制每 250ms 最多发送一次进度，避免高频刷屏
-        if now - self._last_report >= 0.25 or (self.total > 0 and self.n >= self.total):
+        if now - self._last_report >= 0.25 or (total_val > 0 and self.n >= total_val):
             self._last_report = now
             elapsed = max(now - self._start_time, 0.001)
             # 计算本次会话的有效下载速度（排除初始断点续传的已有字节）
@@ -91,12 +83,12 @@ class HfDownloadProgressHook:
             speed_bps = session_downloaded / elapsed
             speed_str = f"{speed_bps / (1024 * 1024):.1f} MB/s" if speed_bps > 1024*1024 else f"{speed_bps / 1024:.1f} KB/s"
 
-            percent = (self.n / self.total * 100.0) if self.total > 0 else 0.0
+            percent = (self.n / total_val * 100.0) if total_val > 0 else 0.0
             data = {
                 "type": "progress",
-                "file": self.desc,
+                "file": self.desc or "",
                 "downloaded": self.n,
-                "total": self.total,
+                "total": total_val,
                 "percent": round(percent, 1),
                 "speed": speed_str
             }
@@ -105,48 +97,17 @@ class HfDownloadProgressHook:
             except Exception:
                 pass
 
-    def close(self):
-        pass
 
-    def set_description(self, desc=None, refresh=True):
-        if desc:
-            self.desc = desc
-
-    def set_postfix(self, ordered_dict=None, refresh=True, **kwargs):
-        pass
-
-
-def patch_huggingface_engine():
+def patch_huggingface_resumption():
     """
-    全量替换 huggingface_hub 的 tqdm 与下载临时文件逻辑。
+    重写 huggingface_hub 的 _download_to_tmp_and_move，
+    彻底消除随机 UUID 导致的临时垃圾文件堆积，实现真正的文件级断点续传！
     【为什么这样设计】
-    1. 彻底根治 huggingface_hub PR 4228 引入的随机 UUID 导致未完成文件碎片累积、无法断点续传的问题；
-    2. 使用固定命名的持久化临时文件（.persistent.incomplete），结合 HTTP Range 实现真断点续传；
+    1. 彻底根治 huggingface_hub 官方使用随机 UUID 导致未完成文件变成孤立碎片、下次无法断点续传的问题；
+    2. 使用固定命名的持续临时文件（.persistent.incomplete），结合 HTTP Range 实现真断点续传；
     3. 进程异常退出后保留已有字节，下次启动无缝追加写入。
     """
     try:
-        import tqdm
-        import tqdm.auto
-        tqdm.tqdm = HfDownloadProgressHook
-        tqdm.auto.tqdm = HfDownloadProgressHook
-        sys.modules['tqdm'] = tqdm
-        sys.modules['tqdm.auto'] = tqdm.auto
-    except Exception:
-        pass
-
-    try:
-        import huggingface_hub.utils.tqdm as hf_tqdm
-        hf_tqdm.tqdm = HfDownloadProgressHook
-        hf_tqdm.auto_tqdm = HfDownloadProgressHook
-    except Exception:
-        pass
-
-    try:
-        import huggingface_hub.file_download as fd
-        if hasattr(fd, 'tqdm'):
-            fd.tqdm = HfDownloadProgressHook
-
-        # 核心 Patch：实现跨会话持久断点续传
         def persistent_download_to_tmp_and_move(
             incomplete_path: Path,
             destination_path: Path,
@@ -237,11 +198,10 @@ def download_model(backend_key: str):
     # 启动前清理历史随机 uuid 碎片，为用户释放磁盘空间
     clean_random_incomplete_files(repo_id)
 
-    # 应用引擎 Patch
-    patch_huggingface_engine()
+    # 应用断点续传 Patch
+    patch_huggingface_resumption()
 
     try:
-        from huggingface_hub import snapshot_download
         snapshot_download(
             repo_id=repo_id,
             local_files_only=False,
