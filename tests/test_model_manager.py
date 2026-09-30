@@ -137,3 +137,48 @@ def test_cleanup_incomplete_downloads(tmp_path, monkeypatch):
     assert not trash2.exists()
     assert keep.exists()
 
+
+def test_download_core_model_stream_parsing_robustness(monkeypatch):
+    """
+    测试当子进程标准输出混入 tqdm 字符画、\\r 回车符或终端前缀时，
+    父进程依然能够 100% 提取有效 JSON 负载并正常回调。
+    """
+    import subprocess
+    import json
+    import io
+
+    # 模拟包含控制台污染和前缀的输出流
+    mock_stdout_lines = [
+        "Fetching 10 files:   0%|          | 0/10 [00:00<?, ?it/s]\n",
+        "\r\n",
+        "some info text\n",
+        f"__START__{json.dumps({'backend': 'f5', 'repo_id': 'SWivid/F5-TTS', 'desc': 'F5-TTS 扩散语音大模型'})}\n",
+        "\rReconstructing...:  25%|██▌       | 250M/1.0G [00:05<00:15, 50.0MB/s]" +
+        f"__PROGRESS__{json.dumps({'downloaded': 262144000, 'total': 1048576000, 'percent': 25.0, 'speed': '50.0 MB/s'})}\n",
+        f"__PROGRESS__{json.dumps({'downloaded': 1048576000, 'total': 1048576000, 'percent': 100.0, 'speed': '52.0 MB/s'})}\n",
+        f"__DONE__{json.dumps({'backend': 'f5', 'desc': 'F5-TTS 扩散语音大模型'})}\n"
+    ]
+
+    mock_proc = MagicMock()
+    mock_proc.stdout = io.StringIO("".join(mock_stdout_lines))
+    mock_proc.wait.return_value = None
+    mock_proc.returncode = 0
+
+    monkeypatch.setattr(subprocess, "Popen", lambda *args, **kwargs: mock_proc)
+
+    received_events = []
+    def progress_callback(data):
+        received_events.append(data)
+
+    success = ModelManager.download_core_model("f5", progress_callback=progress_callback)
+    assert success is True
+    # 验证提取到了 start, 两次 progress, 以及 done
+    assert len(received_events) == 4
+    assert received_events[0]["type"] == "start"
+    assert received_events[0]["backend"] == "f5"
+    assert received_events[1]["downloaded"] == 262144000
+    assert received_events[1]["percent"] == 25.0
+    assert received_events[2]["percent"] == 100.0
+    assert received_events[3]["type"] == "done"
+
+

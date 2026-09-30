@@ -376,5 +376,24 @@ def test_model_ready_button_interaction(qapp, monkeypatch):
     assert "【模型下载】" in window._raw_status_text
 
 
+def test_model_download_completed_resets_progress_bar(qapp):
+    """
+    测试模型下载完成后，主生产流水线进度条正确复位归零 (0%)，
+    杜绝滞留 100% 导致用户误解有声书生产已完成。
+    """
+    window = MainWindow()
+    # 模拟下载中进度条被打到了某个数值 (如 100% 或 85%)
+    window.progress_bar.setValue(85)
+    assert window.progress_bar.value() == 85
+
+    # 触发模型下载完成回调
+    window._on_model_download_completed(True, "所有模型已就绪")
+
+    # 验证进度条已安全归零
+    assert window.progress_bar.value() == 0
+    assert "就绪" in window.btn_model_ready.text()
+
+
+
 
 

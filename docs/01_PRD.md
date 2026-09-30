@@ -405,6 +405,10 @@ sequenceDiagram
    - **合规继承官方 `base_tqdm`**：进度拦截钩子 `HfDownloadProgressHook` 严格继承官方 `tqdm.auto.tqdm`，拥有原生 `set_lock`、`get_lock` 等完整多线程类方法，杜绝模块自检阻断；
    - **原生传参注入**：在模块顶层安全导入 `snapshot_download` 并直接传入 `tqdm_class=HfDownloadProgressHook`，彻底摒弃全局模块污染；
    - **底层真实异常透传**：`ModelDownloadWorker` 捕获并透传子进程真实底层异常（如磁盘满、证书错误或指定文件不存在），直接在状态栏与实时日志面板呈现真实原因，彻底杜绝模糊的“网络失败”误导。
+8. **流式下载管道输出隔离与主流水线进度条复位规范 (v3.3.14)**：
+   - **下载工作进程管道输出纯净化**：`HfDownloadProgressHook` 覆写底层 `display()` 为空操作，并将内部 `file` 重定向至独立内存缓冲区 `io.StringIO()`，彻底杜绝 tqdm 字符画进度条（带 `\r` 且无换行）向管道合并输出，过滤非字节级小文件计数器；
+   - **主进程管道解析容错增强**：`ModelManager.download_core_model` 将原本严格的前缀匹配升级为包含式安全截取（`if "__PROGRESS__" in line_str:`），无论管道前缀混入任何终端控制符均能 100% 提取有效 JSON 负载，彻底解决高速下载时状态栏流式进度不更新的假死假象；
+   - **主生产流水线进度条生命周期隔离**：模型下载属于环境与权重的旁路准备，非正式有声书生产任务。模型下载就绪或完成时发射 `-1.0` 信号更新提示文字，并在 `_on_model_download_completed` 中显式调用 `self.progress_bar.setValue(0)` 清零复位，彻底杜绝主进度条滞留 100% 误导用户以为生产已结束的界面状态紊乱。
 
 ---
 

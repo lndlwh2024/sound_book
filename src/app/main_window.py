@@ -607,7 +607,7 @@ class MainWindow(QMainWindow):
     def __init__(self, bridge: Optional[TaskManagerBridge] = None):
         super().__init__()
         self.bridge = bridge or TaskManagerBridge()
-        self.setWindowTitle("书声 (ShuSheng) v3.3.13 - 自动化有声视频生产工具 (小人书 AI 连环画增强版)")
+        self.setWindowTitle("书声 (ShuSheng) v3.3.14 - 自动化有声视频生产工具 (小人书 AI 连环画增强版)")
         self._raw_status_text = "空闲就绪 (IDLE)"
         self._is_producing = False
         self._is_dual_mode = False
@@ -2126,6 +2126,11 @@ class MainWindow(QMainWindow):
     def _on_model_download_completed(self, success: bool, msg: str):
         """模型下载任务完成回调"""
         self._refresh_model_ready_btn()
+        # 【为什么这样设计】
+        # 模型下载属于旁路环境准备工作，绝非正式的有声书生产流水线任务。
+        # 当模型下载完成或检测到全部就绪时，必须将底部的主流水线进度条安全归零（0%），
+        # 彻底杜绝主进度条滞留 100% 误导用户以为生产任务已结束的问题。
+        self.progress_bar.setValue(0)
         if success:
             logger.info("首选核心大模型已全部下载就绪")
         else:

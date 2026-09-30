@@ -368,30 +368,37 @@ class ModelManager:
                 if not line_str:
                     continue
 
-                if line_str.startswith("__PROGRESS__"):
+                # 【为什么这样设计】
+                # 使用包含提取 ("__TAG__" in line_str) 替代严格的前缀匹配 (startswith)，
+                # 即使输出流前部混入任何偶发的终端转义符、回车或日志前缀，也能 100% 提取有效 JSON 负载。
+                if "__PROGRESS__" in line_str:
                     try:
-                        p_data = json.loads(line_str[len("__PROGRESS__"):])
+                        raw_json = line_str[line_str.index("__PROGRESS__") + len("__PROGRESS__"):].strip()
+                        p_data = json.loads(raw_json)
                         if progress_callback:
                             progress_callback(p_data)
                     except Exception:
                         pass
-                elif line_str.startswith("__START__"):
+                elif "__START__" in line_str:
                     try:
-                        s_data = json.loads(line_str[len("__START__"):])
+                        raw_json = line_str[line_str.index("__START__") + len("__START__"):].strip()
+                        s_data = json.loads(raw_json)
                         if progress_callback:
                             progress_callback({"type": "start", **s_data})
                     except Exception:
                         pass
-                elif line_str.startswith("__DONE__"):
+                elif "__DONE__" in line_str:
                     try:
-                        d_data = json.loads(line_str[len("__DONE__"):])
+                        raw_json = line_str[line_str.index("__DONE__") + len("__DONE__"):].strip()
+                        d_data = json.loads(raw_json)
                         if progress_callback:
                             progress_callback({"type": "done", **d_data})
                     except Exception:
                         pass
-                elif line_str.startswith("__ERROR__"):
+                elif "__ERROR__" in line_str:
                     try:
-                        e_data = json.loads(line_str[len("__ERROR__"):])
+                        raw_json = line_str[line_str.index("__ERROR__") + len("__ERROR__"):].strip()
+                        e_data = json.loads(raw_json)
                         if progress_callback:
                             progress_callback({"type": "error", **e_data})
                     except Exception:

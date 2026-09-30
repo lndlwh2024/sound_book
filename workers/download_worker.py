@@ -33,6 +33,8 @@ from tqdm.auto import tqdm as base_tqdm
 from huggingface_hub import snapshot_download
 import huggingface_hub.file_download as fd
 
+import io
+
 # 核心首选模型注册表
 OFFICIAL_MODELS = {
     "f5": {
@@ -62,20 +64,36 @@ class HfDownloadProgressHook(base_tqdm):
     """
     继承官方 base_tqdm，完全具备 set_lock/get_lock 等所有多线程类方法，
     支持 initial 断点续传初始偏移量，并将进度流式格式化为结构化 JSON 输出。
+    【为什么这样设计】
+    1. 官方 base_tqdm 默认向 sys.stderr 打印字符画进度条（带 \\r，无换行），
+       在管道合并模式下会污染 stdout，导致父进程管道解析漏判 __PROGRESS__ 标记；
+    2. 将底层的字符画输出重定向至 io.StringIO() 并覆写 display() 为 pass，
+       确保控制台标准流 100% 纯净，杜绝任何控制字符；
+    3. 过滤非字节级计数器（如小文件数量进度），确保界面状态栏始终展示真实大文件的下载大小与速率。
     """
     def __init__(self, *args, **kwargs):
+        # 将底层 tqdm 输出重定向至独立内存缓冲区，杜绝终端字符画污染父进程管道
+        kwargs["file"] = io.StringIO()
         super().__init__(*args, **kwargs)
         self._start_time = time.time()
         self._last_report = 0.0
         self._initial_offset = self.n
+
+    def display(self, msg=None, pos=None):
+        """彻底静默底层字符画控制台输出，由 update() 统一定向输出纯净 JSON"""
+        pass
 
     def update(self, n=1):
         super().update(n)
         now = time.time()
         total_val = self.total if (self.total and self.total > 0) else 0
 
-        # 限制每 250ms 最多发送一次进度，避免高频刷屏
-        if now - self._last_report >= 0.25 or (total_val > 0 and self.n >= total_val):
+        # 过滤非字节型计数器（例如文件个数 10 个之类），优先汇报真实数据字节进度
+        if total_val > 0 and total_val < 1024 and getattr(self, "unit", "") != "B":
+            return
+
+        # 限制每 200ms 最多发送一次进度，兼顾高实时性与管道开销
+        if now - self._last_report >= 0.2 or (total_val > 0 and self.n >= total_val):
             self._last_report = now
             elapsed = max(now - self._start_time, 0.001)
             # 计算本次会话的有效下载速度（排除初始断点续传的已有字节）
@@ -93,7 +111,8 @@ class HfDownloadProgressHook(base_tqdm):
                 "speed": speed_str
             }
             try:
-                print(f"__PROGRESS__{json.dumps(data, ensure_ascii=False)}", flush=True)
+                sys.stdout.write(f"__PROGRESS__{json.dumps(data, ensure_ascii=False)}\n")
+                sys.stdout.flush()
             except Exception:
                 pass
 

@@ -760,7 +760,8 @@ class ModelDownloadWorker(QThread):
         missing = [k for k, v in status.items() if not v]
 
         if not missing:
-            self.sig_progress_updated.emit(100.0, "【模型就绪】所有首选大模型均已就绪，无需重复下载！")
+            # 模型已就绪，仅更新状态栏提示，传 -1.0 避免把主生产流水线进度条打满
+            self.sig_progress_updated.emit(-1.0, "【模型就绪】所有首选大模型均已就绪，无需重复下载！")
             self.sig_download_completed.emit(True, "所有模型已就绪")
             return
 
@@ -830,7 +831,8 @@ class ModelDownloadWorker(QThread):
                 return
 
         if success_count == total_models:
-            self.sig_progress_updated.emit(100.0, "【模型就绪】恭喜！所有首选大模型已全部下载并就绪，可顺畅运行全部管线！")
+            # 下载完成，发出就绪完成信号，设置 -1.0 避免打满主生产进度条
+            self.sig_progress_updated.emit(-1.0, "【模型就绪】恭喜！所有首选大模型已全部下载并就绪，可顺畅运行全部管线！")
             self.sig_download_completed.emit(True, "全部就绪")
 
 
