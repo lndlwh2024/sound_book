@@ -80,6 +80,27 @@ class IllustrationManager:
         raw = f"{prompt}|{style}|{w}x{h}|lcm={self.use_lcm}"
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
+    @staticmethod
+    def _is_invalid_image(p: Path) -> bool:
+        """
+        严格且精准的黑图/损坏图像检验：
+        1. 文件不存在或大小为 0 -> 无效
+        2. 文件 > 15KB -> 100% 为正常画作，零开销快速通过
+        3. 文件 <= 15KB -> 快速读入像素，若均值 <= 1.0（如 Quadro T1000 NaN 下溢的 4.6KB 全黑图）判定为无效黑图
+        """
+        try:
+            if not p.exists() or p.stat().st_size == 0:
+                return True
+            if p.stat().st_size > 15 * 1024:
+                return False
+            from PIL import Image
+            import numpy as np
+            with Image.open(p) as img:
+                arr = np.array(img)
+                return bool(arr.mean() <= 1.0)
+        except Exception:
+            return True
+
     def _ensure_worker_started(
         self,
         device: str = "cuda",
@@ -445,9 +466,9 @@ class IllustrationManager:
             cache_key = self._compute_cache_key(pos_prompt, chosen_style, self.target_width, self.target_height)
             target_file = book_illustrations_dir / f"{scene.scene_id}_{cache_key}.png"
             cache_file = self.cache_dir / f"art_{cache_key}.png"
-            # 严格校验图片有效性（正常 1024x1536 细腻画作至少数百 KB，黑图仅 4KB），无效黑图自动判定未命中
-            t_ok = target_file.exists() and target_file.stat().st_size >= 10 * 1024
-            c_ok = cache_file.exists() and cache_file.stat().st_size >= 10 * 1024
+            # 严格校验图片有效性（消除全黑图与损坏文件，真实画作秒级复用）
+            t_ok = target_file.exists() and not self._is_invalid_image(target_file)
+            c_ok = cache_file.exists() and not self._is_invalid_image(cache_file)
             if not t_ok and not c_ok:
                 all_cached = False
                 break
@@ -497,9 +518,9 @@ class IllustrationManager:
                 cache_file = self.cache_dir / f"art_{cache_key}.png"
                 target_file = book_illustrations_dir / f"{scene.scene_id}_{cache_key}.png"
 
-                # 严格校验：自动剔除历史损坏黑图（小于 10KB 视为无效黑图，自动清理并触发真重绘）
+                # 严格校验：自动剔除历史损坏黑图（全黑像素或损坏图像自动清理并触发真重绘）
                 if target_file.exists():
-                    if target_file.stat().st_size >= 10 * 1024:
+                    if not self._is_invalid_image(target_file):
                         scene.image_path = str(target_file)
                         if progress_callback:
                             progress_callback(idx, total, f"【小人书插画】第 {idx}/{total} 幕命中当前分集缓存")
@@ -511,7 +532,7 @@ class IllustrationManager:
                             pass
 
                 if cache_file.exists():
-                    if cache_file.stat().st_size >= 10 * 1024:
+                    if not self._is_invalid_image(cache_file):
                         import shutil
                         shutil.copy2(cache_file, target_file)
                         scene.image_path = str(target_file)
