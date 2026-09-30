@@ -330,6 +330,21 @@ class IllustrationManager:
                 self._worker_ready = False
                 logger.info("SD Worker 进程已退出，显存已全部归还操作系统")
 
+    def release_llm_resources(self) -> None:
+        """
+        主动注销 Qwen 大语言模型子进程并彻底归还 ~4GB 物理内存。
+        【为什么这样设计】
+        Step A 场景意象提炼完成后，Prompt 已完整持久化在分镜计划中。
+        在此刻显式释放 Qwen 子进程，可为下游的 SD 1.5 绘图腾出 4GB 宝贵物理内存，
+        彻底杜绝多进程与文件系统缓存叠加导致系统内存飙升至 96% 的风险。
+        """
+        if self.prompt_generator and hasattr(self.prompt_generator, "terminate_worker"):
+            try:
+                self.prompt_generator.terminate_worker()
+                logger.info("已主动注销 Qwen 子进程，成功为下游绘图释放 ~4GB 物理内存")
+            except Exception as e:
+                logger.debug(f"释放 Qwen 资源时发生非阻塞异常: {e}")
+
     def pregenerate_prompts(
         self,
         scenes: List[ScenePlan],
@@ -402,6 +417,9 @@ class IllustrationManager:
         chosen_style = style or self.default_style
         total = len(scenes)
 
+        # 确保大语言模型在批量绘图前已彻底释放物理内存
+        self.release_llm_resources()
+
         # 检查是否全部已存在缓存
         all_cached = True
         for i, scene in enumerate(scenes):
@@ -431,7 +449,7 @@ class IllustrationManager:
             if not worker_ok:
                 raise RuntimeError(
                     f"【小人书大模型阻断】无法启动 SD 1.5 绘图大模型 ({err_msg})。\n"
-                    f"请检查网络或确认本地 models/stable-diffusion-v1-5 权重是否就绪。\n"
+                    f"请在主界面点击【📥 下载首选模型】按钮完成 3.4GB UNet 权重下载后重试。\n"
                     f"已严格终止生产，杜绝产出毫无插画的废片。"
                 )
 

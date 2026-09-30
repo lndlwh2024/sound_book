@@ -326,9 +326,14 @@ class PromptGenerator:
                     pass
         self._llm_worker_process = None
         self._llm_is_ready = False
+        self._llm_init_attempted = False
         self._llm_stdout_queue = None
         self._llm_stderr_thread = None
         self._llm_stdout_thread = None
+
+    def terminate_worker(self):
+        """显式安全注销 Qwen 子进程并释放物理内存"""
+        self._terminate_llm_worker()
 
     def __del__(self):
         try:

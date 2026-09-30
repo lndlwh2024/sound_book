@@ -417,6 +417,9 @@ sequenceDiagram
    - **Windows 管道 4KB 溢出死锁彻底根治**：在 `PromptGenerator` 中为主进程挂载专用的 `_llm_stderr_thread` 守护线程，实时毫秒级流式抽空并消耗 Qwen 工作子进程的 `stderr`。彻底消除了由于 Windows 匿名管道只有 4096 字节缓冲区、transformers/PyTorch 历史上下文推理警告撑爆管道导致子进程主线程挂起在 `Wait Executive`（写阻塞睡眠）的致命死锁隐患；
    - **多核 CPU 算力自动释放与 GUI 丝滑隔离**：在 `qwen_worker.py` 中注入 `torch.set_num_threads(max(1, (os.cpu_count() or 4) - 2))`，自动将多核心 CPU 计算性能释放给深度意象提炼，同时预留 2 核保证桌面 GUI 界面与前台任务调度丝滑流畅，消除 CPU 负载偏低且推理耗时异常的瓶颈；
    - **标准输出持久队列与单次推理超时熔断**：通过 `_llm_stdout_queue` 集中管理所有输出流，彻底消除主线程与后台读取线程之间的竞态；将单幕提炼超时限制设为 60 秒（`queue.get(timeout=60.0)`），若子进程发生异常自动平滑降级至离线分词模式，绝不无限期卡死整条有声书生产流水线。
+11. **核心大模型真实完整性校验与前序子进程内存主动释放规范 (v3.3.17)**：
+   - **大模型核心权重尺寸与未完成碎片严密校验**：彻底根治 `ModelManager.is_model_ready("sd15")` 因检测到伴生小权重（如 text_encoder）便草率误判为“已就绪”导致旁路下载漏判跳过的严重缺陷。引入组件级深度扫描：SD 1.5 必须包含核心 `unet/diffusion_pytorch_model.safetensors`（单文件 >= 2.5GB）或单文件完整 checkpoint（>= 3.5GB），且严格排查 `blobs/` 下任何大于 100KB 的 `.incomplete` 临时碎片，确保只有完全具备离线权重的模型才标记为就绪，确保点击【下载首选模型】时 100% 完整拉取缺失的 3.4GB UNet 权重；
+   - **Step A 意象提炼完成后主动注销 Qwen 进程释放内存**：在分镜 Prompt 异步提炼完成汇合后，由主生产线程立即显式调用 `illustration_mgr.release_llm_resources()` 注销 Qwen 工作子进程，当场向操作系统完整归还 ~4GB 物理内存；在进入 Step 7 绘图前二次执行防护释放，彻底切断前序大模型进程对系统 RAM 的持续霸占，为下游 SD 绘图提供充裕内存环境，杜绝多进程与系统文件缓存叠加引发内存飙升至 96% 的隐患。
 
 ---
 

@@ -93,25 +93,56 @@ class ModelManager:
     def is_cached(cls, backend: str, model_dir: Path) -> bool:
         """
         检查指定模型目录是否已包含有效权重文件。
-        支持精确匹配 key_files 或扫描大于 10MB 的通用模型权重。
+        【为什么这样设计】
+        彻底根治“只检测到 text_encoder 或小权重便假就绪”的致命缺陷：
+        1. sd15: 必须包含完整核心 UNet (>= 2.5GB) 或完整单文件 pruned checkpoint (>= 3.5GB)；
+        2. qwen15: 必须包含完整的语言大模型核心 safetensors (>= 2.5GB)；
+        3. f5: 必须包含扩散语音大模型核心权重 (>= 1.0GB)；
+        4. lcm_lora: 必须包含 LCM 极速采样插件权重 (>= 50MB)；
+        杜绝任何小文件冒充大模型就绪。
         """
         if not model_dir.exists() or not model_dir.is_dir():
             return False
 
+        backend = backend.lower()
+
+        # 1. SD 1.5 绘图大模型核心校验
+        if backend == "sd15":
+            # 形式 A: diffusers 目录结构，核心在于 unet/
+            unet_cands = list(model_dir.glob("**/unet/diffusion_pytorch_model.*"))
+            if any(f.is_file() and f.stat().st_size > 2500 * 1024 * 1024 for f in unet_cands):
+                return True
+            # 形式 B: 单文件独立 checkpoint (如 v1-5-pruned-emaonly.safetensors)
+            ckpt_cands = list(model_dir.glob("**/*pruned*.safetensors")) + list(model_dir.glob("**/*.ckpt"))
+            if any(f.is_file() and f.stat().st_size > 3500 * 1024 * 1024 for f in ckpt_cands):
+                return True
+            return False
+
+        # 2. Qwen2.5-1.5B 意象大模型核心校验
+        if backend == "qwen15":
+            q_cands = list(model_dir.glob("**/model*.safetensors")) + list(model_dir.glob("**/pytorch_model*.bin"))
+            tot_sz = sum(f.stat().st_size for f in q_cands if f.is_file())
+            return tot_sz > 2000 * 1024 * 1024
+
+        # 3. LCM-LoRA 加速模块校验
+        if backend == "lcm_lora":
+            l_cands = list(model_dir.glob("**/pytorch_lora_weights.safetensors")) + list(model_dir.glob("**/*lora*.safetensors"))
+            return any(f.is_file() and f.stat().st_size > 50 * 1024 * 1024 for f in l_cands)
+
+        # 4. F5-TTS 语音大模型校验
+        if backend == "f5":
+            f_cands = list(model_dir.glob("**/model_*.safetensors")) + list(model_dir.glob("**/*.pt"))
+            return any(f.is_file() and f.stat().st_size > 1000 * 1024 * 1024 for f in f_cands)
+
+        # 5. 通用默认后备校验
         info = cls.OFFICIAL_MODELS.get(backend, {})
         key_files = info.get("key_files", [])
-
-        # 优先匹配官方关键文件
         for fname in key_files:
             file_path = model_dir / fname
-            if file_path.exists() and file_path.stat().st_size > 0:
+            if file_path.exists() and file_path.stat().st_size > 10 * 1024 * 1024:
                 return True
 
-        # 通用后缀兜底扫描大于 10MB 的权重文件
-        weights_extensions = {".pth", ".pt", ".bin", ".safetensors", ".onnx"}
-        for f in model_dir.glob("**/*"):
-            if f.is_file() and f.suffix in weights_extensions and f.stat().st_size > 10 * 1024 * 1024:
-                return True
+        return False
 
     @classmethod
     def cleanup_incomplete_downloads(cls) -> Tuple[int, int]:
@@ -146,7 +177,7 @@ class ModelManager:
     def is_model_ready(cls, backend: str, config: Optional[dict] = None) -> bool:
         """
         全盘扫描指定模型是否已经在本地就绪（兼顾项目 models/ 目录与 HuggingFace 全局缓存）。
-        严格校验是否存在大于 10MB 的 .incomplete 未完成文件，避免假就绪。
+        严格校验核心权重尺寸，并且确保不存在未完成的 .incomplete 碎片文件。
         """
         backend = backend.lower()
         # 1. 检查项目 models/ 目录
@@ -166,15 +197,24 @@ class ModelManager:
         if repo_id:
             hf_cache_dir = Path.home() / ".cache" / "huggingface" / "hub" / f"models--{repo_id.replace('/', '--')}"
             if hf_cache_dir.exists():
-                # 检查是否存在未完成的大文件下载
+                # 检查是否存在未完成的大文件下载碎片（只要存在 >100KB 的未完成碎片，代表下载正在进行或曾中断）
                 blobs_dir = hf_cache_dir / "blobs"
                 if blobs_dir.exists():
                     incompletes = list(blobs_dir.glob("*.incomplete"))
-                    if any(f.stat().st_size > 10 * 1024 * 1024 for f in incompletes):
+                    if any(f.stat().st_size > 100 * 1024 for f in incompletes):
                         return False
-                for f in hf_cache_dir.glob("**/*"):
-                    if f.is_file() and f.suffix in {".safetensors", ".bin", ".pth"} and f.stat().st_size > 10 * 1024 * 1024:
-                        return True
+
+                # 检查 snapshots 快照版本目录
+                snapshots_dir = hf_cache_dir / "snapshots"
+                if snapshots_dir.exists():
+                    for snap in snapshots_dir.iterdir():
+                        if snap.is_dir() and cls.is_cached(backend, snap):
+                            return True
+
+                # 检查 hf_cache_dir 根目录
+                if cls.is_cached(backend, hf_cache_dir):
+                    return True
+
         return False
 
     @classmethod

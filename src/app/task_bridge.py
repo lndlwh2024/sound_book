@@ -528,6 +528,9 @@ class ProductionWorker(QThread):
                         prompt_thread.join(timeout=180.0)
                     if prompt_thread_err:
                         logger.error(f"CPU 场景意象预提炼发生异常: {prompt_thread_err}")
+                    # 主动释放 Qwen 进程，释放 ~4GB 物理内存，为下游 SD 绘图腾出充裕空间
+                    if illustration_mgr and hasattr(illustration_mgr, "release_llm_resources"):
+                        illustration_mgr.release_llm_resources()
             else:
                 for u in ep_units:
                     if u.audio_duration <= 0:
