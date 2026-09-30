@@ -68,6 +68,14 @@ class SubtitleItem:
     def duration(self) -> float:
         return max(0.0, self.end_time - self.start_time)
 
+    @property
+    def start_sec(self) -> float:
+        return self.start_time
+
+    @property
+    def end_sec(self) -> float:
+        return self.end_time
+
     def to_srt_block(self) -> str:
         """导出为 SRT 单个数据块"""
         start_str = format_srt_time(self.start_time)

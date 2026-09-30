@@ -445,7 +445,10 @@ class IllustrationManager:
             cache_key = self._compute_cache_key(pos_prompt, chosen_style, self.target_width, self.target_height)
             target_file = book_illustrations_dir / f"{scene.scene_id}_{cache_key}.png"
             cache_file = self.cache_dir / f"art_{cache_key}.png"
-            if not target_file.exists() and not cache_file.exists():
+            # 严格校验图片有效性（正常 1024x1536 细腻画作至少数百 KB，黑图仅 4KB），无效黑图自动判定未命中
+            t_ok = target_file.exists() and target_file.stat().st_size >= 10 * 1024
+            c_ok = cache_file.exists() and cache_file.stat().st_size >= 10 * 1024
+            if not t_ok and not c_ok:
                 all_cached = False
                 break
 
@@ -494,19 +497,32 @@ class IllustrationManager:
                 cache_file = self.cache_dir / f"art_{cache_key}.png"
                 target_file = book_illustrations_dir / f"{scene.scene_id}_{cache_key}.png"
 
+                # 严格校验：自动剔除历史损坏黑图（小于 10KB 视为无效黑图，自动清理并触发真重绘）
                 if target_file.exists():
-                    scene.image_path = str(target_file)
-                    if progress_callback:
-                        progress_callback(idx, total, f"【小人书插画】第 {idx}/{total} 幕命中当前分集缓存")
-                    continue
+                    if target_file.stat().st_size >= 10 * 1024:
+                        scene.image_path = str(target_file)
+                        if progress_callback:
+                            progress_callback(idx, total, f"【小人书插画】第 {idx}/{total} 幕命中当前分集缓存")
+                        continue
+                    else:
+                        try:
+                            target_file.unlink()
+                        except Exception:
+                            pass
 
                 if cache_file.exists():
-                    import shutil
-                    shutil.copy2(cache_file, target_file)
-                    scene.image_path = str(target_file)
-                    if progress_callback:
-                        progress_callback(idx, total, f"【小人书插画】第 {idx}/{total} 幕从全局插画库秒级复用")
-                    continue
+                    if cache_file.stat().st_size >= 10 * 1024:
+                        import shutil
+                        shutil.copy2(cache_file, target_file)
+                        scene.image_path = str(target_file)
+                        if progress_callback:
+                            progress_callback(idx, total, f"【小人书插画】第 {idx}/{total} 幕从全局插画库秒级复用")
+                        continue
+                    else:
+                        try:
+                            cache_file.unlink()
+                        except Exception:
+                            pass
 
                 # 3. 必须调用 SD Worker 绘制真实插画
                 if not self._worker_process or self._worker_process.poll() is not None:

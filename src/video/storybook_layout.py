@@ -204,7 +204,9 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         clean_text = item.text.replace("\n", " ").replace("\r", "").strip()
         if not clean_text:
             continue
-        lines.append(f"Dialogue: 0,{_fmt(item.start_sec)},{_fmt(item.end_sec)},Default,,0,0,0,,{clean_text}\n")
+        start_s = getattr(item, "start_time", getattr(item, "start_sec", 0.0))
+        end_s = getattr(item, "end_time", getattr(item, "end_sec", 0.0))
+        lines.append(f"Dialogue: 0,{_fmt(start_s)},{_fmt(end_s)},Default,,0,0,0,,{clean_text}\n")
 
     with open(output_path, "w", encoding="utf-8") as f:
         f.writelines(lines)

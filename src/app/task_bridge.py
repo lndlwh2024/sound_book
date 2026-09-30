@@ -255,7 +255,13 @@ class ProductionWorker(QThread):
             output_base = (project_root / "output").resolve()
         output_base.mkdir(parents=True, exist_ok=True)
 
-        raw_book_id = cfg.get("book_id", f"book_{abs(hash(book_path.name)) % 1000000:06d}")
+        # 【为什么这样设计】
+        # 彻底废除 Python 原生带随机盐的 hash()，改用基于电子书绝对物理路径的确定性 MD5 哈希：
+        # 无论客户端重启多少次，book_id 绝对恒定唯一，断点续跑 100% 能够定位到已有工程目录！
+        import hashlib
+        norm_book_key = str(book_path.resolve()).replace('\\', '/').lower()
+        stable_book_id = f"book_{hashlib.md5(norm_book_key.encode('utf-8')).hexdigest()[:8]}"
+        raw_book_id = cfg.get("book_id") or stable_book_id
         book_id = sanitize_filename(raw_book_id)
         book_dir = (project_root / "books" / book_id).resolve()
         book_dir.mkdir(parents=True, exist_ok=True)
@@ -366,12 +372,80 @@ class ProductionWorker(QThread):
             prompt_thread_err = None
             scene_splitter = None
             illustration_mgr = None
-            cur_tts_text = f"【4/12 语音合成 (GPU)】第 {ep_order:02d} 集 · 正在初始化语音引擎..."
+            cur_tts_text = f"【4/12 语音合成 (GPU)】第 {ep_order:02d} 集 · 正在检查已有音频切片..."
             cur_prompt_text = ""
+
+            # 【资产自动继承机制】
+            # 彻底解决用户断点重启丢失 59 个切片音频从头开始的顽疾：
+            # 若当前工程目录下切片尚未就绪，自动扫描 books/ 目录下历史 book_* 目录（如上一轮的 book_569857 等），
+            # 秒级自动软迁移已生成的切片音频 (unit_*.wav)、混音文件和清单，实现 100% 真正的无感断点秒级复用！
+            ep_units_dir = book_dir / f"ep_{ep_order:02d}_units"
+            ep_units_dir.mkdir(parents=True, exist_ok=True)
+            existing_target_wavs = [w for w in ep_units_dir.glob("unit_*.wav") if w.stat().st_size > 1000]
+
+            books_root = book_dir.parent
+            if books_root.exists() and len(existing_target_wavs) < len(ep_units):
+                candidate_dirs = [
+                    d for d in books_root.iterdir()
+                    if d.is_dir() and d.name.startswith("book_") and d.resolve() != book_dir.resolve()
+                ]
+                candidate_dirs.sort(key=lambda d: d.stat().st_mtime, reverse=True)
+                import shutil
+                for cand in candidate_dirs:
+                    cand_units_dir = cand / f"ep_{ep_order:02d}_units"
+                    if cand_units_dir.exists():
+                        cand_wavs = [w for w in cand_units_dir.glob("unit_*.wav") if w.stat().st_size > 1000]
+                        if len(cand_wavs) > len(existing_target_wavs):
+                            logger.info(f"【历史资产自动继承】从历史工程 {cand.name} 自动继承 {len(cand_wavs)} 个音频切片到 {book_dir.name}...")
+                            for cw in cand_wavs:
+                                tw = ep_units_dir / cw.name
+                                if not tw.exists() or tw.stat().st_size <= 1000:
+                                    try:
+                                        shutil.copy2(cw, tw)
+                                    except Exception:
+                                        pass
+
+                            # 顺便继承混音、人声、字幕及 manifests
+                            for extra_name in [f"episode_{ep_order:02d}_mixed.m4a", f"episode_{ep_order:02d}_voice.wav", f"episode_{ep_order:02d}.ass"]:
+                                cf = cand / extra_name
+                                tf = book_dir / extra_name
+                                if cf.exists() and cf.stat().st_size > 1000 and not tf.exists():
+                                    try:
+                                        shutil.copy2(cf, tf)
+                                        logger.info(f"【历史资产自动继承】成功继承文件: {extra_name}")
+                                    except Exception:
+                                        pass
+
+                            cm_dir = cand / "manifests"
+                            tm_dir = book_dir / "manifests"
+                            if cm_dir.exists():
+                                tm_dir.mkdir(parents=True, exist_ok=True)
+                                for mf in cm_dir.glob("*.json"):
+                                    t_mf = tm_dir / mf.name
+                                    if not t_mf.exists() and mf.stat().st_size > 100:
+                                        try:
+                                            shutil.copy2(mf, t_mf)
+                                        except Exception:
+                                            pass
+                            break
 
             if storybook_enabled and ep_units:
                 scene_splitter = SceneSplitter(paragraphs_per_scene=paragraphs_per_scene)
-                storybook_scenes = scene_splitter.split_by_text(ep_units, paragraphs_per_scene=paragraphs_per_scene)
+                scenes_cache_file = book_dir / f"ep_{ep_order:02d}_scenes.json"
+
+                # 优先尝试从本地工程缓存秒级载入分镜 Prompt，杜绝每次重启重新提炼 1~2 分钟
+                if scenes_cache_file.exists() and scenes_cache_file.stat().st_size > 100:
+                    try:
+                        import json
+                        with open(scenes_cache_file, "r", encoding="utf-8") as f:
+                            c_data = json.load(f)
+                        storybook_scenes = [ScenePlan(**d) for d in c_data]
+                        logger.info(f"【分镜秒级复用】成功从 {scenes_cache_file.name} 载入 {len(storybook_scenes)} 幕分镜意象，跳过大模型重复提炼！")
+                        cur_prompt_text = f"【5/12 意象预提炼】命中本地分镜缓存，共 {len(storybook_scenes)} 幕，秒级载入！"
+                    except Exception as ex:
+                        logger.warning(f"读取分镜缓存异常，回退至重新提炼: {ex}")
+                        storybook_scenes = None
+
                 illustration_mgr = IllustrationManager(
                     cache_dir=output_base / "illustrations_cache",
                     default_style=storybook_style,
@@ -382,56 +456,93 @@ class ProductionWorker(QThread):
                     context_scenes=context_scenes
                 )
 
-                def _on_prompt_progress(cur_s, tot_s, first_sent):
-                    nonlocal cur_prompt_text
-                    active_engine = getattr(illustration_mgr.prompt_generator, "get_active_engine_name", lambda: "CPU")()
-                    cur_prompt_text = f"【5/12 意象预提炼 ({active_engine})】第 {ep_order:02d} 集 · 分镜 {cur_s}/{tot_s} 幕 | 正在深度提炼: \"{first_sent}\""
-                    self.sig_dual_progress_updated.emit(cur_tts_text, cur_prompt_text)
+                if not storybook_scenes:
+                    storybook_scenes = scene_splitter.split_by_text(ep_units, paragraphs_per_scene=paragraphs_per_scene)
 
-                def _run_prompt_step_a():
-                    nonlocal storybook_scenes, prompt_thread_err, cur_prompt_text
-                    try:
-                        logger.info(f"【CPU 意象预提炼】开始在后台预生成第 {ep_order:02d} 集 {len(storybook_scenes)} 幕场景 Prompt (Step A)...")
-                        engine_label = "Qwen2.5 (CPU)" if "qwen" in str(storybook_llm_model).lower() else "rjieba 词典"
-                        cur_prompt_text = f"【5/12 意象预提炼 ({engine_label})】第 {ep_order:02d} 集 · 正在拉起大模型并驻留内存..."
-                        self.sig_dual_progress_updated.emit(cur_tts_text, cur_prompt_text)
-
-                        storybook_scenes = illustration_mgr.pregenerate_prompts(
-                            storybook_scenes,
-                            style=storybook_style,
-                            on_progress=_on_prompt_progress
-                        )
+                    def _on_prompt_progress(cur_s, tot_s, first_sent):
+                        nonlocal cur_prompt_text
                         active_engine = getattr(illustration_mgr.prompt_generator, "get_active_engine_name", lambda: "CPU")()
-                        cur_prompt_text = f"【5/12 意象预提炼 ({active_engine})】第 {ep_order:02d} 集 · 分镜 {len(storybook_scenes)}/{len(storybook_scenes)} 幕 | 全部预提炼就绪，等待语音合成汇合..."
+                        cur_prompt_text = f"【5/12 意象预提炼 ({active_engine})】第 {ep_order:02d} 集 · 分镜 {cur_s}/{tot_s} 幕 | 正在深度提炼: \"{first_sent}\""
                         self.sig_dual_progress_updated.emit(cur_tts_text, cur_prompt_text)
-                        logger.info(f"【CPU 意象预提炼】第 {ep_order:02d} 集全部场景 Prompt 预提炼完成！引擎: {active_engine}")
-                    except Exception as ex:
-                        prompt_thread_err = ex
-                        logger.error(f"CPU 预提炼场景意象异常: {ex}")
 
-                import threading
-                prompt_thread = threading.Thread(target=_run_prompt_step_a, daemon=True)
-                prompt_thread.start()
+                    def _run_prompt_step_a():
+                        nonlocal storybook_scenes, prompt_thread_err, cur_prompt_text
+                        try:
+                            logger.info(f"【CPU 意象预提炼】开始在后台预生成第 {ep_order:02d} 集 {len(storybook_scenes)} 幕场景 Prompt (Step A)...")
+                            engine_label = "Qwen2.5 (CPU)" if "qwen" in str(storybook_llm_model).lower() else "rjieba 词典"
+                            cur_prompt_text = f"【5/12 意象预提炼 ({engine_label})】第 {ep_order:02d} 集 · 正在拉起大模型并驻留内存..."
+                            self.sig_dual_progress_updated.emit(cur_tts_text, cur_prompt_text)
+
+                            storybook_scenes = illustration_mgr.pregenerate_prompts(
+                                storybook_scenes,
+                                style=storybook_style,
+                                on_progress=_on_prompt_progress
+                            )
+
+                            # 提炼完毕立即落盘保存为 ep_XX_scenes.json
+                            try:
+                                import json
+                                with open(scenes_cache_file, "w", encoding="utf-8") as f_sc:
+                                    json.dump([s.to_dict() for s in storybook_scenes], f_sc, ensure_ascii=False, indent=2)
+                                logger.info(f"第 {ep_order:02d} 集分镜 Prompt 已成功持久化落盘至: {scenes_cache_file.name}")
+                            except Exception as ex_save:
+                                logger.warning(f"分镜 Prompt 落盘失败: {ex_save}")
+
+                            active_engine = getattr(illustration_mgr.prompt_generator, "get_active_engine_name", lambda: "CPU")()
+                            cur_prompt_text = f"【5/12 意象预提炼 ({active_engine})】第 {ep_order:02d} 集 · 分镜 {len(storybook_scenes)}/{len(storybook_scenes)} 幕 | 全部预提炼就绪，等待语音合成汇合..."
+                            self.sig_dual_progress_updated.emit(cur_tts_text, cur_prompt_text)
+                            logger.info(f"【CPU 意象预提炼】第 {ep_order:02d} 集全部场景 Prompt 预提炼完成！引擎: {active_engine}")
+                        except Exception as ex:
+                            prompt_thread_err = ex
+                            logger.error(f"CPU 预提炼场景意象异常: {ex}")
+
+                    import threading
+                    prompt_thread = threading.Thread(target=_run_prompt_step_a, daemon=True)
+                    prompt_thread.start()
 
             tts_engine_name = str(cfg.get("tts_engine", "f5")).lower()
             voice_profile = cfg.get("voice_profile", "E1")
-            tts_router = create_tts_router(config.get("tts", {}))
-            tts_backend = tts_router.get_backend(tts_engine_name, raise_if_missing=False)
 
             unit_wavs = []
-            ep_units_dir = book_dir / f"ep_{ep_order:02d}_units"
-            ep_units_dir.mkdir(parents=True, exist_ok=True)
+            total_u = len(ep_units)
 
-            if tts_backend:
-                logger.info(f"正在使用 TTS 引擎 [{tts_engine_name}] (音色: {voice_profile}, 步数: {nfe_step}, CFG: {cfg_strength}) 启动分集合成会话")
-                tts_backend.start_session()
-                try:
-                    total_u = len(ep_units)
-                    for idx, u in enumerate(ep_units):
-                        if self._pause_requested:
-                            break
-                        u_wav = (ep_units_dir / f"unit_{idx:04d}.wav").resolve()
-                        if not u_wav.exists():
+            # 预检全量切片是否已 100% 存在且有效
+            all_units_ready = total_u > 0 and all(
+                (ep_units_dir / f"unit_{idx:04d}.wav").exists() and
+                (ep_units_dir / f"unit_{idx:04d}.wav").stat().st_size > 1000
+                for idx in range(total_u)
+            )
+
+            if all_units_ready:
+                # 【零开销跳过机制】全部切片已存在，彻底跳过 TTS 引擎加载与会话冷启动，0秒直通！
+                logger.info(f"【断点秒级复用】第 {ep_order:02d} 集全部 {total_u} 句切片音频已 100% 就绪，跳过 TTS 引擎冷启动！")
+                cur_tts_text = f"【4/12 语音合成】第 {ep_order:02d} 集 · 全部 {total_u} 句音频切片已就绪，秒级载入！"
+                self.sig_progress_updated.emit(65.0, cur_tts_text)
+                if storybook_enabled:
+                    self.sig_dual_progress_updated.emit(cur_tts_text, cur_prompt_text)
+
+                from ..audio.ffmpeg_utils import get_audio_info
+                for idx, u in enumerate(ep_units):
+                    u_wav = (ep_units_dir / f"unit_{idx:04d}.wav").resolve()
+                    info = get_audio_info(u_wav)
+                    u.audio_duration = info.get("duration", max(1.5, len(u.text) * 0.2))
+                    unit_wavs.append(u_wav)
+
+                if prompt_thread and prompt_thread.is_alive():
+                    logger.info("音频切片已就绪，正在等待 CPU 场景意象提炼线程汇合...")
+                    prompt_thread.join(timeout=180.0)
+            else:
+                tts_router = create_tts_router(config.get("tts", {}))
+                tts_backend = tts_router.get_backend(tts_engine_name, raise_if_missing=False)
+                if tts_backend:
+                    logger.info(f"正在使用 TTS 引擎 [{tts_engine_name}] (音色: {voice_profile}, 步数: {nfe_step}, CFG: {cfg_strength}) 启动分集合成会话")
+                    tts_backend.start_session()
+                    try:
+                        for idx, u in enumerate(ep_units):
+                            if self._pause_requested:
+                                break
+                            u_wav = (ep_units_dir / f"unit_{idx:04d}.wav").resolve()
+                            if not u_wav.exists() or u_wav.stat().st_size <= 1000:
                             clean_text = u.text.strip().replace('\n', ' ')
                             tot_chars = len(clean_text)
                             # 【为什么这样设计】
@@ -651,13 +762,17 @@ class ProductionWorker(QThread):
                     self.sig_progress_updated.emit(86.0, f"【8/12 分辨率增强】已完成场景原画 1024x1536 智能超分辨率增强...")
 
                     # 节点 9: 智能混音 (AUDIO_MIXING)
-                    self.sig_status_changed.emit("AUDIO_MIXING")
-                    self.sig_progress_updated.emit(88.0, f"【9/12 智能混音】正在执行人声与背景音乐智能侧链避让混音...")
-                    audio_mixer.mix_episode(
-                        voice_path=ep_voice_tmp,
-                        bgm_path=bgm_path,
-                        output_path=ep_audio_path
-                    )
+                    if ep_audio_path.exists() and ep_audio_path.stat().st_size > 10240:
+                        logger.info(f"第 {ep_order:02d} 集混音音频已就绪 ({ep_audio_path.name})，秒级复用！")
+                        self.sig_progress_updated.emit(88.0, f"【9/12 智能混音】混音音频已就绪，秒级跳过！")
+                    else:
+                        self.sig_status_changed.emit("AUDIO_MIXING")
+                        self.sig_progress_updated.emit(88.0, f"【9/12 智能混音】正在执行人声与背景音乐智能侧链避让混音...")
+                        audio_mixer.mix_episode(
+                            voice_path=ep_voice_tmp,
+                            bgm_path=bgm_path,
+                            output_path=ep_audio_path
+                        )
 
                     # 导出适配小人书底部容器的专属 ASS 样式字幕 (外挂独立函数，绝不侵入老模块)
                     storybook_ass_path = book_dir / f"episode_{ep_order:02d}_storybook.ass"

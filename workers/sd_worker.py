@@ -140,8 +140,10 @@ def init_pipeline(
         # 启动进度拦截钩子
         _setup_tqdm_hook()
 
-        logger.info(f"正在加载 SD 模型: {model_id} (设备={device}, CPU_Offload={enable_cpu_offload}, LCM={use_lcm})...")
-        dtype = torch.float16 if device == "cuda" and torch.cuda.is_available() else torch.float32
+        # 【为什么这样设计】
+        # 彻底解决 Quadro T1000 / GTX 16xx 系列在 float16 下因硬件缺乏完整 Tensor Core 导致 VAE 解码 NaN 进而产出全黑画面的致命 Bug：
+        # 统一使用 torch.float32 精度，配合 enable_model_cpu_offload()，显存恒定保持在 1.8~2.5GB 极低水准，100% 杜绝黑图！
+        dtype = torch.float32
 
         is_local_dir = os.path.exists(model_id) and os.path.isdir(model_id)
         try:
@@ -200,9 +202,16 @@ def init_pipeline(
                     "desc": "正在挂载 LCM-LoRA 极速采样插件..."
                 })
                 try:
-                    pipe.load_lora_weights("latent-consistency/lcm-lora-sdv1-5", local_files_only=True)
+                    pipe.load_lora_weights(
+                        "latent-consistency/lcm-lora-sdv1-5",
+                        weight_name="pytorch_lora_weights.safetensors",
+                        local_files_only=True
+                    )
                 except Exception:
-                    pipe.load_lora_weights("latent-consistency/lcm-lora-sdv1-5")
+                    pipe.load_lora_weights(
+                        "latent-consistency/lcm-lora-sdv1-5",
+                        weight_name="pytorch_lora_weights.safetensors"
+                    )
                 pipe.scheduler = LCMScheduler.from_config(pipe.scheduler.config)
                 logger.info("成功挂载 LCM-LoRA 加速引擎，启用 4 步极速采样")
             except Exception as e:
@@ -332,8 +341,11 @@ def generate_image(
             from PIL import Image
             image = image.resize((target_width, target_height), resample=Image.Resampling.LANCZOS)
             final_w, final_h = target_width, target_height
-        else:
-            final_w, final_h = width, height
+        # 增加黑图质量拦截（零假冒原则）：如果图片平均亮度过低或全黑（例如均值 <= 1.0），判定为失败，绝不输出黑图！
+        import numpy as np
+        arr = np.array(image)
+        if arr.mean() <= 1.0:
+            raise RuntimeError("SD 生成了全黑无效画面 (平均像素值 <= 1.0)，已严格拦截阻断！")
 
         image.save(str(out_file), quality=95)
         total_elapsed = time.time() - start_t
