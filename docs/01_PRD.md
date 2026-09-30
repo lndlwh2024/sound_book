@@ -432,6 +432,10 @@ sequenceDiagram
    - **代码层固化自动化修剪引擎 (prune_redundant_assets)**：在 `ModelManager` 中建立 `prune_redundant_assets` 全自动修剪引擎，在核心模型状态自检、模型下载前/后自动静默触发，自动排查修剪所有已知冗余垃圾并清理孤立未完成碎片；
    - **新电脑源头双保险免疫**：在 `download_worker.py` 中将黑名单拦截规则扩展至 `["*.ckpt", "*pruned*", "*non_ema*", "safety_checker/*", "*.bin", "*.fp16.*"]`，新环境部署下载时物理阻断拉取任何废弃垃圾，并结合下载后自愈修剪，确保新老电脑从源头杜绝 18GB 垃圾累积与磁盘膨胀；
    - **管线 100% 完好与离线秒级就绪保障**：经由真实 Python 离线加载验证，在完全切除上述 17.89GB 冗余资产后，Diffusers 核心 6 大组件 100% 完整无缺，纯本地秒级（< 2.7 秒）加载就绪，文生图连环画插画生产管线运行丝滑无阻。
+15. **分镜正负提示词解耦与绘图流程未绑定变量根治规范 (v3.3.21)**：
+   - **Step A 异步预提炼与 Step 7 绘图流无缝解耦**：彻底根治 `IllustrationManager.prepare_scene_illustrations` 中因场景已包含 Step A 预生成提示词跳过现场提炼分支导致局部变量 `prompt_info` 未绑定而抛出 `UnboundLocalError` 的致命缺陷；
+   - **正负向提示词全场景安全绑定**：无论分镜提示词来自异步预提炼、生产计划缓存还是现场补全，统一提取独立确定的 `positive_prompt` 与 `negative_prompt`，且在所有分支下确保 100% 安全就绪并透传给 SD Worker；
+   - **ScenePlan 数据模型负向约束闭环**：在 `ScenePlan` 模型与序列化结构中新增 `negative_prompt` 字段，确保提炼出的高质量负向提示词（屏蔽肢体畸形、屏蔽文字水印与低画质）在分集插画生成与持久化存档中完整闭环传递。
 
 ---
 

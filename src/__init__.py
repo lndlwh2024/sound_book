@@ -1,3 +1,3 @@
 # BookAgent 源码包
-__version__ = "3.3.20"
+__version__ = "3.3.21"
 

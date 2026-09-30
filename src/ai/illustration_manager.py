@@ -22,7 +22,7 @@ import subprocess
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Callable, Tuple
 
-from .prompt_generator import PromptGenerator
+from .prompt_generator import PromptGenerator, DEFAULT_NEGATIVE_PROMPT
 from ..core.scene_splitter import ScenePlan
 
 logger = logging.getLogger(__name__)
@@ -62,8 +62,8 @@ class IllustrationManager:
             self.base_width, self.base_height = 512, 768
             self.target_width, self.target_height = 1024, 1536
 
-        # 解析适用于 SD Worker 的 Python 解释器（优先使用 envs/f5）
-        if python_exe and os.path.exists(python_exe):
+        # 解析适用于 SD Worker 的 Python 解释器（优先使用显式指定，其次回退至 envs/f5）
+        if python_exe:
             self.python_exe = python_exe
         else:
             cand = Path("envs/f5/Scripts/python.exe").resolve()
@@ -393,6 +393,8 @@ class IllustrationManager:
                     history_texts=hist_texts
                 )
                 scene.prompt = prompt_info["positive_prompt"]
+                if hasattr(scene, "negative_prompt"):
+                    scene.negative_prompt = prompt_info.get("negative_prompt", DEFAULT_NEGATIVE_PROMPT)
 
         return scenes
 
@@ -423,7 +425,8 @@ class IllustrationManager:
         # 检查是否全部已存在缓存
         all_cached = True
         for i, scene in enumerate(scenes):
-            if not scene.prompt:
+            pos_prompt = scene.prompt or ""
+            if not pos_prompt:
                 hist_texts = None
                 if self.context_scenes > 0 and i > 0:
                     h_start = max(0, i - self.context_scenes)
@@ -434,9 +437,12 @@ class IllustrationManager:
                     style_key=chosen_style,
                     history_texts=hist_texts
                 )
-                scene.prompt = prompt_info["positive_prompt"]
+                pos_prompt = prompt_info["positive_prompt"]
+                scene.prompt = pos_prompt
+                if hasattr(scene, "negative_prompt") and not scene.negative_prompt:
+                    scene.negative_prompt = prompt_info.get("negative_prompt", DEFAULT_NEGATIVE_PROMPT)
 
-            cache_key = self._compute_cache_key(scene.prompt, chosen_style, self.target_width, self.target_height)
+            cache_key = self._compute_cache_key(pos_prompt, chosen_style, self.target_width, self.target_height)
             target_file = book_illustrations_dir / f"{scene.scene_id}_{cache_key}.png"
             cache_file = self.cache_dir / f"art_{cache_key}.png"
             if not target_file.exists() and not cache_file.exists():
@@ -456,22 +462,35 @@ class IllustrationManager:
         try:
             for idx, scene in enumerate(scenes, start=1):
                 i = idx - 1
-                if not scene.prompt:
+
+                # 1. 确保正面与负面提示词安全就绪
+                # 无论场景来自 Step A 异步预生成，还是现场实时生成，均具备 100% 完整的提示词与负面约束
+                positive_prompt = scene.prompt or ""
+                negative_prompt = getattr(scene, "negative_prompt", "") or ""
+
+                if not positive_prompt:
                     hist_texts = None
                     if self.context_scenes > 0 and i > 0:
                         h_start = max(0, i - self.context_scenes)
                         hist_texts = [scenes[k].full_text for k in range(h_start, i)]
 
-                    # 1. 提炼提示词 (注入前 M 个场景的滚动上下文)
+                    # 现场提炼提示词 (注入前 M 个场景的滚动上下文)
                     prompt_info = self.prompt_generator.build_prompt(
                         scene.full_text,
                         style_key=chosen_style,
                         history_texts=hist_texts
                     )
-                    scene.prompt = prompt_info["positive_prompt"]
+                    positive_prompt = prompt_info["positive_prompt"]
+                    negative_prompt = prompt_info.get("negative_prompt", DEFAULT_NEGATIVE_PROMPT)
+                    scene.prompt = positive_prompt
+                    if hasattr(scene, "negative_prompt"):
+                        scene.negative_prompt = negative_prompt
+
+                if not negative_prompt:
+                    negative_prompt = DEFAULT_NEGATIVE_PROMPT
 
                 # 2. 检查缓存 (基于目标分辨率与提示词做哈希)
-                cache_key = self._compute_cache_key(scene.prompt, chosen_style, self.target_width, self.target_height)
+                cache_key = self._compute_cache_key(positive_prompt, chosen_style, self.target_width, self.target_height)
                 cache_file = self.cache_dir / f"art_{cache_key}.png"
                 target_file = book_illustrations_dir / f"{scene.scene_id}_{cache_key}.png"
 
@@ -501,8 +520,8 @@ class IllustrationManager:
 
                 gen_cmd = {
                     "action": "generate",
-                    "prompt": prompt_info["positive_prompt"],
-                    "negative_prompt": prompt_info["negative_prompt"],
+                    "prompt": positive_prompt,
+                    "negative_prompt": negative_prompt,
                     "output_path": str(target_file),
                     "width": self.base_width,
                     "height": self.base_height,

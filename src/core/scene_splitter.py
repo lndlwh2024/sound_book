@@ -40,6 +40,7 @@ class ScenePlan:
     full_text: str
     unit_ids: List[str] = field(default_factory=list)
     prompt: str = ""
+    negative_prompt: str = ""
     image_path: Optional[str] = None
     first_sentence: str = ""
 
@@ -56,6 +57,7 @@ class ScenePlan:
             "full_text": self.full_text,
             "unit_ids": self.unit_ids,
             "prompt": self.prompt,
+            "negative_prompt": self.negative_prompt,
             "image_path": self.image_path,
             "first_sentence": self.first_sentence,
         }

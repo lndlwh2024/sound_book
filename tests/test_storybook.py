@@ -405,3 +405,71 @@ def test_illustration_manager_pregenerate_prompts_flow():
     assert progress_records[0][0] == 1
     assert "白衣书生" in progress_records[0][2]
 
+
+def test_illustration_manager_with_pregenerated_prompts(tmp_path):
+    """测试场景已具备预生成的 prompt 时，调用 prepare_scene_illustrations 绝不抛出 UnboundLocalError 并正确透传负向词"""
+    import json
+    from unittest.mock import MagicMock
+    from PIL import Image
+    from src.ai.illustration_manager import IllustrationManager
+    from src.core.scene_splitter import ScenePlan
+
+    cache_dir = tmp_path / "cache"
+    book_illus_dir = tmp_path / "book_illus"
+
+    im = IllustrationManager(
+        cache_dir=cache_dir,
+        default_style="chinese_ink",
+        aspect_ratio="portrait"
+    )
+
+    # 构造一个已经预提炼好 prompt 的分镜（模拟 Step A 预生成产物）
+    scene = ScenePlan(
+        scene_index=1,
+        scene_id="scene_001",
+        start_unit_index=0,
+        end_unit_index=2,
+        start_time=0.0,
+        end_time=5.0,
+        duration=5.0,
+        full_text="长河落日圆，大漠孤烟直。",
+        prompt="A breathtaking cinematic landscape of desert at sunset",
+        negative_prompt="low quality, deformed, extra fingers"
+    )
+
+    # Mock SD Worker 进程交互
+    mock_process = MagicMock()
+    mock_process.poll.return_value = None
+
+    sent_commands = []
+    def fake_stdin_write(data):
+        cmd = json.loads(data.strip())
+        sent_commands.append(cmd)
+        # 模拟 SD Worker 绘制输出图片
+        out_p = Path(cmd["output_path"])
+        out_p.parent.mkdir(parents=True, exist_ok=True)
+        fake_img = Image.new("RGB", (512, 768), color=(100, 150, 200))
+        fake_img.save(str(out_p))
+
+    mock_process.stdin.write = MagicMock(side_effect=fake_stdin_write)
+    mock_process.stdout.readline.return_value = json.dumps({"success": True}) + "\n"
+
+    im._ensure_worker_started = MagicMock(return_value=(True, ""))
+    im._worker_process = mock_process
+
+    # 执行绘图流程，绝不能发生 UnboundLocalError: cannot access local variable 'prompt_info'
+    results = im.prepare_scene_illustrations(
+        scenes=[scene],
+        book_illustrations_dir=book_illus_dir,
+        style="chinese_ink"
+    )
+
+    assert len(results) == 1
+    assert results[0].image_path is not None
+    assert Path(results[0].image_path).exists()
+    gen_cmds = [c for c in sent_commands if c.get("action") == "generate"]
+    assert len(gen_cmds) == 1
+    assert gen_cmds[0]["prompt"] == "A breathtaking cinematic landscape of desert at sunset"
+    assert gen_cmds[0]["negative_prompt"] == "low quality, deformed, extra fingers"
+    assert any(c.get("action") == "stop" for c in sent_commands)
+
