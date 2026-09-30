@@ -360,4 +360,21 @@ def test_main_window_dual_mode_status_display(qapp):
     assert "13px" in window.lbl_status.styleSheet()
 
 
+def test_model_ready_button_interaction(qapp, monkeypatch):
+    """测试 TTS 引擎右侧模型就绪与下载按钮的 UI 及点击响应"""
+    window = MainWindow()
+    assert hasattr(window, "btn_model_ready")
+    assert window.btn_model_ready is not None
+
+    called = []
+    monkeypatch.setattr(window.bridge, "start_model_download", lambda: called.append(True))
+
+    window._on_download_models_clicked()
+    assert len(called) == 1
+    assert "下载中" in window.btn_model_ready.text()
+    assert window.btn_model_ready.isEnabled() is False
+    assert "【模型下载】" in window._raw_status_text
+
+
+
 

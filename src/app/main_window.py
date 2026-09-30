@@ -607,7 +607,7 @@ class MainWindow(QMainWindow):
     def __init__(self, bridge: Optional[TaskManagerBridge] = None):
         super().__init__()
         self.bridge = bridge or TaskManagerBridge()
-        self.setWindowTitle("书声 (ShuSheng) v3.3.11 - 自动化有声视频生产工具 (小人书 AI 连环画增强版)")
+        self.setWindowTitle("书声 (ShuSheng) v3.3.12 - 自动化有声视频生产工具 (小人书 AI 连环画增强版)")
         self._raw_status_text = "空闲就绪 (IDLE)"
         self._is_producing = False
         self._is_dual_mode = False
@@ -2115,8 +2115,13 @@ class MainWindow(QMainWindow):
                 padding: 3px 10px;
             }
         """)
-        self.status_bar.set_single_status("【模型下载】正在初始化首选大模型镜像下载器...")
-        self.bridge.start_model_download()
+        try:
+            self._update_status_display("【模型下载】正在初始化首选大模型镜像下载器...")
+            self.bridge.start_model_download()
+        except Exception as e:
+            logger.error(f"启动模型下载工作线程失败: {e}", exc_info=True)
+            self._update_status_display(f"【模型下载】启动失败: {e}")
+            self._refresh_model_ready_btn()
 
     def _on_model_download_completed(self, success: bool, msg: str):
         """模型下载任务完成回调"""

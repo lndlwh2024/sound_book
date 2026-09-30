@@ -113,7 +113,34 @@ class ModelManager:
             if f.is_file() and f.suffix in weights_extensions and f.stat().st_size > 10 * 1024 * 1024:
                 return True
 
-        return False
+    @classmethod
+    def cleanup_incomplete_downloads(cls) -> Tuple[int, int]:
+        """
+        全量扫描并清理 HuggingFace 缓存目录中所有历史遗留的 .incomplete 临时未完成碎片。
+        【为什么这样设计】
+        避免因为历史进程被强杀或超时残留数 GB 的临时无用垃圾文件，
+        返回 (清理文件数量, 释放的总字节数)。
+        """
+        hub_dir = Path.home() / ".cache" / "huggingface" / "hub"
+        if not hub_dir.exists():
+            return 0, 0
+
+        cleaned_count = 0
+        cleaned_bytes = 0
+
+        for f in hub_dir.glob("**/blobs/*.incomplete"):
+            try:
+                if f.is_file() and not f.name.endswith(".persistent.incomplete"):
+                    sz = f.stat().st_size
+                    f.unlink()
+                    cleaned_count += 1
+                    cleaned_bytes += sz
+            except Exception as e:
+                logger.debug(f"清理临时文件失败 {f}: {e}")
+
+        if cleaned_count > 0:
+            logger.info(f"已清理 {cleaned_count} 个历史未完成下载碎片，释放空间: {cleaned_bytes / (1024*1024):.1f} MB")
+        return cleaned_count, cleaned_bytes
 
     @classmethod
     def is_model_ready(cls, backend: str, config: Optional[dict] = None) -> bool:

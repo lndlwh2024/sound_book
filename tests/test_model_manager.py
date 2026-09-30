@@ -110,3 +110,30 @@ def test_download_core_model_invalid_backend():
     with pytest.raises(ValueError) as exc_info:
         ModelManager.download_core_model("invalid_model")
     assert "未知模型标识" in str(exc_info.value)
+
+
+def test_cleanup_incomplete_downloads(tmp_path, monkeypatch):
+    """测试清理历史遗留未完成下载碎片"""
+    fake_home = tmp_path / "user_home"
+    blobs_dir = fake_home / ".cache" / "huggingface" / "hub" / "models--test" / "blobs"
+    blobs_dir.mkdir(parents=True, exist_ok=True)
+
+    # 1. 模拟历史随机 uuid 的垃圾碎片
+    trash1 = blobs_dir / "abc.12345678.incomplete"
+    trash1.write_bytes(b"x" * 1024)
+    trash2 = blobs_dir / "def.87654321.incomplete"
+    trash2.write_bytes(b"y" * 2048)
+
+    # 2. 模拟我们自己的持久断点续传文件（不应被常规清理误杀）
+    keep = blobs_dir / "ghi.persistent.incomplete"
+    keep.write_bytes(b"z" * 512)
+
+    monkeypatch.setattr(Path, "home", lambda: fake_home)
+
+    cnt, bytes_cleaned = ModelManager.cleanup_incomplete_downloads()
+    assert cnt == 2
+    assert bytes_cleaned == 3072
+    assert not trash1.exists()
+    assert not trash2.exists()
+    assert keep.exists()
+
