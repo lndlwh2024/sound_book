@@ -201,3 +201,24 @@ def test_enhanced_pinyin_disambiguation_hook():
         assert expected in s, f"【多音字断言失败】{phrase} 预期包含 {expected}，实际为 {s}"
 
 
+def test_normalize_list_alpha_items():
+    """测试英文单字母列表序号（a. b. c. 等）的口语化规范，杜绝辅音声母吞字"""
+    t1 = "a. 世界上最大的汽车公司"
+    assert normalize_text(t1).startswith("A，")
+
+    t2 = "买入下列公司：a.世界上最大的汽车公司（通用汽车）；b.世界上最大的石油公司（新泽西标准石油）；"
+    norm2 = normalize_text(t2)
+    assert "A，" in norm2
+    assert "B，" in norm2
+    assert "a." not in norm2
+    assert "b." not in norm2
+
+    # 保护非列表单字母与英文缩写不被误伤
+    t3 = "apple is red"
+    assert normalize_text(t3) == "apple is red"
+    
+    t4 = "i.e. 即也就是说"
+    assert "i.e." in normalize_text(t4)
+
+
+

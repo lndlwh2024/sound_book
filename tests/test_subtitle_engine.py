@@ -99,3 +99,29 @@ def test_subtitle_temporal_slicing_for_long_sentences():
         assert len(it.text) <= 20
         assert it.duration > 0.5
 
+
+def test_thousand_separator_and_time_protection():
+    """测试千分位数字逗号与时间冒号在长句微断句时不被错误截断"""
+    engine = NativeTTSSubtitleEngine()
+    
+    # 案例 1: 包含 100,000 美元的长句
+    t1 = "假如你今年1 月1 日拿出100,000 美元，把资金平均分成8 份，买入下列公司。"
+    segs1 = engine.slice_text_into_subtitle_segments(t1, max_chars=18)
+    assert any("100,000 美元" in s for s in segs1)
+    assert not any(s.endswith("100,") for s in segs1)
+    assert not any(s.startswith("000") for s in segs1)
+
+    # 案例 2: 包含 83,370 美元的长句
+    t2 = "你的投资组合的总资产（包括股息）是83,370 美元，亏损16.6%。"
+    segs2 = engine.slice_text_into_subtitle_segments(t2, max_chars=18)
+    assert any("83,370 美元" in s for s in segs2)
+    assert not any(s.endswith("83,") for s in segs2)
+    assert not any(s.startswith("370") for s in segs2)
+
+    # 案例 3: 包含时间冒号 14:30 与比例 70:30 的长句
+    t3 = "全员投资决策大会将于下午14:30 正式召开，重点讨论70:30 的股权比例分配方案。"
+    segs3 = engine.slice_text_into_subtitle_segments(t3, max_chars=18)
+    assert any("14:30" in s for s in segs3)
+    assert any("70:30" in s for s in segs3)
+
+

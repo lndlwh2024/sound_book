@@ -119,11 +119,16 @@ class NativeTTSSubtitleEngine(SubtitleAligner):
         字幕表现层则在此将长句切分为适合视频观赏的单行短字幕，
         避免大段文字糊屏或多行文字重叠，实现逐句跟读的高级视觉质感。
         """
-        text = text.strip()
-        if len(text) <= max_chars or not any(punc in text for punc in "，,、；;：:"):
+        # 【为什么这样设计】
+        # 1. 切分标点支持：中文逗号/顿号/分号/冒号，以及英文非数字间标点；
+        # 2. 数字千分位保护与时间保护：使用负向前后查找 (?<!\d),(?!\d) 与 (?<!\d):(?!\d)，
+        #    严禁将处于数字内部的千分位逗号（如 100,000、83,370）和时间冒号（如 14:30）切碎，
+        #    彻底杜绝字幕中出现“83,”与“370”脱节的严重语病。
+        split_punc_re = r'(?:[，、；;：]|(?<!\d),(?!\d)|(?<!\d):(?!\d))'
+        if len(text) <= max_chars or not re.search(split_punc_re, text):
             return [text] if text else []
 
-        parts = re.split(r'([，,、；;：:]+)', text)
+        parts = re.split(rf'({split_punc_re}+)', text)
         segments = []
         cur = ""
         for i in range(0, len(parts), 2):
