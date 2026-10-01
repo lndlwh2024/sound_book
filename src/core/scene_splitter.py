@@ -220,29 +220,58 @@ class SceneSplitter:
             return []
 
         target_step = max(1, paragraphs_per_scene or self.paragraphs_per_scene)
+        # 【为什么这样设计】
+        # 彻底根治“有的画面4~5秒，有的画面1秒闪现”的缺陷：
+        # 普通口语朗读速率约为 3.5~4.5 字/秒。若一个分镜仅有短短几字或单句短语，画面停留仅 1~2 秒就闪烁换镜。
+        # 因此引入智能双门槛聚类：
+        # 1. 满足目标句数 (target_step，默认 5 句) 且总字数达到 min_chars_per_scene (50字，约12~15秒)；
+        # 2. 对末尾剩余切片，若剩余不足 30 字或不足 3 句，强制并入最后一个分镜，杜绝末尾孤儿分镜闪现！
+        min_chars_per_scene = 50
         scenes: List[ScenePlan] = []
         scene_idx = 1
         total_units = len(units)
 
-        for start_idx in range(0, total_units, target_step):
-            end_idx = min(start_idx + target_step - 1, total_units - 1)
-            group_units = units[start_idx:end_idx + 1]
+        cursor = 0
+        while cursor < total_units:
+            start_idx = cursor
+            current_texts: List[str] = []
+            current_uids: List[str] = []
+            current_chars = 0
 
-            texts = []
-            u_ids = []
-            for idx_in_grp, u in enumerate(group_units):
-                cur_idx = start_idx + idx_in_grp
+            while cursor < total_units:
+                u = units[cursor]
                 if isinstance(u, dict):
-                    t = u.get("text", "")
-                    uid = u.get("unit_id", f"unit_{cur_idx:04d}")
+                    t = u.get("text", "").strip()
+                    uid = u.get("unit_id", f"unit_{cursor:04d}")
                 else:
-                    t = getattr(u, "text", "")
-                    uid = getattr(u, "unit_id", f"unit_{cur_idx:04d}")
-                texts.append(t.strip())
-                u_ids.append(uid)
+                    t = getattr(u, "text", "").strip()
+                    uid = getattr(u, "unit_id", f"unit_{cursor:04d}")
 
-            first_sent = texts[0] if texts else ""
-            full_txt = " ".join(texts)
+                current_texts.append(t)
+                current_uids.append(uid)
+                current_chars += len(t)
+                cursor += 1
+
+                # 满足基本句数门槛，且总字数达到时长保底标准，或者已到达全部文本末尾
+                unit_count = cursor - start_idx
+                if unit_count >= target_step and current_chars >= min_chars_per_scene:
+                    # 如果剩余未处理切片极少 (<= 2 句 或 < 25 字)，直接一并吃进本分镜，避免生成超短闪现分镜
+                    rem_units = total_units - cursor
+                    if rem_units > 0:
+                        rem_chars = sum(len(units[k].get("text", "").strip() if isinstance(units[k], dict) else getattr(units[k], "text", "").strip()) for k in range(cursor, total_units))
+                        if rem_units <= 2 or rem_chars < 25:
+                            for k in range(cursor, total_units):
+                                rem_u = units[k]
+                                rt = rem_u.get("text", "").strip() if isinstance(rem_u, dict) else getattr(rem_u, "text", "").strip()
+                                ruid = rem_u.get("unit_id", f"unit_{k:04d}") if isinstance(rem_u, dict) else getattr(rem_u, "unit_id", f"unit_{k:04d}")
+                                current_texts.append(rt)
+                                current_uids.append(ruid)
+                            cursor = total_units
+                    break
+
+            end_idx = cursor - 1
+            first_sent = current_texts[0] if current_texts else ""
+            full_txt = " ".join(current_texts)
 
             scene = ScenePlan(
                 scene_index=scene_idx,
@@ -253,13 +282,13 @@ class SceneSplitter:
                 end_time=0.0,
                 duration=0.0,
                 full_text=full_txt,
-                unit_ids=u_ids,
+                unit_ids=current_uids,
                 first_sentence=first_sent
             )
             scenes.append(scene)
             scene_idx += 1
 
-        logger.info(f"[Step A 文本分镜聚类] 已将 {total_units} 个文本切片预划分为 {len(scenes)} 个分镜场景")
+        logger.info(f"[Step A 文本分镜聚类] 已将 {total_units} 个文本切片预划分为 {len(scenes)} 个高质量分镜场景 (时长平滑聚类)")
         return scenes
 
     def bind_timestamps(

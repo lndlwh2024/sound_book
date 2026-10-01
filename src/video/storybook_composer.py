@@ -55,12 +55,26 @@ class StorybookComposer:
         script_path.parent.mkdir(parents=True, exist_ok=True)
 
         lines = ["ffconcat version 1.0\n"]
-        for s in scenes:
+        total_s = len(scenes)
+        # 【为什么这样设计】
+        # 彻底解决字幕与画面对不上、时间轴发生漂移的顽疾：
+        # 单句语音之间存在微小的停顿静音（0.3s~0.5s）。若纯粹按单句发音时长 (end_time - start_time) 累加，
+        # concat demuxer 会忽略掉停顿时间，导致后续场景画面严重提前切镜，音画严重脱节！
+        # 必须采用差分时间轴：第 i 幕图片的实际展示时长 = 第 i+1 幕的起始时间 - 第 i 幕的起始时间！
+        for i, s in enumerate(scenes):
             img = Path(s.image_path).resolve() if s.image_path else Path("placeholder.png").resolve()
             # 转义为正斜杠格式，消除 Windows 盘符路径反斜杠报错
             clean_path = str(img).replace("\\", "/")
             lines.append(f"file '{clean_path}'\n")
-            lines.append(f"duration {s.duration:.3f}\n")
+
+            if i < total_s - 1:
+                next_start = scenes[i + 1].start_time
+                cur_start = s.start_time
+                disp_dur = max(1.0, next_start - cur_start)
+            else:
+                disp_dur = max(1.0, s.duration)
+
+            lines.append(f"duration {disp_dur:.3f}\n")
 
         # FFmpeg concat demuxer 规范要求末尾追加最后一张图像以封口
         if scenes:
@@ -125,14 +139,16 @@ class StorybookComposer:
         if self.nvenc_available:
             cmd.extend([
                 "-c:v", "h264_nvenc",
-                "-preset", "p4",
-                "-b:v", "3500k"
+                "-preset", "p5",
+                "-b:v", "8500k",
+                "-maxrate", "12000k",
+                "-bufsize", "16000k"
             ])
         else:
             cmd.extend([
                 "-c:v", "libx264",
                 "-preset", "medium",
-                "-crf", "23"
+                "-crf", "18"
             ])
 
         cmd.append(str(output_mp4_path.absolute()))

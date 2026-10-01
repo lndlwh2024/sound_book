@@ -120,9 +120,9 @@ class StorybookLayoutEngine:
         H_txt = self.spec.text_height
         border_y = H_img - self.spec.border_height
 
-        # 1. 顶部图片流缩放与居中裁切
+        # 1. 顶部图片流缩放与居中裁切 (启用 Lanczos 高阶插值算法，保留水墨笔触与超分细节)
         img_filter = (
-            f"[0:v]scale={W}:{H_img}:force_original_aspect_ratio=increase,"
+            f"[0:v]scale={W}:{H_img}:force_original_aspect_ratio=increase:flags=lanczos,"
             f"crop={W}:{H_img}[img];"
         )
 

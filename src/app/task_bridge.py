@@ -375,59 +375,10 @@ class ProductionWorker(QThread):
             cur_tts_text = f"【4/12 语音合成 (GPU)】第 {ep_order:02d} 集 · 正在检查已有音频切片..."
             cur_prompt_text = ""
 
-            # 【资产自动继承机制】
-            # 彻底解决用户断点重启丢失 59 个切片音频从头开始的顽疾：
-            # 若当前工程目录下切片尚未就绪，自动扫描 books/ 目录下历史 book_* 目录（如上一轮的 book_569857 等），
-            # 秒级自动软迁移已生成的切片音频 (unit_*.wav)、混音文件和清单，实现 100% 真正的无感断点秒级复用！
+            # 【工程切片目录准备】
+            # 基于确定性 MD5 哈希的 book_dir，断点续跑 100% 精确命中已有音频切片
             ep_units_dir = book_dir / f"ep_{ep_order:02d}_units"
             ep_units_dir.mkdir(parents=True, exist_ok=True)
-            existing_target_wavs = [w for w in ep_units_dir.glob("unit_*.wav") if w.stat().st_size > 1000]
-
-            books_root = book_dir.parent
-            if books_root.exists() and len(existing_target_wavs) < len(ep_units):
-                candidate_dirs = [
-                    d for d in books_root.iterdir()
-                    if d.is_dir() and d.name.startswith("book_") and d.resolve() != book_dir.resolve()
-                ]
-                candidate_dirs.sort(key=lambda d: d.stat().st_mtime, reverse=True)
-                import shutil
-                for cand in candidate_dirs:
-                    cand_units_dir = cand / f"ep_{ep_order:02d}_units"
-                    if cand_units_dir.exists():
-                        cand_wavs = [w for w in cand_units_dir.glob("unit_*.wav") if w.stat().st_size > 1000]
-                        if len(cand_wavs) > len(existing_target_wavs):
-                            logger.info(f"【历史资产自动继承】从历史工程 {cand.name} 自动继承 {len(cand_wavs)} 个音频切片到 {book_dir.name}...")
-                            for cw in cand_wavs:
-                                tw = ep_units_dir / cw.name
-                                if not tw.exists() or tw.stat().st_size <= 1000:
-                                    try:
-                                        shutil.copy2(cw, tw)
-                                    except Exception:
-                                        pass
-
-                            # 顺便继承混音、人声、字幕及 manifests
-                            for extra_name in [f"episode_{ep_order:02d}_mixed.m4a", f"episode_{ep_order:02d}_voice.wav", f"episode_{ep_order:02d}.ass"]:
-                                cf = cand / extra_name
-                                tf = book_dir / extra_name
-                                if cf.exists() and cf.stat().st_size > 1000 and not tf.exists():
-                                    try:
-                                        shutil.copy2(cf, tf)
-                                        logger.info(f"【历史资产自动继承】成功继承文件: {extra_name}")
-                                    except Exception:
-                                        pass
-
-                            cm_dir = cand / "manifests"
-                            tm_dir = book_dir / "manifests"
-                            if cm_dir.exists():
-                                tm_dir.mkdir(parents=True, exist_ok=True)
-                                for mf in cm_dir.glob("*.json"):
-                                    t_mf = tm_dir / mf.name
-                                    if not t_mf.exists() and mf.stat().st_size > 100:
-                                        try:
-                                            shutil.copy2(mf, t_mf)
-                                        except Exception:
-                                            pass
-                            break
 
             if storybook_enabled and ep_units:
                 scene_splitter = SceneSplitter(paragraphs_per_scene=paragraphs_per_scene)
@@ -590,48 +541,48 @@ class ProductionWorker(QThread):
                                 from ..audio.ffmpeg_utils import get_audio_info
                                 info = get_audio_info(u_wav)
                                 u.audio_duration = info.get("duration", max(1.5, len(u.text) * 0.2))
-                        unit_wavs.append(u_wav)
+                            unit_wavs.append(u_wav)
 
-                        # 【GPU 硬件温控安全挂起与自愈机制】
-                        # 【为什么这样设计】
-                        # 严格落实用户三大温控准则：
-                        # 1. 触发上限后必须等待当前语音切片（Unit）完整落盘，再进入挂起，杜绝半截破损音频；
-                        # 2. 挂起冷却期间，绝不中断整集上下文（处于当前集内循环），无缝衔接下一句，杜绝把一集中断成两半；
-                        # 3. 必须同时满足“冷却时间达到最小冷却时间”与“当前温度降至复工温度以下”，方可自动唤醒恢复流水线！
-                        if gpu_protect_enabled:
-                            cur_temp = _query_gpu_temperature()
-                            if cur_temp is not None and cur_temp >= gpu_temp_limit:
-                                logger.warning(
-                                    f"GPU 核心温度达到 {cur_temp:.1f}°C (>= 上限 {gpu_temp_limit}°C)，"
-                                    f"单句 #{idx+1} 音频已完整落盘，执行安全挂起冷却 (至少 {gpu_cooling_minutes} 分钟且直至 <= {gpu_temp_resume}°C)..."
-                                )
-                                self.sig_status_changed.emit("COOLING")
-                                cool_start_time = time.time()
-                                min_cool_secs = gpu_cooling_minutes * 60.0
-
-                                while not self._pause_requested:
-                                    time.sleep(3)
-                                    now_temp = _query_gpu_temperature() or 0.0
-                                    elapsed_cool = time.time() - cool_start_time
-                                    remain_cool_secs = max(0.0, min_cool_secs - elapsed_cool)
-
-                                    temp_str = f"{now_temp:.1f}°C" if now_temp > 0 else "N/A"
-                                    status_msg = (
-                                        f"【GPU降温保护中】核心温: {temp_str} (目标<={gpu_temp_resume}°C) | "
-                                        f"强制冷却剩余: {int(remain_cool_secs)}秒"
+                            # 【GPU 硬件温控安全挂起与自愈机制】
+                            # 【为什么这样设计】
+                            # 严格落实用户三大温控准则：
+                            # 1. 触发上限后必须等待当前语音切片（Unit）完整落盘，再进入挂起，杜绝半截破损音频；
+                            # 2. 挂起冷却期间，绝不中断整集上下文（处于当前集内循环），无缝衔接下一句，杜绝把一集中断成两半；
+                            # 3. 必须同时满足“冷却时间达到最小冷却时间”与“当前温度降至复工温度以下”，方可自动唤醒恢复流水线！
+                            if gpu_protect_enabled:
+                                cur_temp = _query_gpu_temperature()
+                                if cur_temp is not None and cur_temp >= gpu_temp_limit:
+                                    logger.warning(
+                                        f"GPU 核心温度达到 {cur_temp:.1f}°C (>= 上限 {gpu_temp_limit}°C)，"
+                                        f"单句 #{idx+1} 音频已完整落盘，执行安全挂起冷却 (至少 {gpu_cooling_minutes} 分钟且直至 <= {gpu_temp_resume}°C)..."
                                     )
-                                    self.sig_progress_updated.emit(-1.0, status_msg)
+                                    self.sig_status_changed.emit("COOLING")
+                                    cool_start_time = time.time()
+                                    min_cool_secs = gpu_cooling_minutes * 60.0
 
-                                    if elapsed_cool >= min_cool_secs and (now_temp <= 0 or now_temp <= gpu_temp_resume):
-                                        logger.info(
-                                            f"GPU 温度已降至 {temp_str} 且满足最小冷却时长 {gpu_cooling_minutes} 分钟，"
-                                            f"自动无缝恢复第 {ep_order:02d} 集语音合成！"
+                                    while not self._pause_requested:
+                                        time.sleep(3)
+                                        now_temp = _query_gpu_temperature() or 0.0
+                                        elapsed_cool = time.time() - cool_start_time
+                                        remain_cool_secs = max(0.0, min_cool_secs - elapsed_cool)
+
+                                        temp_str = f"{now_temp:.1f}°C" if now_temp > 0 else "N/A"
+                                        status_msg = (
+                                            f"【GPU降温保护中】核心温: {temp_str} (目标<={gpu_temp_resume}°C) | "
+                                            f"强制冷却剩余: {int(remain_cool_secs)}秒"
                                         )
-                                        self.sig_status_changed.emit("TTS_GENERATING")
-                                        break
+                                        self.sig_progress_updated.emit(-1.0, status_msg)
 
-                                if self._pause_requested:
-                                    break
+                                        if elapsed_cool >= min_cool_secs and (now_temp <= 0 or now_temp <= gpu_temp_resume):
+                                            logger.info(
+                                                f"GPU 温度已降至 {temp_str} 且满足最小冷却时长 {gpu_cooling_minutes} 分钟，"
+                                                f"自动无缝恢复第 {ep_order:02d} 集语音合成！"
+                                            )
+                                            self.sig_status_changed.emit("TTS_GENERATING")
+                                            break
+
+                                    if self._pause_requested:
+                                        break
                     finally:
                         tts_backend.stop_session()
                         if prompt_thread and prompt_thread.is_alive():
@@ -677,6 +628,15 @@ class ProductionWorker(QThread):
             # 坚决贯彻“零假冒、零静默兜底”的安全原则。若任何语音片段未能成功生成，
             # 或拼接后质检发现全静音/时长异常，严禁伪造静音糊弄下游混音与视频，必须立即报错熔断。
             ep_voice_tmp = book_dir / f"episode_{ep_order:02d}_voice.wav"
+            # 【零缺失强校验】切片总数必须 100% 严格匹配本集句数，绝不允许漏单句拼出残损音频
+            if len(unit_wavs) != len(ep_units):
+                missing_cnt = len(ep_units) - len(unit_wavs)
+                err_msg = f"第 {ep_order:02d} 集语音切片严重缺失：期望 {len(ep_units)} 句，实际仅收集到 {len(unit_wavs)} 句！"
+                logger.error(err_msg)
+                self.sig_status_changed.emit("ERROR")
+                self.sig_error.emit("TTS_SYNTHESIS_FAILED", err_msg)
+                return
+
             if unit_wavs and all(w.exists() for w in unit_wavs):
                 concat_wavs(unit_wavs, ep_voice_tmp)
                 qc = AudioQC()
@@ -762,8 +722,16 @@ class ProductionWorker(QThread):
                     self.sig_progress_updated.emit(86.0, f"【8/12 分辨率增强】已完成场景原画 1024x1536 智能超分辨率增强...")
 
                     # 节点 9: 智能混音 (AUDIO_MIXING)
+                    from ..audio.ffmpeg_utils import get_audio_info
+                    is_mix_valid = False
                     if ep_audio_path.exists() and ep_audio_path.stat().st_size > 10240:
-                        logger.info(f"第 {ep_order:02d} 集混音音频已就绪 ({ep_audio_path.name})，秒级复用！")
+                        mixed_info = get_audio_info(ep_audio_path)
+                        mixed_dur = mixed_info.get("duration", 0.0)
+                        if abs(mixed_dur - duration_secs) <= 5.0:
+                            is_mix_valid = True
+
+                    if is_mix_valid:
+                        logger.info(f"第 {ep_order:02d} 集混音音频已就绪且完整 ({ep_audio_path.name})，秒级复用！")
                         self.sig_progress_updated.emit(88.0, f"【9/12 智能混音】混音音频已就绪，秒级跳过！")
                     else:
                         self.sig_status_changed.emit("AUDIO_MIXING")
