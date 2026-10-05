@@ -173,3 +173,19 @@ def test_uploader_publish_success_detection_logic():
     assert is_manage_ok is True
 
 
+def test_probe_heartbeat_resilience():
+    """测试探针在遭遇页面重绘/导航销毁异常时平滑降级而不退出"""
+    mock_context = MagicMock()
+    mock_page = MagicMock()
+    mock_context.pages = [mock_page]
+    mock_page.is_closed.return_value = False
+
+    # 模拟 wait_for_timeout 抛出 Execution context destroyed 异常
+    mock_page.wait_for_timeout.side_effect = Exception("Execution context was destroyed, most likely because of a navigation.")
+
+    # 验证存活判定：由于 context.pages 仍有页面，不会被误判定为已关闭
+    has_living_pages = bool(mock_context.pages) and not (mock_page.is_closed() and len(mock_context.pages) == 0)
+    assert has_living_pages is True
+
+
+

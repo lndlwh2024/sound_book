@@ -164,8 +164,11 @@ class DouyinDOMProbe:
 
                 # 探测用户是否触发了上传或点开了合集
                 while time.time() - start_time < timeout_secs:
-                    if page.is_closed():
+                    if not context.pages or (page.is_closed() and len(context.pages) == 0):
                         break
+
+                    if page.is_closed() and context.pages:
+                        page = context.pages[0]
 
                     # 当检测到页面有文本输入框或出现“合集”字样时，自动周期性记录最佳快照
                     try:
@@ -173,21 +176,25 @@ class DouyinDOMProbe:
                         has_collection = page.locator("text=合集").count() > 0
                         if has_editor or has_collection:
                             # 抓取当前快照
-                            json_p, img_p = self.capture_dom_report(page)
+                            active_page = context.pages[-1] if context.pages else page
+                            json_p, img_p = self.capture_dom_report(active_page)
                             captured = True
                             logger.info(f"已成功捕获当前表单与合集 DOM 报告！")
                             break
                     except Exception:
                         pass
 
-                    # 使用 page.wait_for_timeout 维持 Playwright 内部消息泵轮询
+                    # 设计说明：混合心跳保活机制。
+                    # 遇到 SPA 重绘或路由跳转异常时平滑降级为 time.sleep，严禁 break 导致浏览器闪退
                     try:
-                        page.wait_for_timeout(3000)
-                    except Exception:
-                        break
+                        page.wait_for_timeout(2000)
+                    except Exception as we:
+                        logger.debug(f"探针轮询心跳平滑降级: {we}")
+                        time.sleep(1.0)
 
-                if not captured and not page.is_closed():
-                    json_p, img_p = self.capture_dom_report(page)
+                if not captured and context.pages:
+                    active_page = context.pages[-1] if context.pages else page
+                    json_p, img_p = self.capture_dom_report(active_page)
                     captured = True
 
                 context.close()

@@ -86,31 +86,45 @@ class DouyinProbeWorker(QThread):
                 page = context.new_page() if not context.pages else context.pages[0]
                 DouyinBrowserManager.inject_stealth(page)
                 # 仅将页面前端诊断信息记录到调试日志，避免将非致命前端打点重试误抛给 sig_error 导致弹窗提示错误
-                DouyinBrowserManager.setup_page_diagnostics(page, lambda msg: logger.debug(f"[探针页面诊断] {msg}"))
+                logger.info(f"DOM 探针正在打开抖音上传页: {DOUYIN_UPLOAD_URL}")
+                try:
+                    page.goto(DOUYIN_UPLOAD_URL, wait_until="domcontentloaded", timeout=60000)
+                except Exception as ge:
+                    logger.warning(f"探针打开页面初次加载提示: {ge}，保持窗口供用户继续操作")
 
-                page.goto(DOUYIN_UPLOAD_URL, wait_until="domcontentloaded", timeout=60000)
                 self.sig_ready.emit()
 
                 while not self._close_event.is_set():
-                    if page.is_closed():
+                    # 浏览器存活核心标准：只要 context 中还有标签页存活，探针绝不退出
+                    if not context.pages or (page.is_closed() and len(context.pages) == 0):
+                        logger.info("用户已关闭所有探针浏览器窗口，探针安全退出")
                         break
+
+                    # 若主页面发生重定向跳转至新页面，自动追踪至最新的可用页面
+                    if page.is_closed() and context.pages:
+                        page = context.pages[0]
+                        logger.info(f"原页面已重定向/关闭，已自动追踪至活跃页面: {page.url}")
 
                     if self._capture_event.is_set():
                         self._capture_event.clear()
                         try:
-                            json_p, img_p = self.probe.capture_dom_report(page)
+                            # 采集前确保获取最新活跃页面
+                            active_page = context.pages[-1] if context.pages else page
+                            json_p, img_p = self.probe.capture_dom_report(active_page)
                             self.sig_captured.emit(str(json_p), str(img_p))
                         except Exception as ce:
+                            logger.error(f"DOM 采集抓取异常: {ce}")
                             self.sig_error.emit(f"采集抓取失败: {ce}")
 
-                    # 设计说明：使用 page.wait_for_timeout() 替代 time.sleep()。
-                    # Playwright 同步模式依赖主线程驱动底层的 Node.js IPC 消息泵。
-                    # 若使用 time.sleep 会阻塞消息管道导致抖音 Web Worker 切片上传无法收到放行指令挂起；
-                    # wait_for_timeout 能持续分发管道事件，确保页面切片上传与事件交互丝滑流畅。
+                    # 设计说明：混合防崩心跳泵机制。
+                    # 1. 优先尝试 page.wait_for_timeout(300) 驱动 Playwright 底层 IPC 消息泵，放行切片上传 Web Worker；
+                    # 2. 抖音上传页在 SPA 载入或路由重定向期间，会偶发触发 Execution context was destroyed 等异常；
+                    #    此时平滑降级使用 time.sleep(0.3) 渡过重构期，严禁 break 退出，确保浏览器绝对不闪退！
                     try:
                         page.wait_for_timeout(300)
-                    except Exception:
-                        break
+                    except Exception as we:
+                        logger.debug(f"探针心跳平滑降级 (导航重构期): {we}")
+                        time.sleep(0.3)
 
                 try:
                     context.close()
@@ -118,7 +132,9 @@ class DouyinProbeWorker(QThread):
                     pass
                 self.sig_closed.emit()
         except Exception as e:
-            self.sig_error.emit(f"DOM 探针启动异常: {e}")
+            err_msg = f"DOM 探针启动异常: {e}"
+            logger.error(err_msg, exc_info=True)
+            self.sig_error.emit(err_msg)
             self.sig_closed.emit()
 
 
@@ -216,12 +232,16 @@ class DomProbeDialog(QDialog):
         self.lbl_status.setText("🟢 浏览器已就绪！请在浏览器操作完成后点击下方按钮采集。")
         self.lbl_status.setStyleSheet("color: #48BB78; font-weight: bold; font-size: 13px;")
         self.btn_capture.setEnabled(True)
+        if hasattr(self.parent(), "_log"):
+            self.parent()._log("[探针] 浏览器与页面就绪，等待用户操作与采集")
 
     @Slot()
     def _on_capture_clicked(self):
         self.lbl_status.setText("⏳ 正在截屏并提取 DOM 结构...")
         self.lbl_status.setStyleSheet("color: #63B3ED; font-weight: bold; font-size: 13px;")
         self.btn_capture.setEnabled(False)
+        if hasattr(self.parent(), "_log"):
+            self.parent()._log("[探针] 用户下发立即采集指令，正在提取快照...")
         if self.worker:
             self.worker.request_capture()
 
@@ -236,18 +256,24 @@ class DomProbeDialog(QDialog):
         self.lbl_result.setText(f"已生成报告: {p_json.name}\n快照截图: {p_img.name}")
         self.btn_capture.setEnabled(True)
         self.btn_open_folder.setEnabled(True)
+        if hasattr(self.parent(), "_log"):
+            self.parent()._log(f"[探针] DOM 采集成功: {p_json.name} | 快照: {p_img.name}")
 
     @Slot(str)
     def _on_error(self, err: str):
         self.lbl_status.setText(f"❌ 采集异常: {err}")
         self.lbl_status.setStyleSheet("color: #E53E3E; font-weight: bold; font-size: 13px;")
         self.btn_capture.setEnabled(True)
+        if hasattr(self.parent(), "_log"):
+            self.parent()._log(f"[探针异常] {err}")
 
     @Slot()
     def _on_closed(self):
         self.lbl_status.setText("⚪ 探针浏览器已关闭。")
         self.lbl_status.setStyleSheet("color: #A0AEC0; font-size: 13px;")
         self.btn_capture.setEnabled(False)
+        if hasattr(self.parent(), "_log"):
+            self.parent()._log("[探针] 探针浏览器会话已结束")
 
     def _open_folder(self):
         if self._last_report_json:
