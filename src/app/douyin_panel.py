@@ -5,25 +5,256 @@
 """
 import os
 import subprocess
+import threading
 import time
 from pathlib import Path
-from typing import Optional, List
+from typing import Optional, List, Tuple
 
-from PySide6.QtCore import Qt, QTimer, Slot
+from PySide6.QtCore import Qt, QTimer, Slot, QThread, Signal
 from PySide6.QtGui import QColor, QFont
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QLineEdit,
     QCheckBox, QTableWidget, QTableWidgetItem, QHeaderView, QListWidget,
     QListWidgetItem, QGroupBox, QFileDialog, QMessageBox, QPlainTextEdit,
-    QSplitter, QFrame
+    QSplitter, QFrame, QDialog
 )
+from playwright.sync_api import sync_playwright
 
 from ..publisher.douyin.models import DouyinAccountConfig
 from ..publisher.douyin.config import DouyinAccountManager
-from ..publisher.douyin.browser import DouyinBrowserManager
+from ..publisher.douyin.browser import DouyinBrowserManager, DOUYIN_UPLOAD_URL
 from ..publisher.douyin.probe import DouyinDOMProbe
 from ..publisher.douyin.daemon import DouyinAutoDeployDaemon, is_file_fully_written, VIDEO_EXTS, AUDIO_EXTS, IMAGE_EXTS
 from ..publisher.douyin.uploader import DouyinUploader
+
+
+class DouyinLoginWorker(QThread):
+    """
+    扫码登录后台工作线程。
+    将 Playwright 浏览器的启动与扫码轮询移至子线程，杜绝主界面未响应假死。
+    """
+    sig_status = Signal(str)
+    sig_finished = Signal(bool, str)
+
+    def __init__(self, browser_mgr: DouyinBrowserManager, account: DouyinAccountConfig, parent=None):
+        super().__init__(parent)
+        self.browser_mgr = browser_mgr
+        self.account = account
+
+    def run(self):
+        try:
+            self.sig_status.emit(f"正在调起账号 [{self.account.account_name}] 的扫码登录浏览器...")
+            success, msg = self.browser_mgr.launch_interactive_login(self.account)
+            self.sig_finished.emit(success, msg)
+        except Exception as e:
+            self.sig_finished.emit(False, f"登录线程异常: {e}")
+
+
+class DouyinProbeWorker(QThread):
+    """
+    DOM 探针后台工作线程。
+    在子线程中管理 Playwright 会话，支持按需响应前端手动下发的“采集”与“关闭”指令。
+    """
+    sig_ready = Signal()
+    sig_captured = Signal(str, str)     # json_file, png_file
+    sig_error = Signal(str)
+    sig_closed = Signal()
+
+    def __init__(self, account: DouyinAccountConfig, probe: DouyinDOMProbe, parent=None):
+        super().__init__(parent)
+        self.account = account
+        self.probe = probe
+        self._capture_event = threading.Event()
+        self._close_event = threading.Event()
+
+    def request_capture(self) -> None:
+        """主线程请求抓取当前页面快照与 DOM"""
+        self._capture_event.set()
+
+    def request_close(self) -> None:
+        """主线程请求关闭探针浏览器"""
+        self._close_event.set()
+
+    def run(self):
+        profile_path = Path(self.account.profile_dir).resolve()
+        profile_path.mkdir(parents=True, exist_ok=True)
+        try:
+            with sync_playwright() as p:
+                context = p.chromium.launch_persistent_context(
+                    user_data_dir=str(profile_path),
+                    headless=False,
+                    args=DouyinBrowserManager.get_anti_detection_args(),
+                    viewport={"width": 1440, "height": 900}
+                )
+                page = context.new_page() if not context.pages else context.pages[0]
+                DouyinBrowserManager.inject_stealth(page)
+
+                page.goto(DOUYIN_UPLOAD_URL, wait_until="domcontentloaded", timeout=60000)
+                self.sig_ready.emit()
+
+                while not self._close_event.is_set():
+                    if page.is_closed():
+                        break
+
+                    if self._capture_event.is_set():
+                        self._capture_event.clear()
+                        try:
+                            json_p, img_p = self.probe.capture_dom_report(page)
+                            self.sig_captured.emit(str(json_p), str(img_p))
+                        except Exception as ce:
+                            self.sig_error.emit(f"采集抓取失败: {ce}")
+
+                    time.sleep(0.3)
+
+                try:
+                    context.close()
+                except Exception:
+                    pass
+                self.sig_closed.emit()
+        except Exception as e:
+            self.sig_error.emit(f"DOM 探针启动异常: {e}")
+            self.sig_closed.emit()
+
+
+class DomProbeDialog(QDialog):
+    """
+    DOM 探针交互式操作控制台对话框。
+    为用户提供实时的操作指引、醒目的【立即采集】按钮以及采集结果快捷查看。
+    """
+    def __init__(self, account: DouyinAccountConfig, probe: DouyinDOMProbe, parent=None):
+        super().__init__(parent)
+        self.account = account
+        self.probe = probe
+        self.worker: Optional[DouyinProbeWorker] = None
+        self._last_report_json: Optional[str] = None
+        self._last_report_png: Optional[str] = None
+
+        self.setWindowTitle(f"抖音 DOM 探针交互采集台 - [{account.account_name}]")
+        self.resize(560, 420)
+        self.setWindowFlags(self.windowFlags() | Qt.WindowStaysOnTopHint)
+        self._init_ui()
+        self._start_worker()
+
+    def _init_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setSpacing(12)
+        layout.setContentsMargins(16, 16, 16, 16)
+
+        # 指南说明框
+        tip_box = QFrame()
+        tip_box.setStyleSheet("background-color: #1E293B; border-radius: 6px; padding: 12px; border: 1px solid #334155;")
+        tip_layout = QVBoxLayout(tip_box)
+        tip_title = QLabel("📌 探针交互采集指引：")
+        tip_title.setStyleSheet("font-weight: bold; color: #38BDF8; font-size: 13px;")
+        tip_content = QLabel(
+            "1. 浏览器正在自动打开抖音创作者上传页；\n"
+            "2. 请在浏览器中点击上传任意一个测试视频并等待解析完成；\n"
+            "3. 滚动到页面下方展开【加入合集】下拉列表（或其他关键配置项）；\n"
+            "4. 准备好目标页面后，点击下方【📸 立即采集当前DOM与页面快照】按钮；\n"
+            "5. 支持多次点击采集不同的表单状态，自动生成带时间戳的高保真报告。"
+        )
+        tip_content.setStyleSheet("color: #CBD5E1; font-size: 12px;")
+        tip_layout.addWidget(tip_title)
+        tip_layout.addWidget(tip_content)
+        layout.addWidget(tip_box)
+
+        # 状态指示栏
+        self.lbl_status = QLabel("⏳ 正在启动探针浏览器，请稍候...")
+        self.lbl_status.setStyleSheet("color: #F6AD55; font-weight: bold; font-size: 13px;")
+        layout.addWidget(self.lbl_status)
+
+        # 采集大按钮
+        self.btn_capture = QPushButton("📸 立即采集当前DOM与页面快照")
+        self.btn_capture.setEnabled(False)
+        self.btn_capture.setStyleSheet("""
+            QPushButton {
+                background-color: #319795;
+                color: white;
+                font-weight: bold;
+                font-size: 14px;
+                padding: 10px;
+                border-radius: 6px;
+            }
+            QPushButton:hover { background-color: #38B2AC; }
+            QPushButton:disabled { background-color: #4A5568; color: #A0AEC0; }
+        """)
+        self.btn_capture.clicked.connect(self._on_capture_clicked)
+        layout.addWidget(self.btn_capture)
+
+        # 结果与报告展示区
+        self.lbl_result = QLabel("尚未进行采集。")
+        self.lbl_result.setStyleSheet("color: #A0AEC0; font-size: 12px;")
+        layout.addWidget(self.lbl_result)
+
+        btn_row = QHBoxLayout()
+        self.btn_open_folder = QPushButton("📂 打开报告目录")
+        self.btn_open_folder.setEnabled(False)
+        self.btn_open_folder.clicked.connect(self._open_folder)
+        self.btn_close = QPushButton("✔ 完成并退出")
+        self.btn_close.clicked.connect(self.close)
+
+        btn_row.addWidget(self.btn_open_folder)
+        btn_row.addStretch()
+        btn_row.addWidget(self.btn_close)
+        layout.addLayout(btn_row)
+
+    def _start_worker(self):
+        self.worker = DouyinProbeWorker(self.account, self.probe, self)
+        self.worker.sig_ready.connect(self._on_browser_ready)
+        self.worker.sig_captured.connect(self._on_captured)
+        self.worker.sig_error.connect(self._on_error)
+        self.worker.sig_closed.connect(self._on_closed)
+        self.worker.start()
+
+    @Slot()
+    def _on_browser_ready(self):
+        self.lbl_status.setText("🟢 浏览器已就绪！请在浏览器操作完成后点击下方按钮采集。")
+        self.lbl_status.setStyleSheet("color: #48BB78; font-weight: bold; font-size: 13px;")
+        self.btn_capture.setEnabled(True)
+
+    @Slot()
+    def _on_capture_clicked(self):
+        self.lbl_status.setText("⏳ 正在截屏并提取 DOM 结构...")
+        self.lbl_status.setStyleSheet("color: #63B3ED; font-weight: bold; font-size: 13px;")
+        self.btn_capture.setEnabled(False)
+        if self.worker:
+            self.worker.request_capture()
+
+    @Slot(str, str)
+    def _on_captured(self, json_p: str, img_p: str):
+        self._last_report_json = json_p
+        self._last_report_png = img_p
+        p_json = Path(json_p)
+        p_img = Path(img_p)
+        self.lbl_status.setText("✅ 采集成功！已落盘 DOM JSON 报表与全屏截图。")
+        self.lbl_status.setStyleSheet("color: #48BB78; font-weight: bold; font-size: 13px;")
+        self.lbl_result.setText(f"已生成报告: {p_json.name}\n快照截图: {p_img.name}")
+        self.btn_capture.setEnabled(True)
+        self.btn_open_folder.setEnabled(True)
+
+    @Slot(str)
+    def _on_error(self, err: str):
+        self.lbl_status.setText(f"❌ 采集异常: {err}")
+        self.lbl_status.setStyleSheet("color: #E53E3E; font-weight: bold; font-size: 13px;")
+        self.btn_capture.setEnabled(True)
+
+    @Slot()
+    def _on_closed(self):
+        self.lbl_status.setText("⚪ 探针浏览器已关闭。")
+        self.lbl_status.setStyleSheet("color: #A0AEC0; font-size: 13px;")
+        self.btn_capture.setEnabled(False)
+
+    def _open_folder(self):
+        if self._last_report_json:
+            folder = Path(self._last_report_json).parent
+            os.startfile(str(folder))
+
+    def closeEvent(self, event):
+        if self.worker and self.worker.isRunning():
+            self.worker.request_close()
+            self.worker.wait(2000)
+        event.accept()
+
 
 
 class DouyinPublisherPanel(QWidget):
@@ -36,6 +267,7 @@ class DouyinPublisherPanel(QWidget):
         self.browser_mgr = DouyinBrowserManager()
         self.dom_probe = DouyinDOMProbe()
         self.daemon_thread: Optional[DouyinAutoDeployDaemon] = None
+        self._login_worker: Optional[DouyinLoginWorker] = None
         self._current_account: Optional[DouyinAccountConfig] = None
 
         self._init_ui()
@@ -285,24 +517,32 @@ class DouyinPublisherPanel(QWidget):
         main_layout.addWidget(splitter)
 
     # ====== 账号列表与表单数据绑定 ======
-    def _load_account_list(self) -> None:
-        """载入并刷新账号列表"""
+    def _load_account_list(self, selected_id: Optional[str] = None) -> None:
+        """
+        载入并刷新账号列表。
+        使用 blockSignals 阻断中间信号，防止清空与重建列表时触发重复冗余的 _on_account_selected 与队列扫描。
+        """
+        self.list_accounts.blockSignals(True)
         self.list_accounts.clear()
         accounts = self.account_mgr.get_accounts()
 
         if not accounts:
-            # 默认创建一个示例账号
             acc = self.account_mgr.add_account("抖音账号 01", target_dir="output")
             accounts = [acc]
 
-        for acc in accounts:
+        target_row = 0
+        for idx, acc in enumerate(accounts):
             status_symbol = "●" if acc.status == "AUTHORIZED" else "○"
             item_text = f"{status_symbol} {acc.account_name} [{'已授权' if acc.status == 'AUTHORIZED' else '未登录'}]"
             item = QListWidgetItem(item_text)
             item.setData(Qt.UserRole, acc.account_id)
             self.list_accounts.addItem(item)
+            if selected_id and acc.account_id == selected_id:
+                target_row = idx
 
-        self.list_accounts.setCurrentRow(0)
+        self.list_accounts.blockSignals(False)
+        if self.list_accounts.count() > 0:
+            self.list_accounts.setCurrentRow(target_row)
 
     def _on_account_selected(self, row: int) -> None:
         """选中账号后回显配置详情"""
@@ -343,8 +583,7 @@ class DouyinPublisherPanel(QWidget):
         """添加新账号"""
         num = len(self.account_mgr.get_accounts()) + 1
         new_acc = self.account_mgr.add_account(f"抖音账号 {num:02d}", target_dir="output")
-        self._load_account_list()
-        self.list_accounts.setCurrentRow(len(self.account_mgr.get_accounts()) - 1)
+        self._load_account_list(selected_id=new_acc.account_id)
 
     def _delete_account(self) -> None:
         """删除当前账号"""
@@ -365,7 +604,13 @@ class DouyinPublisherPanel(QWidget):
         """保存当前账号配置"""
         if not self._current_account:
             return
-        self._current_account.account_name = self.txt_acc_name.text().strip()
+
+        name_val = self.txt_acc_name.text().strip()
+        if not name_val:
+            QMessageBox.warning(self, "提示", "账号昵称/标识不能为空！")
+            return
+
+        self._current_account.account_name = name_val
         self._current_account.target_dir = self.txt_target_dir.text().strip()
 
         # 收集多选类型
@@ -383,25 +628,54 @@ class DouyinPublisherPanel(QWidget):
         self._current_account.default_tags = tags_raw.split() if tags_raw else []
 
         self.account_mgr.update_account(self._current_account)
-        self._load_account_list()
+        self._load_account_list(selected_id=self._current_account.account_id)
+        self._log(f"[配置] 账号 [{self._current_account.account_name}] 配置保存成功")
         QMessageBox.information(self, "成功", f"账号 [{self._current_account.account_name}] 配置已保存！")
 
     def _login_current_account(self) -> None:
-        """扫码登录当前账号"""
+        """
+        扫码登录当前账号（异步子线程化，防止主界面未响应）。
+        """
         if not self._current_account:
             return
+        if self._login_worker and self._login_worker.isRunning():
+            QMessageBox.warning(self, "提示", "当前已有登录任务正在运行中，请在打开的浏览器中完成扫码！")
+            return
+
         self._log(f"正在调起账号 [{self._current_account.account_name}] 的扫码登录窗口...")
-        success, msg = self.browser_mgr.launch_interactive_login(self._current_account)
+        self.btn_login_acc.setEnabled(False)
+        self.btn_login_acc.setText("⏳ 扫码认证中...")
+        self.lbl_auth_status.setText("状态: ⏳ 扫码认证中...")
+        self.lbl_auth_status.setStyleSheet("color: #D69E2E; font-weight: bold;")
+
+        self._login_worker = DouyinLoginWorker(self.browser_mgr, self._current_account, self)
+        self._login_worker.sig_status.connect(self._log)
+        self._login_worker.sig_finished.connect(self._on_login_finished)
+        self._login_worker.start()
+
+    @Slot(bool, str)
+    def _on_login_finished(self, success: bool, msg: str) -> None:
+        """扫码登录结果回调"""
+        self.btn_login_acc.setEnabled(True)
+        self.btn_login_acc.setText("🔑 扫码登录该账号")
+        if not self._current_account:
+            return
+
         if success:
             self.account_mgr.update_account(self._current_account)
-            self._load_account_list()
+            self.txt_acc_name.setText(self._current_account.account_name)
+            self._load_account_list(selected_id=self._current_account.account_id)
+            self._log(f"[授权成功] 账号: {self._current_account.account_name} ({self._current_account.account_id})")
             QMessageBox.information(self, "登录成功", f"账号 [{self._current_account.account_name}] 授权成功！")
         else:
+            self.lbl_auth_status.setText("状态: ○ 未授权登录")
+            self.lbl_auth_status.setStyleSheet("color: #E53E3E; font-weight: bold;")
+            self._log(f"[授权未完成] {msg}")
             QMessageBox.warning(self, "登录提示", f"未能完成登录: {msg}")
 
     # ====== 待发队列扫描与刷新 ======
     def _scan_queue(self) -> None:
-        """扫描当前账号目录下的待发媒体"""
+        """扫描当前账号目录下的待发媒体（轻量化探测，避免阻塞主线程）"""
         if not self._current_account:
             return
         target_dir_str = self._current_account.target_dir.strip()
@@ -420,17 +694,25 @@ class DouyinPublisherPanel(QWidget):
             valid_exts.update(IMAGE_EXTS)
 
         pending = []
-        for item in target_dir.iterdir():
-            if item.is_dir():
-                continue
-            if item.suffix.lower() in valid_exts and is_file_fully_written(item):
-                pending.append(item)
+        try:
+            for item in target_dir.iterdir():
+                if item.is_dir():
+                    continue
+                if item.suffix.lower() in valid_exts:
+                    try:
+                        stat = item.stat()
+                        # 轻量过滤正在被创建的空文件，避免 UI 卡顿
+                        if stat.st_size > 1000:
+                            pending.append((item, stat))
+                    except Exception:
+                        continue
+        except Exception as e:
+            pass
 
-        pending.sort(key=lambda p: p.stat().st_mtime)
+        pending.sort(key=lambda x: x[1].st_mtime)
 
         self.table_queue.setRowCount(len(pending))
-        for row, f in enumerate(pending):
-            stat = f.stat()
+        for row, (f, stat) in enumerate(pending):
             size_mb = f"{stat.st_size / (1024*1024):.1f} MB" if stat.st_size > 1024*1024 else f"{stat.st_size / 1024:.0f} KB"
             mtime_str = time.strftime("%Y-%m-%d %H:%M", time.localtime(stat.st_mtime))
 
@@ -512,16 +794,19 @@ class DouyinPublisherPanel(QWidget):
 
     # ====== 探针与报告工具 ======
     def _run_dom_probe(self) -> None:
-        """运行 DOM 智能探针采集"""
+        """
+        运行 DOM 智能探针采集：
+        弹出专用的 DomProbeDialog 交互式控制面板，
+        支持用户在浏览器中操作完成后点击【📸 立即采集】按钮，优雅生成报告与快照。
+        """
         if not self._current_account:
+            QMessageBox.warning(self, "提示", "请先在左侧选择或添加一个抖音账号！")
             return
-        self._log("正在启动 DOM 探针采集窗口...")
-        success, msg = self.dom_probe.run_interactive_probe(self._current_account)
-        if success:
-            QMessageBox.information(self, "采集成功", f"{msg}\n文件已保存至 data 目录！")
-            self._log(f"[探针] {msg}")
-        else:
-            QMessageBox.warning(self, "采集提示", f"{msg}")
+
+        self._log(f"正在调起账号 [{self._current_account.account_name}] 的 DOM 探针交互采集台...")
+        dlg = DomProbeDialog(account=self._current_account, probe=self.dom_probe, parent=self)
+        dlg.exec()
+        self._log("[探针] DOM 探针采集交互台已退出。")
 
     def _view_reports_dir(self) -> None:
         """打开报告目录"""

@@ -34,6 +34,7 @@ class DouyinDOMProbe:
         probe_js = """
         () => {
             const getXPath = (el) => {
+                if (!el) return '';
                 if (el.id) return `//*[@id="${el.id}"]`;
                 const parts = [];
                 while (el && el.nodeType === Node.ELEMENT_NODE) {
@@ -51,38 +52,51 @@ class DouyinDOMProbe:
                 return `/${parts.join('/')}`;
             };
 
+            const safeClass = (el) => {
+                if (!el || !el.className) return '';
+                if (typeof el.className === 'string') return el.className;
+                if (el.className.baseVal) return el.className.baseVal;
+                return String(el.className);
+            };
+
+            const safeText = (el, maxLen = 100) => {
+                if (!el) return '';
+                const raw = ((el.innerText || el.textContent || '') + '').trim();
+                return maxLen ? raw.slice(0, maxLen) : raw;
+            };
+
             const inputs = Array.from(document.querySelectorAll('input')).map(el => ({
                 tag: 'input',
-                type: el.type,
-                name: el.name,
-                id: el.id,
-                placeholder: el.placeholder,
-                className: el.className,
-                accept: el.accept,
+                type: el.type || '',
+                name: el.name || '',
+                id: el.id || '',
+                placeholder: el.placeholder || '',
+                className: safeClass(el),
+                accept: el.accept || '',
                 xpath: getXPath(el)
             }));
 
-            const buttons = Array.from(document.querySelectorAll('button')).map(el => ({
-                tag: 'button',
-                id: el.id,
-                innerText: el.innerText.trim(),
-                className: el.className,
-                type: el.type,
+            const buttons = Array.from(document.querySelectorAll('button, [role="button"]')).map(el => ({
+                tag: el.tagName.toLowerCase(),
+                id: el.id || '',
+                innerText: safeText(el, 100),
+                className: safeClass(el),
+                type: el.type || '',
                 xpath: getXPath(el)
             }));
 
             const textareas = Array.from(document.querySelectorAll('textarea, [contenteditable="true"]')).map(el => ({
                 tag: el.tagName.toLowerCase(),
-                id: el.id,
-                placeholder: el.getAttribute('placeholder') || el.getAttribute('data-placeholder'),
-                className: el.className,
+                id: el.id || '',
+                placeholder: el.getAttribute('placeholder') || el.getAttribute('data-placeholder') || '',
+                className: safeClass(el),
                 xpath: getXPath(el)
             }));
 
             const modals = Array.from(document.querySelectorAll('[role="dialog"], [class*="modal"], [class*="dialog"], [class*="dropdown"], [class*="popover"], [class*="select"]')).map(el => ({
                 tag: el.tagName.toLowerCase(),
-                className: el.className,
-                innerText: el.innerText.slice(0, 100).trim(),
+                className: safeClass(el),
+                innerText: safeText(el, 100),
                 xpath: getXPath(el)
             }));
 

@@ -21,10 +21,10 @@ class DouyinAccountManager:
     抖音账号配置持久化管理器。
     负责多账号列表的增删改查、Profile 隔离目录准备与序列化。
     """
-    def __init__(self, config_file: Optional[Path] = None):
+    def __init__(self, config_file: Optional[Path] = None, profiles_base_dir: Optional[Path] = None):
         self.config_file = config_file or (PROJECT_ROOT / "data" / "douyin_accounts.json")
         self.config_file.parent.mkdir(parents=True, exist_ok=True)
-        self.profiles_base_dir = (PROJECT_ROOT / "data" / "douyin_profiles")
+        self.profiles_base_dir = profiles_base_dir or (PROJECT_ROOT / "data" / "douyin_profiles")
         self.profiles_base_dir.mkdir(parents=True, exist_ok=True)
         self._accounts: List[DouyinAccountConfig] = []
         self.load()
