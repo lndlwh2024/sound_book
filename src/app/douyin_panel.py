@@ -85,7 +85,8 @@ class DouyinProbeWorker(QThread):
                 )
                 page = context.new_page() if not context.pages else context.pages[0]
                 DouyinBrowserManager.inject_stealth(page)
-                DouyinBrowserManager.setup_page_diagnostics(page, lambda msg: self.sig_error.emit(msg))
+                # 仅将页面前端诊断信息记录到调试日志，避免将非致命前端打点重试误抛给 sig_error 导致弹窗提示错误
+                DouyinBrowserManager.setup_page_diagnostics(page, lambda msg: logger.debug(f"[探针页面诊断] {msg}"))
 
                 page.goto(DOUYIN_UPLOAD_URL, wait_until="domcontentloaded", timeout=60000)
                 self.sig_ready.emit()
@@ -102,7 +103,14 @@ class DouyinProbeWorker(QThread):
                         except Exception as ce:
                             self.sig_error.emit(f"采集抓取失败: {ce}")
 
-                    time.sleep(0.3)
+                    # 设计说明：使用 page.wait_for_timeout() 替代 time.sleep()。
+                    # Playwright 同步模式依赖主线程驱动底层的 Node.js IPC 消息泵。
+                    # 若使用 time.sleep 会阻塞消息管道导致抖音 Web Worker 切片上传无法收到放行指令挂起；
+                    # wait_for_timeout 能持续分发管道事件，确保页面切片上传与事件交互丝滑流畅。
+                    try:
+                        page.wait_for_timeout(300)
+                    except Exception:
+                        break
 
                 try:
                     context.close()

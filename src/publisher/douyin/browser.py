@@ -222,7 +222,11 @@ class DouyinBrowserManager:
                     except Exception:
                         pass
 
-                    time.sleep(2)
+                    # 采用 page.wait_for_timeout(2000) 替代 time.sleep(2)，保证 Playwright 事件泵持续轮询
+                    try:
+                        page.wait_for_timeout(2000)
+                    except Exception:
+                        break
 
                 if is_logged_in:
                     account.status = "AUTHORIZED"
@@ -230,7 +234,10 @@ class DouyinBrowserManager:
                     logger.info(f"账号 [{account.account_name}] 扫码登录认证成功！等待页面稳定以提取真实昵称...")
                     
                     # 等待页面渲染并尝试抓取真实昵称
-                    time.sleep(2)
+                    try:
+                        page.wait_for_timeout(2000)
+                    except Exception:
+                        pass
                     real_name = self.extract_nickname(page)
                     if real_name:
                         logger.info(f"成功识别并提取抖音真实昵称: [{real_name}] (原标识: {account.account_name})")
@@ -239,7 +246,10 @@ class DouyinBrowserManager:
                         logger.info(f"未识别到自定义昵称，沿用原名称: [{account.account_name}]")
 
                     # 等待 Cookie 充分持久化落盘
-                    time.sleep(2)
+                    try:
+                        page.wait_for_timeout(2000)
+                    except Exception:
+                        pass
                     context.close()
                     tip = f"登录授权成功！账号: {account.account_name}"
                     return True, tip

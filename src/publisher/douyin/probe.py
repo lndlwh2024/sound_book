@@ -124,8 +124,15 @@ class DouyinDOMProbe:
         with open(report_json_path, "w", encoding="utf-8") as f:
             json.dump(report_data, f, ensure_ascii=False, indent=2)
 
-        # 截取全屏快照
-        page.screenshot(path=str(snapshot_png_path), full_page=True)
+        # 截取全屏快照：增加超时保护并提供视口快照降级，防止页面动态重绘或长画布导致 screenshot 挂起
+        try:
+            page.screenshot(path=str(snapshot_png_path), full_page=True, timeout=8000)
+        except Exception as e:
+            logger.warning(f"全景长截图超时或失败，降级为当前视口快照: {e}")
+            try:
+                page.screenshot(path=str(snapshot_png_path), full_page=False, timeout=5000)
+            except Exception as se:
+                logger.error(f"视口快照保存亦失败: {se}")
 
         logger.info(f"DOM 结构报告已导出: {report_json_path}")
         logger.info(f"页面全景截图已保存: {snapshot_png_path}")
@@ -173,7 +180,11 @@ class DouyinDOMProbe:
                     except Exception:
                         pass
 
-                    time.sleep(3)
+                    # 使用 page.wait_for_timeout 维持 Playwright 内部消息泵轮询
+                    try:
+                        page.wait_for_timeout(3000)
+                    except Exception:
+                        break
 
                 if not captured and not page.is_closed():
                     json_p, img_p = self.capture_dom_report(page)

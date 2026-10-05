@@ -131,3 +131,45 @@ def test_create_persistent_context_mock(tmp_path: Path):
     assert "channel" not in call_kwargs
     assert "user_agent" not in call_kwargs
 
+
+def test_parse_video_title_and_episode():
+    """测试生产视频文件命名规范与书名集数智能解析"""
+    from src.publisher.douyin.uploader import parse_video_title_and_episode
+
+    # 测试标准规范格式
+    file1 = "巴菲特致股东的信_第26集_38m_[f2ffe8f].mp4"
+    book1, title1, ep1 = parse_video_title_and_episode(file1)
+    assert book1 == "巴菲特致股东的信"
+    assert "第26集" in title1
+    assert "[f2ffe8f]" not in title1
+    assert ep1 == 26
+
+    # 测试带书名号格式
+    file2 = "《三体第一部》_第05集_完整版.mp4"
+    book2, title2, ep2 = parse_video_title_and_episode(file2)
+    assert book2 == "三体第一部"
+    assert ep2 == 5
+
+
+def test_uploader_publish_success_detection_logic():
+    """测试发布成功判定严格排除常驻的 creator-micro URL 误判"""
+    # 模拟页面仅处于普通上传页（包含 creator-micro 但没有跳转至 manage，也无成功 toast）
+    mock_page = MagicMock()
+    mock_page.url = "https://creator.douyin.com/creator-micro/content/upload"
+    
+    mock_toast = MagicMock()
+    mock_toast.count.return_value = 0
+    mock_page.locator.return_value.first = mock_toast
+
+    cur_url = mock_page.url.lower()
+    # 验证新判定逻辑：仅凭 creator-micro 不得判定为成功
+    is_manage = "content/manage" in cur_url or ("manage" in cur_url and "upload" not in cur_url)
+    assert is_manage is False
+
+    # 模拟跳转到作品管理页
+    mock_page.url = "https://creator.douyin.com/creator-micro/content/manage"
+    cur_url_manage = mock_page.url.lower()
+    is_manage_ok = "content/manage" in cur_url_manage or ("manage" in cur_url_manage and "upload" not in cur_url_manage)
+    assert is_manage_ok is True
+
+

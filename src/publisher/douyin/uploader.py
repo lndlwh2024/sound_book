@@ -89,7 +89,10 @@ class DouyinUploader:
 
                 logger.info(f"导航至抖音创作者中心上传页: {DOUYIN_UPLOAD_URL}")
                 page.goto(DOUYIN_UPLOAD_URL, wait_until="domcontentloaded", timeout=60000)
-                time.sleep(3)
+                # 设计说明：使用 page.wait_for_timeout() 替代 time.sleep()
+                # Playwright 同步模式依赖调用驱动底层 Node.js 管道。
+                # 严禁在持有 page 时调用 time.sleep，否则会导致上传 Web Worker 挂起死锁。
+                page.wait_for_timeout(3000)
 
                 # 检查是否处于登录状态
                 if "login" in page.url.lower():
@@ -108,7 +111,7 @@ class DouyinUploader:
                 logger.info("视频文件注入成功，正在等待页面加载与转码处理...")
 
                 # 步骤 2: 等待视频上传并进入编辑页
-                time.sleep(5)
+                page.wait_for_timeout(3000)
                 # 等待标题输入框出现（标志着上传成功进入作品发布表单）
                 title_editor = page.locator('[contenteditable="true"], textarea, [data-placeholder*="作品"]').first
                 try:
@@ -130,10 +133,10 @@ class DouyinUploader:
                 for tag in tags:
                     clean_tag = tag.strip('# ')
                     page.keyboard.type(f" #{clean_tag} ")
-                    time.sleep(0.5)
+                    page.wait_for_timeout(500)
                     page.keyboard.press("Enter")
 
-                time.sleep(2)
+                page.wait_for_timeout(2000)
 
                 # 步骤 4: 封面设置（若存在本地配套封面）
                 if cover_path and cover_path.exists():
@@ -143,17 +146,17 @@ class DouyinUploader:
                         cover_btn = page.locator('text=选择封面, text=设置封面, text=更换封面').first
                         if cover_btn.count() > 0:
                             cover_btn.click()
-                            time.sleep(2)
+                            page.wait_for_timeout(2000)
                             # 封面上传弹窗内的 file input
                             cover_input = page.locator('input[type="file"]').last
                             if cover_input.count() > 0:
                                 cover_input.set_input_files(str(cover_path.resolve()))
-                                time.sleep(3)
+                                page.wait_for_timeout(3000)
                                 # 确定保存封面
                                 confirm_btn = page.locator('button:has-text("确定"), button:has-text("完成")').last
                                 if confirm_btn.count() > 0:
                                     confirm_btn.click()
-                                    time.sleep(2)
+                                    page.wait_for_timeout(2000)
                     except Exception as e:
                         logger.warning(f"设置封面出现轻微异常，回退使用默认抓帧封面: {e}")
 
@@ -161,7 +164,7 @@ class DouyinUploader:
                 logger.info(f"【步骤 5/5】正在进行合集自判断与归属: 《{book_name}》 (第{episode_num}集)")
                 self._handle_collection_assignment(page, book_name, episode_num)
 
-                time.sleep(3)
+                page.wait_for_timeout(2000)
 
                 # 步骤 6: 点击发布
                 logger.info("正在执行最终发布...")
@@ -174,29 +177,65 @@ class DouyinUploader:
                 logger.info("已点击发布按钮，正在监听发布成功状态...")
 
                 # 监听结果
+                # 设计说明：
+                # 1. 严禁使用 "creator-micro" 作为成功判定：上传页面 URL 自身常驻带有 "creator-micro"，
+                #    若用此作为条件会导致一点击发布立刻误判成功并错误将未上传视频物理归档！
+                # 2. 真正的发布成功判定标准：
+                #    - URL 离开 content/upload 跳转至 content/manage 作品管理页面；
+                #    - 或者捕获到明确的成功 Toast/弹框提示（“发布成功”、“已发布”、“作品发布成功”）；
+                #    - 或者出现“查看作品”、“继续发布”操作按钮。
                 success = False
                 err_detail = None
                 wait_start = time.time()
-                while time.time() - wait_start < 45:
+                while time.time() - wait_start < 60:
                     cur_url = page.url.lower()
-                    if "content/manage" in cur_url or "creator-micro" in cur_url:
-                        # 成功跳转至作品管理页
+                    # 条件 A: 页面跳转至作品管理列表
+                    if "content/manage" in cur_url or ("manage" in cur_url and "upload" not in cur_url):
+                        logger.info("检测到页面已成功跳转至作品管理列表，发布确认成功！")
                         success = True
                         break
 
+                    # 条件 B: 捕获到明确的成功 Toast
                     try:
-                        toast = page.locator('text=发布成功, text=已发布, [class*="toast"]').first
-                        if toast.count() > 0 and toast.is_visible():
+                        success_toast = page.locator('text=发布成功, text=已发布, text=作品发布成功, [class*="toast"]:has-text("成功")').first
+                        if success_toast.count() > 0 and success_toast.is_visible():
+                            logger.info("捕获到抖音平台【发布成功】Toast 提示，发布确认成功！")
                             success = True
                             break
                     except Exception:
                         pass
-                    time.sleep(2)
+
+                    # 条件 C: 捕获到发布成功后弹出的后续操作弹窗
+                    try:
+                        finish_btn = page.locator('button:has-text("查看作品"), button:has-text("继续发布")').first
+                        if finish_btn.count() > 0 and finish_btn.is_visible():
+                            logger.info("捕获到发布完成引导弹窗，发布确认成功！")
+                            success = True
+                            break
+                    except Exception:
+                        pass
+
+                    # 条件 D: 显式探测失败告警提示，提前退出避免无谓等待
+                    try:
+                        fail_msg = page.locator('text=发布失败, text=包含违规, text=敏感词, text=视频格式不支持').first
+                        if fail_msg.count() > 0 and fail_msg.is_visible():
+                            err_detail = fail_msg.inner_text()
+                            logger.error(f"捕获到平台发布拒绝提示: {err_detail}")
+                            break
+                    except Exception:
+                        pass
+
+                    # 循环使用 page.wait_for_timeout 维持消息分发
+                    try:
+                        page.wait_for_timeout(1000)
+                    except Exception:
+                        break
 
                 context.close()
 
                 if not success:
-                    return False, "点击发布后未能在规定时间内捕获成功提示或跳转", None
+                    reason = f"平台返回错误: {err_detail}" if err_detail else "点击发布后未能在规定时间内捕获成功提示或页面跳转"
+                    return False, reason, None
 
                 logger.info(f"作品 [{title}] 在抖音平台发布成功！")
 
@@ -213,40 +252,43 @@ class DouyinUploader:
         """
         合集自判断核心逻辑：
         展开合集下拉框 -> 搜索匹配已有合集 -> 命中则选择并填入集数 -> 未命中则自动新建合集。
+        基于真实采集落盘的 DOM 报告适配官方 Semi Design 合集组件 (div.semi-select)。
         """
         try:
-            # 1. 尝试找到合集复选框或选择按钮
-            coll_entry = page.locator('text=添加至合集, text=作品合集, [class*="collection"]').first
+            # 1. 尝试找到合集复选框或选择入口（支持文字与 Semi Select 容器）
+            coll_entry = page.locator(
+                'text=添加至合集, text=作品合集, [class*="collection"], div.semi-select'
+            ).first
             if coll_entry.count() == 0:
                 logger.info("页面未检测到合集入口，跳过合集操作")
                 return
 
             coll_entry.click()
-            time.sleep(2)
+            page.wait_for_timeout(2000)
 
             # 2. 检查下拉列表中是否已有该书名合集
             target_coll_option = page.locator(f'text={book_name}').first
             if target_coll_option.count() > 0 and target_coll_option.is_visible():
                 logger.info(f"命中已有合集: 《{book_name}》，执行直接关联！")
                 target_coll_option.click()
-                time.sleep(1)
+                page.wait_for_timeout(1000)
             else:
                 # 3. 未找到已有合集，执行新建合集
                 create_btn = page.locator('text=新建合集, text=+ 新建合集, text=创建合集').first
                 if create_btn.count() > 0:
                     logger.info(f"未匹配到已有合集，正在自动新建合集: 《{book_name}》...")
                     create_btn.click()
-                    time.sleep(1)
+                    page.wait_for_timeout(1000)
                     # 填入合集名称
                     name_input = page.locator('input[placeholder*="合集名称"], input[placeholder*="名称"]').last
                     if name_input.count() > 0:
                         name_input.fill(book_name)
-                        time.sleep(1)
+                        page.wait_for_timeout(1000)
                         # 点击确定
                         confirm_btn = page.locator('button:has-text("确定"), button:has-text("创建")').last
                         if confirm_btn.count() > 0:
                             confirm_btn.click()
-                            time.sleep(2)
+                            page.wait_for_timeout(2000)
                             logger.info(f"合集 《{book_name}》 自动创建并绑定成功！")
 
             # 4. 如果有集数输入框，自动填入集数
