@@ -28,33 +28,67 @@ class DouyinBrowserManager:
 
     @staticmethod
     def get_anti_detection_args() -> list:
-        """获取专业反自动化检测与浏览器伪装参数"""
+        """
+        获取专业反自动化检测参数。
+        【为什么这样设计】
+        1. 必须移除 --no-sandbox 和 --disable-setuid-sandbox：在 Windows 环境强传会导致 Chrome 弹出
+           “您使用的是不受支持的命令行标记”黄色警告，且破坏多进程沙箱环境，直接阻断大文件切片 Web Worker 线程；
+        2. 仅保留 --disable-blink-features=AutomationControlled：有效消除 navigator.webdriver 特征；
+        3. 不传已废弃的 --disable-infobars。
+        """
         return [
             "--disable-blink-features=AutomationControlled",
-            "--no-sandbox",
-            "--disable-setuid-sandbox",
-            "--disable-infobars",
-            "--window-size=1280,800"
+            "--window-size=1440,900"
         ]
 
     @staticmethod
     def inject_stealth(page: Page) -> None:
-        """向页面注入反爬伪装脚本，抹除 Playwright 特征"""
+        """
+        向页面注入轻量、无破坏性的反自动化脚本。
+        【为什么这样设计】
+        禁止粗暴篡改 window.chrome 或 navigator.plugins！
+        在真实官方 Google Chrome 中，原生 window.chrome 包含 loadTimes() / csi() 等关键埋点与性能方法，
+        navigator.plugins 是标准 PluginArray 对象。
+        若粗暴将其覆盖为纯字典或数字数组，字节跳动上传 SDK（lib-byted-uploader.js）在调用相关原生 API 时会抛出 TypeError，
+        直接导致视频切片上传中断并报错！
+        此处仅对 navigator.webdriver 进行温和保护，完全保留 Chrome 原生原型链与完整 API。
+        """
         stealth_js = """
-        Object.defineProperty(navigator, 'webdriver', {
-            get: () => undefined
-        });
-        window.chrome = {
-            runtime: {}
-        };
-        Object.defineProperty(navigator, 'plugins', {
-            get: () => [1, 2, 3, 4, 5]
-        });
-        Object.defineProperty(navigator, 'languages', {
-            get: () => ['zh-CN', 'zh', 'en']
-        });
+        try {
+            if (navigator.webdriver) {
+                delete Object.getPrototypeOf(navigator).webdriver;
+            }
+        } catch (e) {}
         """
         page.add_init_script(stealth_js)
+
+    @staticmethod
+    def setup_page_diagnostics(page: Page, log_callback=None) -> None:
+        """
+        挂接页面级错误与网络失败监听，实时将前端异常与网络阻断透传至主面板控制台。
+        """
+        def _on_console(msg):
+            if msg.type in ("error", "warning") and log_callback:
+                text = msg.text
+                if any(k in text.lower() for k in ("upload", "fail", "error", "blocked", "vod", "sdk")):
+                    log_callback(f"[浏览器前端 {msg.type.upper()}] {text[:120]}")
+
+        def _on_page_error(err):
+            logger.warning(f"浏览器页面未捕获异常: {err}")
+            if log_callback:
+                log_callback(f"[浏览器异常] {str(err)[:120]}")
+
+        def _on_req_failed(req):
+            if any(k in req.url.lower() for k in ("upload", "media", "video", "auth", "tos")):
+                msg = f"关键网络请求失败: {req.method} {req.url[:80]} -> {req.failure}"
+                logger.warning(msg)
+                if log_callback:
+                    log_callback(f"[网络阻断] {msg}")
+
+        page.on("console", _on_console)
+        page.on("pageerror", _on_page_error)
+        page.on("requestfailed", _on_req_failed)
+
 
     @staticmethod
     def extract_nickname(page: Page) -> Optional[str]:
@@ -167,12 +201,7 @@ class DouyinBrowserManager:
             "headless": headless,
             "args": cls.get_anti_detection_args(),
             "ignore_default_args": ["--enable-automation"],
-            "viewport": viewport or {"width": 1440, "height": 900},
-            "user_agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/133.0.0.0 Safari/537.36"
-            )
+            "viewport": viewport or {"width": 1440, "height": 900}
         }
         if channel:
             launch_kwargs["channel"] = channel

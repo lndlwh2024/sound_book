@@ -133,6 +133,8 @@ def test_create_persistent_context_mock(tmp_path: Path):
 
     call_kwargs = mock_p.chromium.launch_persistent_context.call_args[1]
     assert "--disable-blink-features=AutomationControlled" in call_kwargs["args"]
+    assert "--disable-setuid-sandbox" not in call_kwargs["args"]
+    assert "--no-sandbox" not in call_kwargs["args"]
     assert "--enable-automation" in call_kwargs["ignore_default_args"]
-    assert "user_agent" in call_kwargs
+    assert "user_agent" not in call_kwargs
 

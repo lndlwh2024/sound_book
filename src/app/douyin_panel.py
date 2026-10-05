@@ -85,6 +85,7 @@ class DouyinProbeWorker(QThread):
                 )
                 page = context.new_page() if not context.pages else context.pages[0]
                 DouyinBrowserManager.inject_stealth(page)
+                DouyinBrowserManager.setup_page_diagnostics(page, lambda msg: self.sig_error.emit(msg))
 
                 page.goto(DOUYIN_UPLOAD_URL, wait_until="domcontentloaded", timeout=60000)
                 self.sig_ready.emit()
