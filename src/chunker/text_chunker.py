@@ -30,8 +30,8 @@ class SpeechUnitBuilder:
         self.max_chars = max_chars
         self.max_sentences = max_sentences
         self.min_chars = min_chars
-        # 中文句子边界：。！？；……，及后续的闭引号或闭括号
-        self.zh_sentence_end_re = re.compile(r'([。！？；……]+[”’）\]]*)')
+        # 中文句子边界：。！？；……，及后续的闭引号或闭括号（包含中文全角与英文半角闭合符号）
+        self.zh_sentence_end_re = re.compile(r'([。！？；……]+[”’）\]\)\'"]*)')
         # 英文句子边界：. ! ? ;，注意避免缩写被错误切开
         self.en_sentence_end_re = re.compile(r'(?<!\bMr)(?<!\bMrs)(?<!\bMs)(?<!\bDr)(?<!\bProf)(?<!\bSt)(?<!\bEtc)(?<!\bi\.e)(?<!\be\.g)(?<=[.!?;\n])\s+')
 
@@ -47,13 +47,30 @@ class SpeechUnitBuilder:
             sentences.append(parts[-1].strip())
 
         # 对每个中文切分出来的片段继续进行英文边界检查
-        final_sentences = []
+        raw_sentences = []
         for s in sentences:
             en_parts = self.en_sentence_end_re.split(s)
             for ep in en_parts:
                 ep_clean = ep.strip()
                 if ep_clean:
-                    final_sentences.append(ep_clean)
+                    raw_sentences.append(ep_clean)
+
+        # 【为什么这样设计】
+        # 智能标点碎屑追附与清洗：
+        # 检查每个切片是否包含实质可朗读字符（汉字、英文字母或阿拉伯数字）。
+        # 若切片仅为残余闭合标点（如孤立的半角括号或引号碎片），优先将其追附合并至上一句末尾，
+        # 若处于段首无前句可依则直接丢弃，从源头彻底杜绝纯标点切片进入 TTS 引擎。
+        def is_speech_eligible(t: str) -> bool:
+            return any(c.isalnum() or '\u4e00' <= c <= '\u9fff' for c in t)
+
+        final_sentences: List[str] = []
+        for s in raw_sentences:
+            if is_speech_eligible(s):
+                final_sentences.append(s)
+            else:
+                if final_sentences:
+                    final_sentences[-1] += s
+                # 段首孤立标点直接舍弃
 
         return final_sentences if final_sentences else ([text.strip()] if text.strip() else [])
 
@@ -136,22 +153,30 @@ class SpeechUnitBuilder:
                         and s_len <= self.min_chars and (current_len + s_len <= self.max_chars + 10)):
                     can_merge = True
 
+                def _is_speech_eligible(t: str) -> bool:
+                    return any(c.isalnum() or '\u4e00' <= c <= '\u9fff' for c in t)
+
                 if can_merge:
                     current_unit_sentences.append(s)
                     current_len += s_len
                 else:
                     if current_unit_sentences:
-                        unit_text = "".join(current_unit_sentences)
-                        unit_id = f"{chapter_id}_unit_{unit_order:04d}"
-                        units.append(SpeechUnit(
-                            unit_id=unit_id,
-                            chapter_id=str(chapter_id),
-                            order=unit_order,
-                            text=unit_text,
-                            text_hash=compute_text_hash(unit_text),
-                            status="PENDING"
-                        ))
-                        unit_order += 1
+                        unit_text = "".join(current_unit_sentences).strip()
+                        if _is_speech_eligible(unit_text):
+                            unit_id = f"{chapter_id}_unit_{unit_order:04d}"
+                            units.append(SpeechUnit(
+                                unit_id=unit_id,
+                                chapter_id=str(chapter_id),
+                                order=unit_order,
+                                text=unit_text,
+                                text_hash=compute_text_hash(unit_text),
+                                status="PENDING"
+                            ))
+                            unit_order += 1
+                        elif units:
+                            # 若本单元无发音字符，自动追加至上一单元末尾
+                            units[-1].text += unit_text
+                            units[-1].text_hash = compute_text_hash(units[-1].text)
                     
                     # 开启新的 Unit
                     current_unit_sentences = [s]
@@ -159,16 +184,23 @@ class SpeechUnitBuilder:
 
         # 收尾处理最后一个 Unit
         if current_unit_sentences:
-            unit_text = "".join(current_unit_sentences)
-            unit_id = f"{chapter_id}_unit_{unit_order:04d}"
-            units.append(SpeechUnit(
-                unit_id=unit_id,
-                chapter_id=str(chapter_id),
-                order=unit_order,
-                text=unit_text,
-                text_hash=compute_text_hash(unit_text),
-                status="PENDING"
-            ))
+            unit_text = "".join(current_unit_sentences).strip()
+            def _is_speech_eligible(t: str) -> bool:
+                return any(c.isalnum() or '\u4e00' <= c <= '\u9fff' for c in t)
+
+            if _is_speech_eligible(unit_text):
+                unit_id = f"{chapter_id}_unit_{unit_order:04d}"
+                units.append(SpeechUnit(
+                    unit_id=unit_id,
+                    chapter_id=str(chapter_id),
+                    order=unit_order,
+                    text=unit_text,
+                    text_hash=compute_text_hash(unit_text),
+                    status="PENDING"
+                ))
+            elif units:
+                units[-1].text += unit_text
+                units[-1].text_hash = compute_text_hash(units[-1].text)
 
         return units
 

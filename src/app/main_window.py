@@ -602,12 +602,12 @@ class AudioPlayButton(QPushButton):
 
 
 class MainWindow(QMainWindow):
-    """书声 (ShuSheng) v3.3.25 PySide6 桌面主窗口"""
+    """书声 (ShuSheng) v3.3.26 PySide6 桌面主窗口"""
 
     def __init__(self, bridge: Optional[TaskManagerBridge] = None):
         super().__init__()
         self.bridge = bridge or TaskManagerBridge()
-        self.setWindowTitle("书声 (ShuSheng) v3.3.25 - 自动化有声视频生产工具 (小人书 AI 连环画增强版)")
+        self.setWindowTitle("书声 (ShuSheng) v3.3.26 - 自动化有声视频生产工具 (小人书 AI 连环画增强版)")
         self._raw_status_text = "空闲就绪 (IDLE)"
         self._is_producing = False
         self._is_dual_mode = False

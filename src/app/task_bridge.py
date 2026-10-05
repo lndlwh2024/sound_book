@@ -530,13 +530,19 @@ class ProductionWorker(QThread):
                                     }
                                 )
                                 from ..audio.ffmpeg_utils import get_audio_info
-                                phys_info = get_audio_info(u_wav)
-                                if phys_info.get("duration", 0) > 0:
-                                    u.audio_duration = phys_info["duration"]
-                                elif res.success and res.duration > 0:
-                                    u.audio_duration = res.duration
+                                if u_wav.exists() and u_wav.stat().st_size > 100:
+                                    phys_info = get_audio_info(u_wav)
+                                    if phys_info.get("duration", 0) > 0:
+                                        u.audio_duration = phys_info["duration"]
+                                    elif res.success and res.duration > 0:
+                                        u.audio_duration = res.duration
+                                    else:
+                                        u.audio_duration = max(1.5, len(u.text) * 0.2)
                                 else:
-                                    u.audio_duration = max(1.5, len(u.text) * 0.2)
+                                    if res.success and res.duration > 0:
+                                        u.audio_duration = res.duration
+                                    else:
+                                        u.audio_duration = max(1.5, len(u.text) * 0.2)
                             else:
                                 from ..audio.ffmpeg_utils import get_audio_info
                                 info = get_audio_info(u_wav)

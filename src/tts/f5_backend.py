@@ -210,6 +210,32 @@ class F5Backend(TTSBackend):
         options = options or {}
         device = options.get("device") or self._config.get("device", "auto")
 
+        # 【为什么这样设计】
+        # 纯标点无发音字符防御：若输入文本完全不含中文字符、英文字母或数字（如极端残存的孤立括号或标点），
+        # 严禁将空串送入扩散模型推理，避免模型内部抛出未定义异常或崩溃，
+        # 直接输出一段 0.25 秒的标准 24kHz 单声道静音 WAV，确保长效批处理管线 100% 健壮不中断。
+        has_speech_content = any(c.isalnum() or '\u4e00' <= c <= '\u9fff' for c in str(text))
+        if not has_speech_content:
+            abs_output_path = Path(output_path).resolve()
+            abs_output_path.parent.mkdir(parents=True, exist_ok=True)
+            import wave
+            import struct
+            sr = 24000
+            dur = 0.25
+            n_samples = int(sr * dur)
+            with wave.open(str(abs_output_path), 'wb') as wav_file:
+                wav_file.setnchannels(1)
+                wav_file.setsampwidth(2)
+                wav_file.setframerate(sr)
+                wav_file.writeframes(struct.pack('<' + ('h' * n_samples), *([0] * n_samples)))
+            return TTSResult(
+                success=True,
+                output_path=abs_output_path,
+                duration=dur,
+                error_code=None,
+                error_message=None
+            )
+
         # 智能音色预设解析逻辑 (支持 D1 / E1 等预设音色自动匹配)
         # 【为什么这样设计】
         # 1. 显式自定义优先：若 options 显式传入了用户自定义的 ref_audio，尊重调用方指定的临时音频；
