@@ -112,15 +112,8 @@ def test_publish_ledger_record():
     assert restored.episode_num == 1
 
 
-def test_detect_browser_channel():
-    """测试系统商业浏览器内核嗅探能力"""
-    channel = DouyinBrowserManager.detect_browser_channel()
-    # Windows 环境应能探测到 chrome 或 msedge（若均无则为 None）
-    assert channel in ("chrome", "msedge", None)
-
-
 def test_create_persistent_context_mock(tmp_path: Path):
-    """测试统一浏览器上下文工厂对 channel 与参数的正确组装"""
+    """测试统一纯净 Chromium 上下文工厂对参数的正确组装"""
     mock_p = MagicMock()
     mock_context = MagicMock()
     mock_p.chromium.launch_persistent_context.return_value = mock_context
@@ -135,6 +128,6 @@ def test_create_persistent_context_mock(tmp_path: Path):
     assert "--disable-blink-features=AutomationControlled" in call_kwargs["args"]
     assert "--disable-setuid-sandbox" not in call_kwargs["args"]
     assert "--no-sandbox" not in call_kwargs["args"]
-    assert "--enable-automation" in call_kwargs["ignore_default_args"]
+    assert "channel" not in call_kwargs
     assert "user_agent" not in call_kwargs
 

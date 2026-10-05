@@ -145,11 +145,10 @@ class DomProbeDialog(QDialog):
         tip_title = QLabel("📌 探针交互采集指引：")
         tip_title.setStyleSheet("font-weight: bold; color: #38BDF8; font-size: 13px;")
         tip_content = QLabel(
-            "1. 浏览器正在自动打开抖音创作者上传页；\n"
-            "2. 请在浏览器中点击上传任意一个测试视频并等待解析完成；\n"
-            "3. 滚动到页面下方展开【加入合集】下拉列表（或其他关键配置项）；\n"
-            "4. 准备好目标页面后，点击下方【📸 立即采集当前DOM与页面快照】按钮；\n"
-            "5. 支持多次点击采集不同的表单状态，自动生成带时间戳的高保真报告。"
+            "1. 浏览器正在自动打开纯净独立的创作者上传页；\n"
+            "2. 页面加载就绪后，直接在页面中央点击展开【添加合集】下拉列表；\n"
+            "3. 确认合集下拉选项显示在屏幕后，点击下方【📸 立即采集当前DOM与页面快照】；\n"
+            "4. 无需等待右侧视频后台转码完成，即可秒级落盘完整的合集与表单结构报告！"
         )
         tip_content.setStyleSheet("color: #CBD5E1; font-size: 12px;")
         tip_layout.addWidget(tip_title)
