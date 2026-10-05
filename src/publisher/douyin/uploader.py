@@ -81,11 +81,8 @@ class DouyinUploader:
 
         try:
             with sync_playwright() as p:
-                context: BrowserContext = p.chromium.launch_persistent_context(
-                    user_data_dir=str(self.profile_path),
-                    headless=self.headless,
-                    args=DouyinBrowserManager.get_anti_detection_args(),
-                    viewport={"width": 1440, "height": 900}
+                context: BrowserContext = DouyinBrowserManager.create_persistent_context(
+                    p, self.profile_path, headless=self.headless, viewport={"width": 1440, "height": 900}
                 )
                 page = context.new_page() if not context.pages else context.pages[0]
                 DouyinBrowserManager.inject_stealth(page)

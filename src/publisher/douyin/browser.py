@@ -115,6 +115,74 @@ class DouyinBrowserManager:
             logger.debug(f"提取创作者昵称异常（可忽略）: {e}")
         return None
 
+    @staticmethod
+    def detect_browser_channel() -> Optional[str]:
+        """
+        自动检测系统已安装的商业级浏览器。
+        【为什么这样设计】
+        Playwright 默认自带的开源 Chromium 因开源协议限制未内置商业专有 H.264 / AAC 音视频编解码器。
+        抖音创作者上传页在客户端会利用 HTML5 <video> 标签本地解码视频提取封面帧和时长；
+        若使用开源 Chromium 会触发 MediaError 进而导致界面阻断并提示“上传失败，重新上传”。
+        因此优先检测系统已安装的官方 Google Chrome（channel="chrome"）或 Microsoft Edge（channel="msedge"）。
+        """
+        import os
+        from pathlib import Path
+
+        chrome_candidates = [
+            Path(os.environ.get("PROGRAMFILES", "C:\\Program Files")) / "Google" / "Chrome" / "Application" / "chrome.exe",
+            Path(os.environ.get("PROGRAMFILES(X86)", "C:\\Program Files (x86)")) / "Google" / "Chrome" / "Application" / "chrome.exe",
+            Path(os.environ.get("LOCALAPPDATA", "")) / "Google" / "Chrome" / "Application" / "chrome.exe",
+        ]
+        for cp in chrome_candidates:
+            if cp.exists():
+                return "chrome"
+
+        edge_candidates = [
+            Path(os.environ.get("PROGRAMFILES(X86)", "C:\\Program Files (x86)")) / "Microsoft" / "Edge" / "Application" / "msedge.exe",
+            Path(os.environ.get("PROGRAMFILES", "C:\\Program Files")) / "Microsoft" / "Edge" / "Application" / "msedge.exe",
+        ]
+        for ep in edge_candidates:
+            if ep.exists():
+                return "msedge"
+
+        return None
+
+    @classmethod
+    def create_persistent_context(
+        cls,
+        playwright_instance,
+        profile_path: Path,
+        headless: bool = False,
+        viewport: Optional[dict] = None
+    ) -> BrowserContext:
+        """
+        统一工厂方法：启动具备商业 H.264/AAC 解码器与完整真实商业指纹的持久化浏览器上下文。
+        """
+        profile_path = Path(profile_path).resolve()
+        profile_path.mkdir(parents=True, exist_ok=True)
+
+        channel = cls.detect_browser_channel()
+        launch_kwargs = {
+            "user_data_dir": str(profile_path),
+            "headless": headless,
+            "args": cls.get_anti_detection_args(),
+            "ignore_default_args": ["--enable-automation"],
+            "viewport": viewport or {"width": 1440, "height": 900},
+            "user_agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/133.0.0.0 Safari/537.36"
+            )
+        }
+        if channel:
+            launch_kwargs["channel"] = channel
+            logger.info(f"已选用系统商业级浏览器内核: channel={channel}")
+        else:
+            logger.warning("未检测到本地 Chrome 或 Edge，回退至内置 Chromium 内核（可能缺少 H.264 解码支持）")
+
+        context = playwright_instance.chromium.launch_persistent_context(**launch_kwargs)
+        return context
+
     def launch_interactive_login(self, account: DouyinAccountConfig, timeout_secs: int = 180) -> Tuple[bool, str]:
         """
         以可视化窗口启动浏览器，引导用户进行抖音扫码登录。
@@ -127,11 +195,8 @@ class DouyinBrowserManager:
 
         try:
             with sync_playwright() as p:
-                context: BrowserContext = p.chromium.launch_persistent_context(
-                    user_data_dir=str(profile_path),
-                    headless=False,
-                    args=self.get_anti_detection_args(),
-                    viewport={"width": 1280, "height": 800}
+                context: BrowserContext = self.create_persistent_context(
+                    p, profile_path, headless=False, viewport={"width": 1280, "height": 800}
                 )
                 page = context.new_page() if not context.pages else context.pages[0]
                 self.inject_stealth(page)

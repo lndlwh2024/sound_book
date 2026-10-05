@@ -80,11 +80,8 @@ class DouyinProbeWorker(QThread):
         profile_path.mkdir(parents=True, exist_ok=True)
         try:
             with sync_playwright() as p:
-                context = p.chromium.launch_persistent_context(
-                    user_data_dir=str(profile_path),
-                    headless=False,
-                    args=DouyinBrowserManager.get_anti_detection_args(),
-                    viewport={"width": 1440, "height": 900}
+                context = DouyinBrowserManager.create_persistent_context(
+                    p, profile_path, headless=False, viewport={"width": 1440, "height": 900}
                 )
                 page = context.new_page() if not context.pages else context.pages[0]
                 DouyinBrowserManager.inject_stealth(page)
