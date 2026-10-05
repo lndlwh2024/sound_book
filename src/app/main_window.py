@@ -31,6 +31,7 @@ from ..utils.config import config
 from ..utils.path_utils import sanitize_filename
 from ..utils.model_manager import ModelManager
 from ..audio.audio_preview_controller import AudioPreviewController
+from .douyin_panel import DouyinPublisherPanel
 
 logger = logging.getLogger(__name__)
 
@@ -602,12 +603,12 @@ class AudioPlayButton(QPushButton):
 
 
 class MainWindow(QMainWindow):
-    """书声 (ShuSheng) v3.3.26 PySide6 桌面主窗口"""
+    """书声 (ShuSheng) v3.4.0 PySide6 桌面主窗口"""
 
     def __init__(self, bridge: Optional[TaskManagerBridge] = None):
         super().__init__()
         self.bridge = bridge or TaskManagerBridge()
-        self.setWindowTitle("书声 (ShuSheng) v3.3.26 - 自动化有声视频生产工具 (小人书 AI 连环画增强版)")
+        self.setWindowTitle("书声 (ShuSheng) v3.4.0 - 自动化有声视频生产工具 (小人书 AI 连环画增强版)")
         self._raw_status_text = "空闲就绪 (IDLE)"
         self._is_producing = False
         self._is_dual_mode = False
@@ -970,6 +971,31 @@ class MainWindow(QMainWindow):
                 margin-bottom: -5px;
                 border-radius: 8px;
             }
+            /* 顶部双工作台导航页签样式 */
+            QTabWidget::pane {
+                border: 1px solid #33333F;
+                background-color: #1E1E24;
+                border-radius: 6px;
+            }
+            QTabBar::tab {
+                background-color: #262630;
+                color: #A0AEC0;
+                font-weight: bold;
+                font-size: 13px;
+                padding: 7px 22px;
+                margin-right: 4px;
+                border-top-left-radius: 6px;
+                border-top-right-radius: 6px;
+            }
+            QTabBar::tab:selected {
+                background-color: #1E1E24;
+                color: #4DA6FF;
+                border-top: 2px solid #007ACC;
+            }
+            QTabBar::tab:hover:!selected {
+                background-color: #2D3748;
+                color: #FFFFFF;
+            }
         """
         style_text = (
             style_text.replace("@@UP_ICON@@", up_icon)
@@ -982,21 +1008,20 @@ class MainWindow(QMainWindow):
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         main_layout = QVBoxLayout(central_widget)
-        main_layout.setContentsMargins(16, 16, 16, 16)
-        main_layout.setSpacing(8)
+        main_layout.setContentsMargins(12, 12, 12, 12)
+        main_layout.setSpacing(6)
+
+        # 顶部双工作台主导航
+        self.main_tabs = QTabWidget()
+        main_layout.addWidget(self.main_tabs)
+
+        # ====== 工作台 1: 🎬 有声视频生产工坊 ======
+        prod_container = QWidget()
+        prod_layout = QVBoxLayout(prod_container)
+        prod_layout.setContentsMargins(8, 8, 8, 8)
+        prod_layout.setSpacing(8)
 
         # 【核心双列网格架构：实现 4 个按钮与状态文案像素级对齐至左右分栏边界】
-        # 【为什么这样设计】
-        # 响应用户核心需求：“无论在默认开启窗口 还是最大化窗口 都要把 4个按钮 和状态文案的分界线 对齐到 左右栏目的边界”
-        # 若上方左右面板使用独立的 QHBoxLayout，下方控制栏使用另一个独立的 QHBoxLayout，
-        # 两者各自根据内部子组件计算 MinimumSizeHint，必定造成上下列宽脱节与分割线错位；
-        # 改用统一的顶层双列网格 work_grid：
-        # - Row 0, Col 0: 左栏配置面板 (left_panel)
-        # - Row 0, Col 1: 右栏工作台与日志 (right_panel)
-        # - Row 1, Col 0: 4 个核心操作按钮 (left_btn_widget)
-        # - Row 1, Col 1: 运行状态反馈栏 (right_status_widget)
-        # Qt 引擎在物理层面保证：第 0 列上下完全等宽，第 1 列上下完全等宽！
-        # 无论在默认窗口还是全屏最大化下，4 个按钮的右边缘与左栏右边缘 100% 绝对重合，状态栏左边缘与右栏左边缘 100% 绝对重合！
         work_grid = QGridLayout()
         work_grid.setContentsMargins(0, 0, 0, 0)
         work_grid.setHorizontalSpacing(16)
@@ -1015,15 +1040,21 @@ class MainWindow(QMainWindow):
         work_grid.addWidget(left_btn_widget, 1, 0)
         work_grid.addWidget(right_status_widget, 1, 1)
 
-        main_layout.addLayout(work_grid, 1)
+        prod_layout.addLayout(work_grid, 1)
 
         # 底部第 2 层：全流程管线 8 节点可视化指示图
         self.pipeline_flow = PipelineFlowWidget()
-        main_layout.addWidget(self.pipeline_flow, 0)
+        prod_layout.addWidget(self.pipeline_flow, 0)
 
         # 底部第 3 层：硬件负载实时监控条 与 全局任务进度条
         bottom_monitor_bar = self._build_bottom_monitor_bar()
-        main_layout.addWidget(bottom_monitor_bar, 0)
+        prod_layout.addWidget(bottom_monitor_bar, 0)
+
+        self.main_tabs.addTab(prod_container, "🎬 有声视频生产工坊")
+
+        # ====== 工作台 2: 🚀 抖音矩阵自动发布 ======
+        self.douyin_panel = DouyinPublisherPanel()
+        self.main_tabs.addTab(self.douyin_panel, "🚀 抖音矩阵自动发布")
 
     def _build_left_config_panel(self) -> QWidget:
         """构建左侧参数配置区（纯净一体化面板，绝无滑动条）"""
