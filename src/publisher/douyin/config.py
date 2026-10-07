@@ -27,6 +27,7 @@ class DouyinAccountManager:
         self.profiles_base_dir = profiles_base_dir or (PROJECT_ROOT / "data" / "douyin_profiles")
         self.profiles_base_dir.mkdir(parents=True, exist_ok=True)
         self._accounts: List[DouyinAccountConfig] = []
+        self.load_error = ''
         self.load()
 
     def load(self) -> List[DouyinAccountConfig]:
@@ -36,23 +37,28 @@ class DouyinAccountManager:
             return self._accounts
 
         try:
-            with open(self.config_file, "r", encoding="utf-8") as f:
+            with open(self.config_file, "r", encoding="utf-8-sig") as f:
                 data = json.load(f)
             raw_list = data if isinstance(data, list) else data.get("accounts", [])
             self._accounts = [DouyinAccountConfig.from_dict(item) for item in raw_list]
+            self.load_error = ''
             logger.info(f"成功加载 {len(self._accounts)} 个抖音账号配置")
         except Exception as e:
             logger.error(f"读取抖音账号配置失败: {e}")
             self._accounts = []
+            self.load_error = f'抖音配置读取失败：{e}；保留原文件，禁止覆盖。'
         return self._accounts
 
     def save(self) -> bool:
         """持久化保存账号列表至 JSON 文件"""
         try:
+            if self.load_error:
+                raise ValueError(self.load_error)
             self.config_file.parent.mkdir(parents=True, exist_ok=True)
             data = [acc.to_dict() for acc in self._accounts]
-            with open(self.config_file, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
+            temporary = self.config_file.with_suffix('.tmp')
+            temporary.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding='utf-8')
+            temporary.replace(self.config_file)
             logger.info(f"已持久化保存 {len(self._accounts)} 个抖音账号配置")
             return True
         except Exception as e:
@@ -113,8 +119,7 @@ class DouyinAccountManager:
         for i, acc in enumerate(self._accounts):
             if acc.account_id == account.account_id:
                 self._accounts[i] = account
-                self.save()
-                return True
+                return self.save()
         return False
 
     def delete_account(self, account_id: str) -> bool:

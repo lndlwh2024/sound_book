@@ -27,6 +27,10 @@ class DouyinAccountConfig:
     status: str = "UNAUTHORIZED"  # AUTHORIZED, UNAUTHORIZED, EXPIRED
     last_auth_time: Optional[str] = None
     created_at: str = field(default_factory=lambda: time.strftime("%Y-%m-%d %H:%M:%S"))
+    collection_name: str = ""
+    platform_nickname: str = ""
+    platform_uid: str = ""
+    identity_note: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -44,7 +48,11 @@ class DouyinAccountConfig:
             default_tags=data.get("default_tags", ["#有声书", "#知识分享"]),
             status=data.get("status", "UNAUTHORIZED"),
             last_auth_time=data.get("last_auth_time"),
-            created_at=data.get("created_at", time.strftime("%Y-%m-%d %H:%M:%S"))
+            created_at=data.get("created_at", time.strftime("%Y-%m-%d %H:%M:%S")),
+            collection_name=data.get("collection_name", ""),
+            platform_nickname=data.get("platform_nickname", ""),
+            platform_uid=data.get("platform_uid", ""),
+            identity_note=data.get("identity_note", "")
         )
 
 

@@ -4,6 +4,7 @@
 验证账号管理、防半截写入探测、DOM探针容错与昵称解析逻辑。
 """
 import json
+import os
 import pytest
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -54,6 +55,8 @@ def test_file_fully_written_lock(tmp_path: Path):
 
     # 写入 > 1KB 数据
     f.write_bytes(b"0" * 2048)
+    # Windows 文件时间与 time.time 的采样可能有微小偏差，固定为已完成写入。
+    os.utime(f, (1, 1))
     assert is_file_fully_written(f, min_age_secs=0.0) is True
 
 
@@ -186,6 +189,5 @@ def test_probe_heartbeat_resilience():
     # 验证存活判定：由于 context.pages 仍有页面，不会被误判定为已关闭
     has_living_pages = bool(mock_context.pages) and not (mock_page.is_closed() and len(mock_context.pages) == 0)
     assert has_living_pages is True
-
 
 

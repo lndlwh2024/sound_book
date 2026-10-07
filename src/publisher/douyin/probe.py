@@ -73,6 +73,14 @@ class DouyinDOMProbe:
                 placeholder: el.placeholder || '',
                 className: safeClass(el),
                 accept: el.accept || '',
+                disabled: el.disabled,
+                disabledByFieldset: el.matches(':disabled'),
+                readOnly: el.readOnly,
+                ariaDisabled: el.closest('[aria-disabled="true"]') !== null,
+                ariaReadOnly: el.getAttribute('aria-readonly'),
+                maxLength: el.maxLength,
+                visible: el.getBoundingClientRect().width > 0 && el.getBoundingClientRect().height > 0
+                    && getComputedStyle(el).visibility !== 'hidden',
                 xpath: getXPath(el)
             }));
 
@@ -113,9 +121,11 @@ class DouyinDOMProbe:
         """
         return page.evaluate(probe_js)
 
-    def capture_dom_report(self, page: Page) -> Tuple[Path, Path]:
+    def capture_dom_report(self, page: Page, diagnostic: Optional[Dict[str, Any]] = None) -> Tuple[Path, Path]:
         """抓取并落盘 DOM 报告 JSON 与高保真全屏截图"""
         report_data = self.extract_dom_elements(page)
+        if diagnostic is not None:
+            report_data['diagnostic'] = diagnostic
         time_tag = time.strftime("%Y%m%d_%H%M%S")
         report_json_path = self.output_dir / f"douyin_dom_report_{time_tag}.json"
         snapshot_png_path = self.output_dir / f"douyin_page_snapshot_{time_tag}.png"

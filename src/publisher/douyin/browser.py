@@ -155,7 +155,8 @@ class DouyinBrowserManager:
         playwright_instance,
         profile_path: Path,
         headless: bool = False,
-        viewport: Optional[dict] = None
+        viewport: Optional[dict] = None,
+        timeout: Optional[int] = None
     ) -> BrowserContext:
         """
         统一工厂方法：启动 Playwright 纯净独立的持久化 Chromium 浏览器上下文。
@@ -175,6 +176,8 @@ class DouyinBrowserManager:
             "viewport": viewport or {"width": 1440, "height": 900}
         }
 
+        if timeout is not None:
+            launch_kwargs["timeout"] = timeout
         context = playwright_instance.chromium.launch_persistent_context(**launch_kwargs)
         return context
 
@@ -261,4 +264,3 @@ class DouyinBrowserManager:
             err_msg = f"启动或操作登录浏览器异常: {e}"
             logger.error(err_msg)
             return False, err_msg
-

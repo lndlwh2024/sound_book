@@ -31,7 +31,7 @@ from ..utils.config import config
 from ..utils.path_utils import sanitize_filename
 from ..utils.model_manager import ModelManager
 from ..audio.audio_preview_controller import AudioPreviewController
-from .douyin_panel import DouyinPublisherPanel
+from .channel_panel import MultiPlatformPublisherPanel
 
 logger = logging.getLogger(__name__)
 
@@ -618,7 +618,8 @@ class MainWindow(QMainWindow):
         screen = QApplication.primaryScreen()
         if screen:
             avail = screen.availableGeometry()
-            init_w = max(1360, min(1500, int(avail.width() * 0.92)))
+            base_w = max(1360, min(1500, int(avail.width() * 0.92)))
+            init_w = min(avail.width(), round(base_w * 1.10))
             init_h = max(840, min(960, int(avail.height() * 0.93)))
             self.resize(init_w, init_h)
         self.setMinimumSize(1100, 750)
@@ -1053,8 +1054,8 @@ class MainWindow(QMainWindow):
         self.main_tabs.addTab(prod_container, "🎬 有声视频生产工坊")
 
         # ====== 工作台 2: 🚀 抖音矩阵自动发布 ======
-        self.douyin_panel = DouyinPublisherPanel()
-        self.main_tabs.addTab(self.douyin_panel, "🚀 抖音矩阵自动发布")
+        self.douyin_panel = MultiPlatformPublisherPanel()
+        self.main_tabs.addTab(self.douyin_panel, "🚀 多平台自动发布")
 
     def _build_left_config_panel(self) -> QWidget:
         """构建左侧参数配置区（纯净一体化面板，绝无滑动条）"""
@@ -3393,6 +3394,10 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         """窗口关闭前停止试听推流与清理资源"""
+        if hasattr(self, 'douyin_panel') and not self.douyin_panel.prepare_shutdown():
+            event.ignore()
+            QTimer.singleShot(200, self.close)
+            return
         if hasattr(self, 'preview_controller') and self.preview_controller:
             self.preview_controller.stop()
         super().closeEvent(event)

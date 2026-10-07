@@ -1,17 +1,20 @@
 # -*- coding: utf-8 -*-
 """
 抖音自动化上传发布与归档引擎模块 (Douyin Uploader & Publishing Pipeline)
-实现：注入文件 -> 转码就绪 -> 标题与话题注入 -> 封面设置 -> 合集智能自判断(已有选中/新书书名自建) -> 点击发布 -> 物理归档 -> 按日带时间戳账本与报告。
+        实现：注入文件 -> 表单就绪 -> 独立标题填写 -> 封面设置 -> 合集关联 -> 发布确认 -> 归档与报告。
 """
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import shutil
+import subprocess
 import time
 from pathlib import Path
-from typing import Optional, Dict, Any, Tuple, List
+from typing import Optional, Dict, Any, Tuple, List, Callable
+from urllib.parse import urlsplit
 
 from playwright.sync_api import sync_playwright, BrowserContext, Page
 
@@ -19,6 +22,30 @@ from .models import DouyinAccountConfig, PublishLedgerRecord
 from .browser import DouyinBrowserManager, DOUYIN_UPLOAD_URL
 
 logger = logging.getLogger(__name__)
+
+TITLE_SELECTOR = 'input[placeholder="填写作品标题，为作品获得更多流量"]'
+DURATION_LIMIT_NOTICE = re.compile(r'(?:视频|时长)[^\n]{0,80}(?:不能|不得|不可|超过|超出)[^\n]{0,30}(?:60\s*分钟|六十分钟|1\s*小时|一小时)')
+
+
+class VideoDurationRejected(Exception):
+    """Permanent file rejection: continue with the next video without retry."""
+
+
+def probe_video_duration(video_path: Path):
+    try:
+        result = subprocess.run(['ffprobe', '-v', 'error', '-show_entries', 'format=duration',
+                                 '-of', 'default=noprint_wrappers=1:nokey=1', str(video_path.resolve())],
+                                capture_output=True, text=True, encoding='utf-8', errors='replace', check=True, timeout=5,
+                                creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+        duration = float(result.stdout.strip())
+        return duration if math.isfinite(duration) and duration >= 0 else None
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        logger.warning('读取视频时长失败，将继续检查平台提示：%s', type(error).__name__)
+        return None
+
+
+class PublishCancelled(Exception):
+    """Cooperative stop, raised only on the Playwright owning thread."""
 
 
 def compute_file_md5(file_path: Path) -> str:
@@ -40,7 +67,7 @@ def parse_video_title_and_episode(file_name: str) -> Tuple[str, str, Optional[in
     # 移除 commit hash 标记 [f2ffe8f]
     clean_stem = re.sub(r'\[[a-f0-9]{7,8}\]', '', stem).strip('_ ')
 
-    ep_match = re.search(r'第\s*(\d+)\s*集', clean_stem)
+    ep_match = re.search(r'第\s*(\d+)\s*(?:集|问)', clean_stem)
     episode_num = int(ep_match.group(1)) if ep_match else None
 
     # 书名提取：以下划线分隔的第一部分或全名
@@ -52,15 +79,159 @@ def parse_video_title_and_episode(file_name: str) -> Tuple[str, str, Optional[in
     return clean_book_name, clean_stem, episode_num
 
 
+def resolve_publish_series(file_name: str) -> str:
+    """Strip the product prefix, date and episode from the displayed series title."""
+    stem = re.sub(r'^书声[_—-]+', '', Path(file_name).stem)
+    return stem.split('_')[0].replace('《', '').replace('》', '').strip()
+
+
 class DouyinUploader:
     """
     抖音创作者中心自动化上传器。
     """
-    def __init__(self, account: DouyinAccountConfig, headless: bool = False):
+    def __init__(self, account: DouyinAccountConfig, headless: bool = False,
+                 stop_requested: Optional[Callable[[], bool]] = None,
+                 progress_callback: Optional[Callable[[str], None]] = None):
         self.account = account
         self.headless = headless
         self.profile_path = Path(account.profile_dir).resolve()
         self.profile_path.mkdir(parents=True, exist_ok=True)
+        self._stop_requested = stop_requested or (lambda: False)
+        self._progress_callback = progress_callback
+        self.last_outcome = "FAILED"
+        self._network_events = []
+        self.account_limit_reason = None
+        self._video_selected = False
+        self._upload_activity_seen = False
+        self._publish_armed = False
+        self._publish_result = None
+
+    def _attach_publish_diagnostics(self, page):
+        def on_response(response):
+            url = urlsplit(response.url)
+            endpoint = url.scheme + '://' + url.netloc + url.path
+            publish_api = ('douyin.com' in url.netloc and response.request.method == 'POST'
+                           and any(word in url.path.lower() for word in ('publish', 'aweme/create')))
+            if not publish_api and response.status < 400:
+                return
+            event = {'kind': 'response', 'url': endpoint, 'http_status': response.status}
+            if publish_api:
+                try:
+                    body = response.json()
+                    if isinstance(body, dict):
+                        if self._publish_armed and re.search(r'/aweme/create(?:_v\d+)?/?$', url.path):
+                            code = body.get('status_code', body.get('code'))
+                            if code is not None or response.status >= 400:
+                                if response.status >= 400:
+                                    code = f'HTTP {response.status}'
+                                self._publish_result = {'code': str(code), 'message': str(body.get('status_msg') or body.get('message') or '')[:300]}
+                        message = str(body.get('status_msg') or body.get('message') or '')
+                        if str(body.get('status_code')) == '2158' or re.search(r'(今日|今天).*(投稿|发布).*(上限|限额)', message):
+                            self.account_limit_reason = message or '今日投稿已达到上限（业务码2158）'
+                        event['result'] = {key: str(body[key])[:160] for key in
+                                           ('status_code', 'status_msg', 'code', 'message', 'error_msg')
+                                           if key in body and isinstance(body[key], (str, int, float, bool))}
+                except Exception:
+                    pass
+            if len(self._network_events) >= 40 and not self.account_limit_reason:
+                return
+            if len(self._network_events) >= 40:
+                self._network_events.pop(0)
+            self._network_events.append(event)
+            self._progress(f"[接口诊断] HTTP {response.status} {endpoint}；{event.get('result', {})}")
+
+        def on_failed(request):
+            if len(self._network_events) < 40:
+                url = urlsplit(request.url)
+                if url.scheme not in ('http', 'https'):
+                    return
+                event = {'kind': 'requestfailed', 'url': url.scheme + '://' + url.netloc + url.path,
+                         'error': request.failure}
+                self._network_events.append(event)
+                self._progress(f"[网络诊断] {event['url']}：{request.failure}")
+        page.on('response', on_response)
+        page.on('requestfailed', on_failed)
+
+    def _check_stop(self):
+        if self._stop_requested():
+            raise PublishCancelled()
+
+    def _progress(self, message: str):
+        logger.info(message)
+        if self._progress_callback:
+            self._progress_callback(message)
+
+    def _pause(self, page: Page, milliseconds: int):
+        # Keep pumping Playwright events while checking stop at most every 300 ms.
+        remaining = milliseconds
+        self._check_stop()
+        while remaining > 0:
+            step = min(300, remaining)
+            page.wait_for_timeout(step)
+            remaining -= step
+            self._check_stop()
+            if self._video_selected:
+                self._check_duration_notice(page)
+                if not self._publish_armed:
+                    self._read_upload_state(page)
+
+    def _check_duration_notice(self, page):
+        notices = page.get_by_text(DURATION_LIMIT_NOTICE)
+        for index in range(notices.count()):
+            notice = notices.nth(index)
+            if notice.is_visible():
+                raise VideoDurationRejected(notice.inner_text()[:300])
+
+    def _wait_for_title(self, page: Page, timeout_secs: float = 1800):
+        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+        title_input = page.locator(TITLE_SELECTOR + ':visible')
+        deadline = time.monotonic() + timeout_secs
+        while time.monotonic() < deadline:
+            self._check_stop()
+            self._check_duration_notice(page)
+            try:
+                count = title_input.count()
+                if count > 1:
+                    raise RuntimeError("存在多个可见作品标题输入框，停止发布以避免填写错误")
+                if count == 1:
+                    title_input.wait_for(state="visible", timeout=300)
+                    if title_input.is_enabled() and title_input.is_editable():
+                        self._check_stop()
+                        return title_input
+            except PlaywrightTimeoutError:
+                pass
+            self._pause(page, 100)
+        raise RuntimeError("等待唯一可见且可编辑的作品标题输入框超时，请查看诊断报告")
+
+    def _fill_title(self, title_input, title: str, timeout_secs: float = 30):
+        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+        self._check_stop()
+        maxlength = title_input.get_attribute("maxlength")
+        limit = int(maxlength) if maxlength and maxlength.isdigit() else 30
+        value = title[:limit]
+        if value != title:
+            self._progress(f"作品标题超过 {limit} 字，已截取前 {limit} 字")
+        deadline = time.monotonic() + timeout_secs
+        last_error = None
+        while time.monotonic() < deadline:
+            self._check_stop()
+            try:
+                # Short calls keep stop responsive; the overall budget tolerates SPA re-rendering.
+                budget = max(1, min(300, int((deadline - time.monotonic()) * 1000)))
+                title_input.fill(value, timeout=budget)
+                self._check_stop()
+                if title_input.input_value(timeout=budget) != value:
+                    raise RuntimeError("作品标题回读不一致，停止发布")
+                return
+            except PlaywrightTimeoutError as error:
+                last_error = error
+        self._check_stop()
+        raise RuntimeError(f"作品标题在 {timeout_secs:g} 秒内未能完成填写：{last_error}")
+
+    def _prepare_title(self, page: Page, title: str):
+        title_editor = self._wait_for_title(page)
+        self._progress("正在填写作品标题；正文和话题不自动填写")
+        self._fill_title(title_editor, title)
 
     def upload_single_video(
         self,
@@ -75,24 +246,49 @@ class DouyinUploader:
             return False, f"视频文件不存在: {video_path}", None
 
         book_name, title, episode_num = parse_video_title_and_episode(video_path.name)
-        tags = custom_tags or self.account.default_tags
+        book_name = resolve_publish_series(video_path.name)
+        title = book_name
+        # 当前发布模式只填写独立标题；正文与话题保持空白。
+        publish_submitted = False
+        self.last_outcome = "FAILED"
+        self._network_events = []
+        self.account_limit_reason = None
+        self._video_selected = False
+        self._upload_activity_seen = False
+        self._publish_armed = False
+        self._publish_result = None
 
         logger.info(f"开始上传视频: {video_path.name} | 归属书名: 《{book_name}》 | 集数: 第{episode_num}集")
 
         try:
+            self._check_stop()
+            duration = probe_video_duration(video_path)
+            self._check_stop()
+            if duration is not None:
+                self._progress(f'[时长检查] {video_path.name}：{duration:.2f} 秒（上限 3600 秒）')
+                if duration > 3600:
+                    raise VideoDurationRejected(f'视频时长 {duration / 60:.2f} 分钟，超过60分钟；跳过且不重试')
+            else:
+                self._progress('[时长检查] 本地时长读取失败，将检查平台提示')
+            self._progress("正在启动浏览器（启动调用最长等待 10 秒）")
             with sync_playwright() as p:
                 context: BrowserContext = DouyinBrowserManager.create_persistent_context(
-                    p, self.profile_path, headless=self.headless, viewport={"width": 1440, "height": 900}
+                    p, self.profile_path, headless=self.headless, viewport={"width": 1440, "height": 900},
+                    timeout=10000
                 )
+                self._check_stop()
+                context.set_default_timeout(2000)
                 page = context.new_page() if not context.pages else context.pages[0]
                 DouyinBrowserManager.inject_stealth(page)
+                self._attach_publish_diagnostics(page)
 
                 logger.info(f"导航至抖音创作者中心上传页: {DOUYIN_UPLOAD_URL}")
-                page.goto(DOUYIN_UPLOAD_URL, wait_until="domcontentloaded", timeout=60000)
+                self._progress("正在打开上传页（导航调用最长等待 10 秒）")
+                page.goto(DOUYIN_UPLOAD_URL, wait_until="domcontentloaded", timeout=10000)
                 # 设计说明：使用 page.wait_for_timeout() 替代 time.sleep()
                 # Playwright 同步模式依赖调用驱动底层 Node.js 管道。
                 # 严禁在持有 page 时调用 time.sleep，否则会导致上传 Web Worker 挂起死锁。
-                page.wait_for_timeout(3000)
+                self._pause(page, 3000)
 
                 # 检查是否处于登录状态
                 if "login" in page.url.lower():
@@ -102,122 +298,67 @@ class DouyinUploader:
 
                 # 步骤 1: 注入视频文件
                 logger.info("【步骤 1/5】正在注入视频文件...")
-                file_input = page.locator('input[type="file"]').first
+                self._check_stop()
+                file_input = page.locator('input[type="file"][accept*="video"], input[type="file"][accept*=".mp4"]').first
                 if file_input.count() == 0:
                     context.close()
                     return False, "未找到文件上传 Input 元素，请先使用 DOM 探针校准页面", None
 
                 file_input.set_input_files(str(video_path.resolve()))
+                self._video_selected = True
+                self._progress("视频文件已选择，正在等待作品标题表单")
                 logger.info("视频文件注入成功，正在等待页面加载与转码处理...")
 
                 # 步骤 2: 等待视频上传并进入编辑页
-                page.wait_for_timeout(3000)
+                self._pause(page, 3000)
                 # 等待标题输入框出现（标志着上传成功进入作品发布表单）
-                title_editor = page.locator('[contenteditable="true"], textarea, [data-placeholder*="作品"]').first
-                try:
-                    title_editor.wait_for(state="visible", timeout=120000)
-                    logger.info("【步骤 2/5】视频已成功载入，进入作品信息编辑表单")
-                except Exception as e:
-                    context.close()
-                    return False, f"等待视频转码与表单展示超时: {e}", None
+                self._required_stage(page, "等待并填写作品标题", lambda: self._prepare_title(page, title))
+                self._pause(page, 2000)
 
-                # 步骤 3: 填充作品描述与话题标签
-                logger.info("【步骤 3/5】正在填充作品描述与话题标签...")
-                tag_str = " " + " ".join(tags) if tags else ""
-                full_desc = f"{title}{tag_str}"
-
-                title_editor.click()
-                title_editor.fill("")
-                # 模拟逐字键入，以触发可能的平台话题联想
-                page.keyboard.type(title)
-                for tag in tags:
-                    clean_tag = tag.strip('# ')
-                    page.keyboard.type(f" #{clean_tag} ")
-                    page.wait_for_timeout(500)
-                    page.keyboard.press("Enter")
-
-                page.wait_for_timeout(2000)
-
-                # 步骤 4: 封面设置（若存在本地配套封面）
-                if cover_path and cover_path.exists():
-                    logger.info(f"【步骤 4/5】检测到配套封面，正在上传: {cover_path.name}")
-                    try:
-                        # 查找选择/更换封面按钮
-                        cover_btn = page.locator('text=选择封面, text=设置封面, text=更换封面').first
-                        if cover_btn.count() > 0:
-                            cover_btn.click()
-                            page.wait_for_timeout(2000)
-                            # 封面上传弹窗内的 file input
-                            cover_input = page.locator('input[type="file"]').last
-                            if cover_input.count() > 0:
-                                cover_input.set_input_files(str(cover_path.resolve()))
-                                page.wait_for_timeout(3000)
-                                # 确定保存封面
-                                confirm_btn = page.locator('button:has-text("确定"), button:has-text("完成")').last
-                                if confirm_btn.count() > 0:
-                                    confirm_btn.click()
-                                    page.wait_for_timeout(2000)
-                    except Exception as e:
-                        logger.warning(f"设置封面出现轻微异常，回退使用默认抓帧封面: {e}")
-
-                # 步骤 5: 合集智能自判断与归属
-                logger.info(f"【步骤 5/5】正在进行合集自判断与归属: 《{book_name}》 (第{episode_num}集)")
-                self._handle_collection_assignment(page, book_name, episode_num)
-
-                page.wait_for_timeout(2000)
-
+                self._required_stage(page, "选择当前视频画面作为封面", lambda: self._select_video_cover(page))
+                collection_name = self.account.collection_name or book_name
+                self._required_stage(page, f"选择合集：{collection_name}",
+                                     lambda: self._handle_collection_assignment(page, collection_name, episode_num))
+                self._pause(page, 1000)
+                self._required_stage(page, '等待视频上传与处理完成（最多30分钟）', lambda: self._wait_for_upload_ready(page))
                 # 步骤 6: 点击发布
                 logger.info("正在执行最终发布...")
-                publish_btn = page.locator('button:has-text("发布"), button[type="primary"]:has-text("发布")').first
-                if publish_btn.count() == 0:
-                    context.close()
-                    return False, "未找到发布按钮，请检查页面结构", None
+                publish_btn = self._required_stage(page, "校验发布按钮", lambda: self._get_publish_button(page))
 
+                self._check_stop()
+                # 点击超时也可能已提交，先记下边界，避免误报取消成功。
+                publish_submitted = True
+                self._publish_armed = True
                 publish_btn.click()
-                logger.info("已点击发布按钮，正在监听发布成功状态...")
+                self._progress("已点击发布，等待实际投稿接口确认（最长10分钟）；此时停止将保留待核对文件")
 
-                # 监听结果
-                # 设计说明：
-                # 1. 严禁使用 "creator-micro" 作为成功判定：上传页面 URL 自身常驻带有 "creator-micro"，
-                #    若用此作为条件会导致一点击发布立刻误判成功并错误将未上传视频物理归档！
-                # 2. 真正的发布成功判定标准：
-                #    - URL 离开 content/upload 跳转至 content/manage 作品管理页面；
-                #    - 或者捕获到明确的成功 Toast/弹框提示（“发布成功”、“已发布”、“作品发布成功”）；
-                #    - 或者出现“查看作品”、“继续发布”操作按钮。
+                # Only this attempt's actual create API acknowledgement confirms submission.
                 success = False
                 err_detail = None
                 wait_start = time.time()
-                while time.time() - wait_start < 60:
-                    cur_url = page.url.lower()
-                    # 条件 A: 页面跳转至作品管理列表
-                    if "content/manage" in cur_url or ("manage" in cur_url and "upload" not in cur_url):
-                        logger.info("检测到页面已成功跳转至作品管理列表，发布确认成功！")
-                        success = True
+                while time.time() - wait_start < 600:
+                    self._check_stop()
+                    if self._publish_result is not None:
+                        if self._publish_result['code'] == '0':
+                            self._progress('实际投稿接口返回业务码0，平台已确认接收作品')
+                            success = True
+                            break
+                        err_detail = f"投稿接口业务码{self._publish_result['code']}：{self._publish_result['message']}"
                         break
-
-                    # 条件 B: 捕获到明确的成功 Toast
-                    try:
-                        success_toast = page.locator('text=发布成功, text=已发布, text=作品发布成功, [class*="toast"]:has-text("成功")').first
-                        if success_toast.count() > 0 and success_toast.is_visible():
-                            logger.info("捕获到抖音平台【发布成功】Toast 提示，发布确认成功！")
-                            success = True
+                    if self.account_limit_reason:
+                        err_detail = self.account_limit_reason
+                        break
+                    quota_notice = page.get_by_text(re.compile(r'(今日|今天).*(投稿|发布).*(上限|限额)'))
+                    for index in range(quota_notice.count()):
+                        if quota_notice.nth(index).is_visible():
+                            self.account_limit_reason = quota_notice.nth(index).inner_text()
+                            err_detail = self.account_limit_reason
                             break
-                    except Exception:
-                        pass
-
-                    # 条件 C: 捕获到发布成功后弹出的后续操作弹窗
-                    try:
-                        finish_btn = page.locator('button:has-text("查看作品"), button:has-text("继续发布")').first
-                        if finish_btn.count() > 0 and finish_btn.is_visible():
-                            logger.info("捕获到发布完成引导弹窗，发布确认成功！")
-                            success = True
-                            break
-                    except Exception:
-                        pass
-
+                    if self.account_limit_reason:
+                        break
                     # 条件 D: 显式探测失败告警提示，提前退出避免无谓等待
                     try:
-                        fail_msg = page.locator('text=发布失败, text=包含违规, text=敏感词, text=视频格式不支持').first
+                        fail_msg = page.get_by_text(re.compile(r"发布失败|包含违规|敏感词|视频格式不支持|请填写作品标题")).first
                         if fail_msg.count() > 0 and fail_msg.is_visible():
                             err_detail = fail_msg.inner_text()
                             logger.error(f"捕获到平台发布拒绝提示: {err_detail}")
@@ -226,81 +367,243 @@ class DouyinUploader:
                         pass
 
                     # 循环使用 page.wait_for_timeout 维持消息分发
-                    try:
-                        page.wait_for_timeout(1000)
-                    except Exception:
-                        break
-
-                context.close()
+                    self._pause(page, 1000)
 
                 if not success:
+                    self.last_outcome = ('ACCOUNT_LIMIT' if self.account_limit_reason else
+                                         ('UNCONFIRMED' if not err_detail else 'FAILED'))
                     reason = f"平台返回错误: {err_detail}" if err_detail else "点击发布后未能在规定时间内捕获成功提示或页面跳转"
+                    self._progress(f"[发布核对] 等待 {time.time() - wait_start:.1f} 秒；页面：{urlsplit(page.url).path}；结果未确认")
+                    self._save_diagnostics(page, "发布未确认", reason)
+                    context.close()
                     return False, reason, None
+
+                context.close()
 
                 logger.info(f"作品 [{title}] 在抖音平台发布成功！")
 
                 # 步骤 7: 物理归档与日账本生成
-                record = self._finalize_publish_archive_and_ledger(video_path, book_name, episode_num)
+                record = self._finalize_publish_archive_and_ledger(video_path, collection_name, episode_num)
+                self.last_outcome = "SUCCESS"
                 return True, "发布成功并已归档", record
 
+        except VideoDurationRejected as error:
+            self.last_outcome = 'DURATION_LIMIT'
+            self._progress(f'[不可重试] {error}；保留原文件，继续下一个视频')
+            return False, str(error), None
+        except PublishCancelled:
+            self.last_outcome = "UNCONFIRMED" if publish_submitted else "CANCELLED"
+            msg = ("已停止：已点击发布，平台结果尚未确认，请核对作品列表；本地文件未归档"
+                   if publish_submitted else "已停止：当前任务已取消，未点击发布，本地文件未归档")
+            self._progress(msg)
+            return False, msg, None
         except Exception as e:
-            err_msg = f"自动化上传流程异常: {e}"
+            if self.account_limit_reason:
+                self.last_outcome = 'ACCOUNT_LIMIT'
+            elif publish_submitted:
+                self.last_outcome = "UNCONFIRMED"
+            err_msg = (f"账号今日投稿达到上限: {self.account_limit_reason}" if self.account_limit_reason
+                       else f"自动化上传流程异常: {e}")
             logger.error(err_msg)
             return False, err_msg, None
 
-    def _handle_collection_assignment(self, page: Page, book_name: str, episode_num: Optional[int]) -> None:
-        """
-        合集自判断核心逻辑：
-        展开合集下拉框 -> 搜索匹配已有合集 -> 命中则选择并填入集数 -> 未命中则自动新建合集。
-        基于真实采集落盘的 DOM 报告适配官方 Semi Design 合集组件 (div.semi-select)。
-        """
-        try:
-            # 1. 尝试找到合集复选框或选择入口（支持文字与 Semi Select 容器）
-            coll_entry = page.locator(
-                'text=添加至合集, text=作品合集, [class*="collection"], div.semi-select'
-            ).first
-            if coll_entry.count() == 0:
-                logger.info("页面未检测到合集入口，跳过合集操作")
+    def _get_publish_button(self, page: Page):
+        self._check_stop()
+        button = page.get_by_role("button", name="发布", exact=True)
+        if button.count() != 1:
+            raise RuntimeError("未找到唯一的【发布】提交按钮，拒绝使用【作品发布】侧栏入口")
+        if not button.is_visible() or not button.is_enabled():
+            raise RuntimeError("发布按钮不可用，视频处理或表单校验尚未完成")
+        return button
+
+    def _read_upload_state(self, page):
+        # Read only: unrelated permission prompts and preview tips are left intact.
+        state = page.evaluate(r'''() => {
+                const visible = el => {const r=el.getBoundingClientRect();
+                    return r.width>0 && r.height>0 && getComputedStyle(el).visibility!=='hidden';};
+                const texts = Array.from(document.querySelectorAll('span,p,div'))
+                    .filter(el=>el.children.length===0 && visible(el))
+                    .map(el=>(el.innerText||'').trim()).filter(t=>t.length<160);
+                const pending = texts.filter(t=>/正在上传|上传中|转码中|正在转码|视频处理中|视频处理尚未完成/.test(t));
+                const ready = texts.some(t=>/^(视频)?上传(成功|完成)[！!。]?$/.test(t));
+                const progress = Array.from(document.querySelectorAll('[role="progressbar"],progress,[class*="upload-progress"]'))
+                    .filter(visible).map(el=>({text:el.innerText||'', value:Number(el.getAttribute('aria-valuenow')??el.value??((el.innerText||'').match(/(\d+(?:\.\d+)?)\s*%/)||[])[1]??-1),
+                        max:Number(el.getAttribute('aria-valuemax')||el.max||100),
+                        upload:/upload/i.test(el.className||'') || /上传/.test(el.getAttribute('aria-label')||'')}));
+                const complete = progress.some(p=>p.upload && p.value>=p.max && p.max>0);
+                const incomplete = progress.some(p=>p.upload && p.value>=0 && p.value<p.max);
+                const serverVideo = Array.from(document.querySelectorAll('video')).some(el=>visible(el)
+                    && /^https?:/.test(el.currentSrc||el.src||'') && el.readyState>=1);
+                const failed = texts.filter(t=>/上传失败|上传错误|转码失败|视频处理失败/.test(t));
+                const reupload = texts.some(t=>/^重新上传$/.test(t));
+                const form = Array.from(document.querySelectorAll('input')).some(el=>visible(el)
+                    && el.placeholder==='填写作品标题，为作品获得更多流量' && !el.disabled);
+                const preview = Array.from(document.querySelectorAll('video,canvas,img')).some(el=>visible(el)
+                    && el.getBoundingClientRect().width>=60 && el.getBoundingClientRect().height>=60
+                    && (el.tagName==='CANVAS' || (el.tagName==='IMG' && el.complete && el.naturalWidth>0)
+                        || (el.tagName==='VIDEO' && el.readyState>=1)));
+                return {pending, ready:ready||complete||serverVideo, incomplete, progress, failed,
+                    reupload, form, preview};
+            }''')
+        if isinstance(state, dict) and (state['pending'] or any(p['upload'] for p in state['progress'])):
+            self._upload_activity_seen = True
+        return state
+
+    def _wait_for_upload_ready(self, page, timeout_secs=1800):
+        deadline = time.monotonic() + timeout_secs
+        last_log = 0
+        quiet_since = None
+        while time.monotonic() < deadline:
+            self._check_stop()
+            self._check_duration_notice(page)
+            state = self._read_upload_state(page)
+            if state['failed']:
+                raise RuntimeError('平台视频上传/处理失败：' + '；'.join(state['failed']))
+            if state['ready'] and not state['pending'] and not state['incomplete']:
+                self._progress('已确认视频上传完成且无正在上传/转码状态，允许提交发布')
                 return
-
-            coll_entry.click()
-            page.wait_for_timeout(2000)
-
-            # 2. 检查下拉列表中是否已有该书名合集
-            target_coll_option = page.locator(f'text={book_name}').first
-            if target_coll_option.count() > 0 and target_coll_option.is_visible():
-                logger.info(f"命中已有合集: 《{book_name}》，执行直接关联！")
-                target_coll_option.click()
-                page.wait_for_timeout(1000)
+            # Douyin removes its progress panel on completion without keeping a 100% label.
+            # Absence alone is insufficient: require this file's observed upload activity,
+            # a usable editor/preview/reupload entry, and two seconds of stable quiet state.
+            disappeared = (self._upload_activity_seen and not state['pending']
+                           and not any(p['upload'] for p in state['progress'])
+                           and state['form'] and state['preview'] and state['reupload'])
+            if disappeared:
+                if quiet_since is None:
+                    quiet_since = time.monotonic()
+                if time.monotonic() - quiet_since >= 2:
+                    self._progress('已确认本次上传进度消失，视频预览与重新上传入口就绪，连续2秒无上传/转码状态，允许提交发布')
+                    return
             else:
-                # 3. 未找到已有合集，执行新建合集
-                create_btn = page.locator('text=新建合集, text=+ 新建合集, text=创建合集').first
-                if create_btn.count() > 0:
-                    logger.info(f"未匹配到已有合集，正在自动新建合集: 《{book_name}》...")
-                    create_btn.click()
-                    page.wait_for_timeout(1000)
-                    # 填入合集名称
-                    name_input = page.locator('input[placeholder*="合集名称"], input[placeholder*="名称"]').last
-                    if name_input.count() > 0:
-                        name_input.fill(book_name)
-                        page.wait_for_timeout(1000)
-                        # 点击确定
-                        confirm_btn = page.locator('button:has-text("确定"), button:has-text("创建")').last
-                        if confirm_btn.count() > 0:
-                            confirm_btn.click()
-                            page.wait_for_timeout(2000)
-                            logger.info(f"合集 《{book_name}》 自动创建并绑定成功！")
+                quiet_since = None
+            if time.monotonic() - last_log >= 30:
+                self._progress(f"[上传等待] 尚未完成：{state['pending']}；进度：{state['progress']}；"
+                               f"本次上传已观测={self._upload_activity_seen}；表单={state['form']}；"
+                               f"预览={state['preview']}；重新上传={state['reupload']}；保持浏览器打开")
+                last_log = time.monotonic()
+            self._pause(page, 300)
+        raise RuntimeError('等待视频上传与处理完成超时；未点击发布，请查看上传状态诊断')
 
-            # 4. 如果有集数输入框，自动填入集数
-            if episode_num is not None:
-                ep_input = page.locator('input[placeholder*="集数"], input[type="number"]').first
-                if ep_input.count() > 0 and ep_input.is_visible():
-                    ep_input.fill(str(episode_num))
-                    logger.info(f"已自动绑定合集集数: 第 {episode_num} 集")
+    def _required_stage(self, page: Page, name: str, action):
+        self._progress(name)
+        self._check_stop()
+        started = time.monotonic()
+        try:
+            return action()
+        except (PublishCancelled, VideoDurationRejected):
+            raise
+        except Exception as error:
+            self._save_diagnostics(page, name, str(error))
+            raise RuntimeError(f"{name}失败，未执行发布：{error}") from error
+        finally:
+            self._progress(f"[阶段耗时] {name}：{time.monotonic() - started:.1f} 秒")
 
-        except Exception as e:
-            logger.warning(f"合集自动化处理出现轻微异常，不中断主发布链路: {e}")
+    def _save_diagnostics(self, page: Page, stage: str, reason: str):
+        from .probe import DouyinDOMProbe
+        output = Path(self.account.target_dir or self.profile_path.parent) / "reports"
+        try:
+            report, snapshot = DouyinDOMProbe(output_dir=output).capture_dom_report(
+                page, diagnostic={"stage": stage, "reason": reason, "network_events": self._network_events})
+            self._progress(f"[{stage}] {reason}；诊断报告：{report}；截图：{snapshot}")
+        except Exception as error:
+            self._progress(f"[{stage}] {reason}；保存诊断失败：{error}")
 
+    def _select_video_cover(self, page: Page):
+        # 第一处是竖封面入口；在弹窗中确认当前视频帧，不上传外部图片。
+        entry = page.get_by_text("选择封面", exact=True).first
+        entry.wait_for(state="visible", timeout=2000)
+        entry.click()
+        dialog = page.locator('[role="dialog"]:visible, .semi-modal:visible').last
+        dialog.wait_for(state="visible", timeout=2000)
+        original_dialog = dialog.element_handle()
+        if dialog.locator('video, canvas').count() == 0:
+            raise RuntimeError("封面弹窗中未检测到视频或帧画布，无法确认视频画面来源，需采集弹窗 DOM")
+        confirm = dialog.get_by_role("button", name=re.compile(r"^(确定|完成|保存)$"))
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            self._check_stop()
+            if confirm.count() == 1 and confirm.is_enabled():
+                confirm.click()
+                self._progress("封面已确认，等待封面处理完成和弹窗关闭（最长 30 秒）")
+                self._wait_cover_closed(page, original_dialog)
+                self._progress("已确认当前视频封面画面")
+                return
+            self._pause(page, 300)
+        raise RuntimeError("封面弹窗未出现唯一可用的确定/完成/保存按钮，需采集该弹窗 DOM")
+
+    def _wait_cover_closed(self, page, original_dialog, timeout_secs=30):
+        deadline = time.monotonic() + timeout_secs
+        horizontal_requested = False
+        horizontal_confirmed = False
+        while time.monotonic() < deadline:
+            self._check_stop()
+            if not original_dialog.is_visible():
+                return
+            if self._handle_horizontal_cover_prompt(page, allow_click=not horizontal_requested):
+                horizontal_requested = True
+                deadline = time.monotonic() + timeout_secs
+                self._progress('已选择设置横封面，等待当前视频横封面预览并确认完成')
+            if horizontal_requested and not horizontal_confirmed:
+                if '横封面预览' in original_dialog.inner_text():
+                    if original_dialog.query_selector('video, canvas') is None:
+                        raise RuntimeError('横封面编辑器未检测到当前视频或帧画布，停止确认')
+                    buttons = [button for button in original_dialog.query_selector_all('button')
+                               if re.fullmatch(r'确定|完成|保存', button.inner_text().strip())
+                               and button.is_visible() and button.is_enabled()]
+                    if len(buttons) == 1:
+                        self._check_stop()
+                        buttons[0].click(timeout=2000)
+                        horizontal_confirmed = True
+                        self._progress('已确认当前视频横封面，等待封面窗口关闭')
+            warning = page.get_by_text(re.compile(r"操作频繁|发布频繁|达到.*上限|请稍后再试|封面.*失败"))
+            for index in range(warning.count()):
+                if warning.nth(index).is_visible():
+                    raise RuntimeError(warning.nth(index).inner_text())
+            self._pause(page, 300)
+        raise RuntimeError("封面确认后弹窗 30 秒未关闭；可能是处理延迟或平台校验，需查看诊断截图")
+
+    def _handle_horizontal_cover_prompt(self, page, allow_click=True):
+        headings = page.get_by_text(re.compile(r'^设置横封面获(?:得)?更多流量$'))
+        for index in range(headings.count()):
+            heading = headings.nth(index)
+            if not heading.is_visible():
+                continue
+            if not allow_click:
+                raise RuntimeError('横封面引导重复出现，需查看诊断报告')
+            # The nearest container with both choices excludes the editor's same-name button.
+            prompt = heading.locator('xpath=ancestor::*[.//button[normalize-space(.)="暂不设置"]'
+                                     ' and .//button[normalize-space(.)="设置横封面"]][1]')
+            choice = prompt.get_by_role('button', name='设置横封面', exact=True)
+            if choice.count() != 1 or not choice.is_visible() or not choice.is_enabled():
+                raise RuntimeError('横封面引导未找到唯一可用的设置横封面按钮')
+            self._check_stop()
+            choice.click(timeout=2000)
+            return True
+        return False
+
+    def _handle_collection_assignment(self, page: Page, book_name: str, episode_num: Optional[int]) -> None:
+        # 实际 DOM 区分 select-mix-type（合集类型）和 select-collection（合集名称）。
+        self._check_stop()
+        control = page.locator('div.semi-select[class*="select-collection-"]')
+        if control.count() != 1:
+            raise RuntimeError("未找到唯一的合集名称选择框，需重新采集 DOM")
+        current = control.inner_text().strip().splitlines()
+        if current and current[0] == book_name:
+            self._progress(f"已确认目标合集：{book_name}")
+            return
+        control.click()
+        dropdown = page.locator('.semi-select-dropdown:visible, [role="listbox"]:visible').last
+        dropdown.wait_for(state="visible", timeout=2000)
+        option = dropdown.get_by_text(book_name, exact=True)
+        if option.count() != 1:
+            raise RuntimeError(f"下拉列表未找到唯一合集【{book_name}】，请先创建该合集或校准弹窗 DOM")
+        option.click()
+        self._pause(page, 300)
+        current = control.inner_text().strip().splitlines()
+        if not current or current[0] != book_name:
+            raise RuntimeError(f"合集选择回读不一致，预期【{book_name}】")
+        # 平台的集数是另一个 Semi Select，不把文件中的“第N问”写入无关数字框。
+        self._progress(f"已确认目标合集：{book_name}；合集内集数使用平台默认顺序")
     def _finalize_publish_archive_and_ledger(
         self,
         video_path: Path,
@@ -353,29 +656,17 @@ class DouyinUploader:
         ledger_data = []
         if ledger_file.exists():
             try:
-                with open(ledger_file, "r", encoding="utf-8") as f:
+                with open(ledger_file, "r", encoding="utf-8-sig") as f:
                     ledger_data = json.load(f)
-            except Exception:
-                ledger_data = []
+                if not isinstance(ledger_data,list) or any(not isinstance(r,dict) for r in ledger_data):
+                    raise ValueError('账本结构应为记录列表')
+            except (OSError,ValueError) as error:
+                raise RuntimeError(f'已有账本读取失败，保留原文件：{ledger_file}；{error}') from error
 
         ledger_data.append(record.to_dict())
-        with open(ledger_file, "w", encoding="utf-8") as f:
-            json.dump(ledger_data, f, ensure_ascii=False, indent=2)
+        temporary = ledger_file.with_suffix('.tmp')
+        temporary.write_text(json.dumps(ledger_data,ensure_ascii=False,indent=2),encoding='utf-8')
+        temporary.replace(ledger_file)
 
-        # 3. 单次详细带时间戳审计报告: publish_report_YYYYMMDD_HHMMSS.txt
-        time_tag = time.strftime("%Y%m%d_%H%M%S")
-        report_txt = reports_dir / f"publish_report_{time_tag}.txt"
-        with open(report_txt, "w", encoding="utf-8") as f:
-            f.write(f"=====================================================\n")
-            f.write(f"书声抖音自动发布审计报告 (Publish Audit Report)\n")
-            f.write(f"时间戳: {record.published_at}\n")
-            f.write(f"发布账号: {self.account.account_name} ({self.account.account_id})\n")
-            f.write(f"视频文件: {record.file_name}\n")
-            f.write(f"文件指纹 (MD5): {record.file_hash}\n")
-            f.write(f"归属合集: 《{record.collection_name}》 (集数: 第{record.episode_num}集)\n")
-            f.write(f"归档路径: {record.archived_path or '未启用物理归档'}\n")
-            f.write(f"发布状态: 100% 成功已确认\n")
-            f.write(f"=====================================================\n")
-
-        logger.info(f"已记录当日账本: {ledger_file.name} 与审计报告: {report_txt.name}")
+        logger.info(f"已记录当日账本: {ledger_file.name}；发布详情由任务汇总报告记录")
         return record
