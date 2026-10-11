@@ -1,6 +1,7 @@
 """Exercise the actual worker and Qt dialog, without Douyin or account cookies."""
 import os
 import threading
+import time
 from unittest.mock import MagicMock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -89,6 +90,12 @@ def shared_ui(app,tmp_path,monkeypatch):
     monkeypatch.setattr(shared,'DouyinAccountManager',lambda:manager)
     widget=shared.MultiPlatformPublisherPanel(store=ChannelAccountStore(tmp_path/'new'))
     yield widget
+    widget._pending_deployment=None
+    if widget.cleanup_worker:
+        widget.cleanup_worker.stop()
+        assert widget.cleanup_worker.wait(5000)
+        app.processEvents()
+    widget.preflight_worker=None
     widget.worker=None
     for current in widget.panels:
         current.dialog=None
@@ -163,7 +170,7 @@ def test_shutdown_waits_for_all_module_workers(shared_ui):
     assert widget.prepare_shutdown() is True
 
 
-def test_deploy_button_uses_selected_account_and_selection_does_not_retarget_running_task(shared_ui, monkeypatch):
+def test_deploy_button_uses_selected_account_and_selection_does_not_retarget_running_task(app, shared_ui, monkeypatch):
     from src.publisher.multi_deploy import PublishTarget
     widget=shared_ui
     factory = MagicMock()
@@ -173,7 +180,23 @@ def test_deploy_button_uses_selected_account_and_selection_does_not_retarget_run
     assert account.account_id == 'new'
     target=PublishTarget('douyin',widget.repository.publish_account(account),widget.repository.profile(account))
     monkeypatch.setattr(widget,'choose_targets',lambda:[target])
+    monkeypatch.setattr(shared,'prerequisite_results',lambda *args:[])
+    from src.publisher.preflight import PreflightResult
+    check=MagicMock()
+    check.targets=[target]
+    check.stopping=threading.Event()
+    check.results=[PreflightResult(target.key,'抖音','SUCCESS','通过')]
+    monkeypatch.setattr(shared,'DeploymentPreflightWorker',MagicMock(return_value=check))
     widget.start_deployment()
+    factory.assert_not_called()
+    deadline=time.monotonic()+5
+    while widget.cleanup_worker and time.monotonic()<deadline:
+        app.processEvents()
+        time.sleep(.005)
+    assert widget.cleanup_worker is None
+    check.start.assert_called_once()
+    widget.douyin.accounts.setCurrentRow(0)
+    widget.preflight_finished()
     fixed=factory.call_args.args[0]
     assert fixed[0].account.account_id=='new'
     factory.return_value.start.assert_called_once()

@@ -31,6 +31,7 @@ class DouyinAccountConfig:
     platform_nickname: str = ""
     platform_uid: str = ""
     identity_note: str = ""
+    daily_upload_limit: int = 10
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -52,7 +53,8 @@ class DouyinAccountConfig:
             collection_name=data.get("collection_name", ""),
             platform_nickname=data.get("platform_nickname", ""),
             platform_uid=data.get("platform_uid", ""),
-            identity_note=data.get("identity_note", "")
+            identity_note=data.get("identity_note", ""),
+            daily_upload_limit=data.get("daily_upload_limit", 10)
         )
 
 

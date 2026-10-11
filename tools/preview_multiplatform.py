@@ -5,11 +5,12 @@ import sys
 import tempfile
 import ast
 import re
+import hashlib
 from pathlib import Path
 
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT))
-from PySide6.QtWidgets import QApplication, QMainWindow
+from PySide6.QtWidgets import QApplication, QMainWindow, QTabWidget, QTabBar, QWidget
 from PySide6.QtGui import QFontDatabase, QFont
 from src.app import channel_panel, douyin_panel
 from src.publisher.platforms import ChannelAccountStore
@@ -28,7 +29,8 @@ with tempfile.TemporaryDirectory(prefix='shusheng_ui_preview_') as temporary:
     root=Path(temporary)
     media=root/'media'
     media.mkdir()
-    (media/'一分钟趣味知识_为什么雨后会出现彩虹.mp4').write_bytes(b'preview only')
+    for number in (14,15,17,16,19,18):
+        (media/f'书声_一分钟趣味知识_20261004_第{number}问.mp4').write_bytes(b'preview only'*180)
     legacy=DouyinAccountManager(root/'douyin.json',root/'profiles')
     legacy.add_account('抖音测试账号',target_dir=str(media))
     legacy.add_account('第二个抖音账号',target_dir=str(media))
@@ -44,8 +46,24 @@ with tempfile.TemporaryDirectory(prefix='shusheng_ui_preview_') as temporary:
         account.target_dir=str(media)
     store.save()
     widget=channel_panel.MultiPlatformPublisherPanel(store=store)
+    for row,path in enumerate(media.glob('*.mp4')):
+        stat=path.stat()
+        results={}
+        for platform in ('douyin','xiaohongshu','kuaishou'):
+            account=widget.repository.accounts(platform)[0]
+            state=('FAILED1' if row==0 else 'FAILED2') if platform=='kuaishou' and row<2 else 'SUCCESS'
+            results[platform+':'+account.account_id]={'status':state,'message':'仅用于界面预览'}
+        widget.results[str(path.resolve())]={'sha256':hashlib.sha256(path.read_bytes()).hexdigest(),
+            'size_bytes':stat.st_size,'mtime_ns':stat.st_mtime_ns,'results':results}
+    widget.render_results()
     window=QMainWindow()
-    window.setCentralWidget(widget)
+    tabs=QTabWidget()
+    tabs.addTab(QWidget(),'有声视频生产工坊')
+    tabs.addTab(widget,'多平台自动发布')
+    tabs.tabBar().setTabButton(1,QTabBar.RightSide,widget.channel_view)
+    widget.channel_view.show()
+    tabs.setCurrentIndex(1)
+    window.setCentralWidget(tabs)
     window.resize(1640,940)
     window.show()
     output=ROOT/'docs'/'ui_previews'
@@ -53,7 +71,10 @@ with tempfile.TemporaryDirectory(prefix='shusheng_ui_preview_') as temporary:
     for index,name in enumerate(('douyin','xiaohongshu','kuaishou','youtube')):
         widget.channel_view.setCurrentIndex(index)
         app.processEvents()
-        widget.grab().save(str(output/(name+'_stage2.png')))
+        window.grab().save(str(output/(name+'_stage2.png')))
+    window.resize(1280,720)
+    app.processEvents()
+    window.grab().save(str(output/'youtube_compact.png'))
     widget.prepare_shutdown()
     widget.close()
     window.close()

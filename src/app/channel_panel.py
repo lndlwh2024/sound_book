@@ -8,11 +8,11 @@ import threading
 from dataclasses import replace
 from pathlib import Path
 
-from PySide6.QtCore import QThread, Qt, Signal, QTimer
+from PySide6.QtCore import QThread, Qt, Signal, QTimer, QRect
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QCheckBox, QComboBox,
     QStackedWidget, QListWidget, QListWidgetItem, QPushButton,
     QMessageBox, QInputDialog, QDialog, QPlainTextEdit, QSplitter,
-    QTableWidgetItem, QHeaderView, QDialogButtonBox)
+    QTableWidgetItem, QHeaderView, QDialogButtonBox, QToolButton, QMenu)
 from playwright.sync_api import sync_playwright
 from playwright._impl._errors import TargetClosedError
 
@@ -22,20 +22,69 @@ from ..publisher.platforms import CHANNELS, ChannelAccountStore, deployment_bloc
 from ..publisher.channel_probe import ChannelDOMProbe, STAGES, safe_url
 from ..publisher.multi_deploy import PublishTarget, MultiDeployWorker
 from ..publisher.identity import extract_platform_identity
+from ..publisher.status import STATUS_TEXT, result_status_text, fresh_result
+from ..publisher.scan_cleanup import ScanCleanupWorker
+from ..publisher.upload_quota import DailyUploadQuota
+from ..publisher.preflight import DeploymentPreflightWorker, prerequisite_results, failure_message
 from ..publisher.douyin.browser import DouyinBrowserManager
 from ..publisher.douyin.config import DouyinAccountManager
 
 QUEUE_HEADERS = ['序号', '文件名', '类型', '文件大小', '修改时间', '抖音', '小红书', '快手', 'YouTube']
-STATUS_TEXT = {'SUCCESS':'成功', 'FAILED':'失败', 'UNCONFIRMED':'待核对', 'CANCELLED':'已取消',
-               'PENDING':'待上传', 'IN_PROGRESS':'上传中', 'ACCOUNT_LIMIT':'账号限额',
-               'DURATION_LIMIT':'超长跳过', 'PERMANENT_REJECT':'永久跳过', 'CONFIG_REQUIRED':'配置未完成',
-               'AUTH_REQUIRED':'需要登录', 'IDENTITY_MISMATCH':'账号不符', 'FILE_CHANGED':'文件变化'}
+
+
+class QueueSnapshotWorker(QThread):
+    snapshot_ready = Signal(object)
+
+    def __init__(self, root, requests, parent):
+        super().__init__(parent)
+        self.root, self.requests = root, requests
+
+    def run(self):
+        from ..publisher.media import MEDIA_TYPES
+        from ..publisher.dom_readiness import account_dom_state
+        snapshots = []
+        for platform, request in self.requests:
+            if self.isInterruptionRequested():
+                break
+            account_id, directory, selected = request
+            files, error, state = [], '', None
+            try:
+                extensions = set().union(*(MEDIA_TYPES[key][1] for key in selected))
+                if account_id and directory and extensions:
+                    for path in Path(directory).resolve().iterdir():
+                        if path.suffix.lower() in extensions and path.is_file():
+                            files.append((path, path.stat()))
+                    files.sort(key=lambda entry: entry[1].st_mtime)
+                if account_id:
+                    state = account_dom_state(self.root/'dom_reports', platform, account_id)
+            except (OSError, ValueError) as exc:
+                error = str(exc)
+            snapshots.append((platform, request, files, state, error))
+        self.snapshot_ready.emit(snapshots)
 
 
 def size_queue_columns(table):
-    for column, width in {0:45,2:50,3:75,4:115,5:75,6:75,7:75,8:75}.items():
-        table.setColumnWidth(column,width)
-    table.horizontalHeader().setSectionResizeMode(1,QHeaderView.Stretch)
+    header = table.horizontalHeader()
+    header.setDefaultAlignment(Qt.AlignCenter)
+    header.setMinimumSectionSize(36)
+    metrics = table.fontMetrics()
+    for column in (0,2,3,4,5,6,7,8):
+        labels = [QUEUE_HEADERS[column]]
+        for row in range(table.rowCount()):
+            item=table.item(row,column)
+            if item:
+                labels.extend(item.text().split(' / '))
+        width=max(metrics.horizontalAdvance(label) for label in labels)+18
+        header.setSectionResizeMode(column,QHeaderView.Fixed)
+        table.setColumnWidth(column,max(36,min(width,170 if column>=5 else 150)))
+    header.setSectionResizeMode(1,QHeaderView.Stretch)
+    for row in range(table.rowCount()):
+        item=table.item(row,1)
+        if item:
+            bounds=metrics.boundingRect(QRect(0,0,max(30,table.columnWidth(1)-12),1000),
+                Qt.TextWordWrap,item.text())
+            accounts=max([len(table.item(row,c).text().split(' / ')) for c in range(5,9) if table.item(row,c)]+[1])
+            table.setRowHeight(row,max(30,bounds.height()+10,accounts*26))
 
 
 class ChannelProbeWorker(QThread):
@@ -259,13 +308,18 @@ class MultiPlatformPublisherPanel(QWidget):
         self.setAttribute(Qt.WA_StyledBackground, True)
         self.setStyleSheet('QWidget#multiPlatformPublisher {background:#1E1E24;}')
         self.worker = None
+        self.preflight_worker = None
+        self.cleanup_worker = None
+        self.cleanup_cache = {}
+        self._pending_deployment = None
+        self._deferred_preflight = set()
+        self._preflight_file_paths = None
         self.results = {}
         layout = QVBoxLayout(self)
-        row = QHBoxLayout()
+        layout.setContentsMargins(0,0,0,0)
         self.channel_controls = QWidget()
         channel_layout = QVBoxLayout(self.channel_controls)
         channel_layout.setContentsMargins(0, 0, 0, 0)
-        channel_layout.addWidget(QLabel('发布渠道（可单选或多选）：'))
         channel_row = QHBoxLayout()
         self.channel_checks = {}
         for key, channel in CHANNELS.items():
@@ -275,16 +329,14 @@ class MultiPlatformPublisherPanel(QWidget):
             self.channel_checks[key] = check
             channel_row.addWidget(check)
         channel_layout.addLayout(channel_row)
-        row.addStretch()
-        row.addWidget(QLabel('查看平台：'))
         self.channel_view = QComboBox()
         for key, channel in CHANNELS.items():
             self.channel_view.addItem(channel.name, key)
-        row.addWidget(self.channel_view)
-        layout.addLayout(row)
+        self.channel_view.setToolTip('切换平台配置；发布渠道由下方复选框选择')
+        self.channel_view.hide()
         self.selection_status = QLabel()
         self.selection_status.setWordWrap(True)
-        channel_layout.addWidget(self.selection_status)
+        self.selection_status.hide()
         self.stack = QStackedWidget()
         self.repository = PlatformAccountRepository(self.store, DouyinAccountManager())
         self.douyin = ChannelAccountPanel('douyin', self.store, self)
@@ -302,6 +354,11 @@ class MultiPlatformPublisherPanel(QWidget):
         self.restore_results()
         self.render_results()
         self.timer = QTimer(self)
+        self.snapshot_worker = None
+        self.render_timer = QTimer(self)
+        self.render_timer.setSingleShot(True)
+        self.render_timer.setInterval(100)
+        self.render_timer.timeout.connect(self.render_results)
         self.timer.timeout.connect(self.refresh_queues)
         self.timer.start(5000)
 
@@ -344,7 +401,7 @@ class MultiPlatformPublisherPanel(QWidget):
                 self.store.save()
             except Exception as error:
                 QMessageBox.warning(self, '渠道配置', f'渠道选择未能保存：{error}')
-        self.selection_status.setText(deployment_block_reason(selected) or '启动时选择平台账号；本次发布目标固定，全部所选目标成功后统一归档。')
+        self.selection_status.setText(deployment_block_reason(selected) or '启动时选择平台账号；本次发布目标固定，全部目标成功或不再跟踪后统一归档。')
 
     def can_deploy(self):
         reason = deployment_block_reason(self.selected_channels())
@@ -354,10 +411,17 @@ class MultiPlatformPublisherPanel(QWidget):
         return True
 
     def prepare_shutdown(self):
+        self.timer.stop()
+        if self.cleanup_worker:
+            self.cleanup_worker.stop()
+        if self.snapshot_worker and self.snapshot_worker.isRunning():
+            self.snapshot_worker.requestInterruption()
+        if self.preflight_worker and self.preflight_worker.isRunning():
+            self.preflight_worker.stop()
         if self.worker and self.worker.isRunning():
             self.worker.stop()
         results = [panel.prepare_shutdown() for panel in self.panels]
-        return all(results) and not (self.worker and self.worker.isRunning())
+        return all(results) and not self.busy() and not (self.snapshot_worker and self.snapshot_worker.isRunning())
 
     def upload_douyin_selected(self):
         self.douyin.upload_selected()
@@ -379,7 +443,7 @@ class MultiPlatformPublisherPanel(QWidget):
         dialog.resize(720, 380)
         dialog.setStyleSheet('QDialog{background:#1A202C} QLabel{color:#F1F5F9} QListWidget{background:#111827;color:#F1F5F9} QPushButton{background:#2B6CB0;color:white;padding:8px}')
         layout = QVBoxLayout(dialog)
-        layout.addWidget(QLabel('勾选目标后固定本次任务；同一目录可发布到多个渠道。'))
+        layout.addWidget(QLabel('左侧选择本次上传账号；右侧固定归档目标。仅右侧全部账号完成才归档，上传账号自动纳入归档目标。'))
         listing = QListWidget()
         selected_accounts = {p.platform:p.current() for p in self.panels}
         for index, target in enumerate(choices):
@@ -390,7 +454,22 @@ class MultiPlatformPublisherPanel(QWidget):
             current = selected_accounts.get(target.platform)
             item.setCheckState(Qt.Checked if current and current.account_id == target.account.account_id else Qt.Unchecked)
             listing.addItem(item)
-        layout.addWidget(listing)
+        archive_listing=QListWidget()
+        all_targets=self.all_targets()
+        try:
+            archive_keys={t.key for t in self.archive_group()}
+        except ValueError:
+            archive_keys=set(self.store.archive_targets)
+        for index,target in enumerate(all_targets):
+            item=QListWidgetItem(f'{CHANNELS[target.platform].name} · {target.account.account_name}')
+            item.setData(Qt.UserRole,index)
+            item.setFlags(item.flags()|Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Checked if target.key in archive_keys else Qt.Unchecked)
+            archive_listing.addItem(item)
+        lists=QHBoxLayout()
+        lists.addWidget(listing)
+        lists.addWidget(archive_listing)
+        layout.addLayout(lists)
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.button(QDialogButtonBox.Ok).setText('启动部署')
         chosen = []
@@ -406,9 +485,15 @@ class MultiPlatformPublisherPanel(QWidget):
                 if not target.account.target_dir or not Path(target.account.target_dir).is_dir():
                     QMessageBox.warning(dialog, '媒体目录', f'{target.account.account_name}的媒体目录无效')
                     return
-                if target.platform == 'youtube' and (not re.fullmatch(r'UC[\w-]{22}', target.account.channel_id) or target.account.made_for_kids is None):
+                if (target.platform == 'youtube' and DailyUploadQuota(self.store.root).snapshot(target.key,target.account.daily_upload_limit)['remaining']
+                        and (not re.fullmatch(r'UC[\w-]{22}', target.account.channel_id) or target.account.made_for_kids is None)):
                     QMessageBox.warning(dialog, 'YouTube配置', '请先保存频道ID并设置是否面向儿童')
                     return
+            group={all_targets[archive_listing.item(i).data(Qt.UserRole)].key
+                for i in range(archive_listing.count()) if archive_listing.item(i).checkState()==Qt.Checked}
+            group.update(t.key for t in chosen)
+            self.store.archive_targets=sorted(group)
+            self.store.save()
             dialog.accept()
         buttons.accepted.connect(accept)
         buttons.rejected.connect(dialog.reject)
@@ -416,8 +501,18 @@ class MultiPlatformPublisherPanel(QWidget):
         return chosen if dialog.exec() == QDialog.Accepted else []
 
     def start_deployment(self, checked=False, file_paths=None):
+        if self.cleanup_worker:
+            self.cleanup_worker.stop()
+            self.show_status('正在取消扫描清理；尚未启动部署')
+            return
+        if self.preflight_worker:
+            self.preflight_worker.stop()
+            self.show_status('正在取消部署前检查；尚未开始上传')
+            self.sync_deployment_buttons()
+            return
         if self.worker and self.worker.isRunning():
             self.worker.stop()
+            self.sync_deployment_buttons()
             return
         if not self.can_deploy():
             return
@@ -431,7 +526,131 @@ class MultiPlatformPublisherPanel(QWidget):
         targets = self.choose_targets()
         if not targets:
             return
-        self.worker = MultiDeployWorker(targets, root=self.store.root, parent=self, file_paths=file_paths)
+        self._pending_deployment=(targets,list(file_paths) if file_paths is not None else None)
+        self.begin_cleanup(targets,force=False)
+
+    def all_targets(self):
+        return [PublishTarget(key,self.repository.publish_account(account),self.repository.profile(account))
+            for key in CHANNELS for account in self.repository.accounts(key) if account.enabled and account.target_dir]
+
+    def archive_group(self):
+        available={t.key:t for t in self.all_targets()}
+        if self.store.archive_targets:
+            missing=set(self.store.archive_targets)-available.keys()
+            if missing:
+                raise ValueError('固定归档目标的账号已删除或停用，请在启动部署时重新选择归档目标：'+', '.join(sorted(missing)))
+            return [available[key] for key in self.store.archive_targets]
+        return [available[p.platform+':'+p.current().account_id] for p in self.panels
+            if p.current() and p.platform+':'+p.current().account_id in available]
+
+    def scan_cleanup(self,panel):
+        if self.busy():
+            self.log_message('[扫描清理] 请先停止当前部署或扫描，避免同时移动正在使用的文件')
+            return
+        if (not panel.directory.text().strip() or not Path(panel.directory.text().strip()).is_dir()
+                or not any(check.isChecked() for check in panel.media_checks.values())):
+            panel.scan_queue(feedback=True)
+            return
+        if not panel.current() or not panel.save_current():
+            self.log_message('[扫描清理] 请先选择并保存当前账号')
+            return
+        account=panel.current()
+        target=PublishTarget(panel.platform,self.repository.publish_account(account),self.repository.profile(account))
+        self.begin_cleanup([target],force=True)
+
+    def begin_cleanup(self,targets,force):
+        try:
+            group={t.key:t for t in self.archive_group()}
+            group.update({t.key:t for t in targets})
+            if not self.store.archive_targets:
+                self.store.archive_targets=sorted(group)
+                self.store.save()
+            self._cleanup_archive_targets=list(group.values())
+            self.cleanup_worker=ScanCleanupWorker(targets,list(group.values()),self.store.root,parent=self,cache=self.cleanup_cache,force=force)
+            self.cleanup_worker.log.connect(self.log_message)
+            self.cleanup_worker.status.connect(self.show_status)
+            self.cleanup_worker.result_changed.connect(self.receive_result)
+            self.cleanup_worker.finished.connect(self.cleanup_finished)
+            self.show_status('正在扫描目录清理文件；完成后再启动部署' if self._pending_deployment else '正在扫描目录清理文件')
+            self.cleanup_worker.start()
+            self.sync_deployment_buttons()
+        except (OSError,ValueError) as error:
+            self._pending_deployment=None
+            self.log_message('[扫描清理失败] '+str(error))
+            QMessageBox.warning(self,'扫描清理',str(error))
+
+    def cleanup_finished(self):
+        cleanup=self.cleanup_worker
+        self.cleanup_worker=None
+        pending=self._pending_deployment
+        self._pending_deployment=None
+        error,cancelled=cleanup.error,cleanup.cancelled
+        cleanup.deleteLater()
+        self.refresh_queues()
+        if error or cancelled:
+            self.show_status('扫描清理已取消；未启动部署' if cancelled else '扫描清理失败；未启动部署')
+            if error:
+                QMessageBox.warning(self,'扫描清理失败',error)
+            return
+        if not pending:
+            self.show_status('扫描目录清理文件已完成')
+            return
+        self.begin_preflight(*pending)
+
+    def begin_preflight(self,targets,file_paths):
+        quota=DailyUploadQuota(self.store.root)
+        self._all_deployment_targets=targets
+        self._deferred_preflight={t.key for t in targets if not quota.snapshot(t.key,t.account.daily_upload_limit)['remaining']}
+        eligible=[t for t in targets if t.key not in self._deferred_preflight]
+        self._preflight_file_paths=file_paths
+        if not eligible:
+            self.launch_deployment(targets,file_paths)
+            return
+        reason = failure_message(prerequisite_results(eligible, self.store.root/'dom_reports'))
+        if reason:
+            self.log_message('[部署前检查] '+reason)
+            QMessageBox.warning(self,'部署前校验',reason)
+            return
+        self.preflight_worker = DeploymentPreflightWorker(eligible, self.store.root, parent=self)
+        self.preflight_worker.log.connect(self.log_message)
+        self.preflight_worker.status.connect(self.show_status)
+        self.preflight_worker.finished.connect(self.preflight_finished)
+        self.show_status('正在检查所有所选账号的当前登录状态与 DOM；尚未开始上传')
+        self.preflight_worker.start()
+        self.sync_deployment_buttons()
+        for check in self.channel_checks.values():
+            check.setEnabled(False)
+
+    def preflight_finished(self):
+        preflight = self.preflight_worker
+        if preflight is None:
+            return
+        self.preflight_worker = None
+        targets, file_paths = preflight.targets, self._preflight_file_paths
+        self._preflight_file_paths = None
+        results = preflight.results
+        cancelled = preflight.stopping.is_set()
+        preflight.deleteLater()
+        if cancelled:
+            self.show_status('部署前检查已取消；未启动部署、未上传文件')
+            self.refresh_queues()
+            return
+        reason = failure_message(results)
+        if not reason and {r.key for r in results if r.passed} != {t.key for t in targets}:
+            reason = '部署前检查未全部完成，请检查网络与浏览器会话后重试；本次部署未启动。'
+        if reason:
+            self.log_message('[部署未启动] '+reason)
+            self.show_status('部署前检查未通过；请完成提示中的登录或 DOM 采集后重新启动')
+            self.refresh_queues()
+            QMessageBox.warning(self, '部署前校验', reason)
+            return
+        self.log_message('[部署前检查] 全部所选账号通过当前登录、身份与 DOM 校验，开始部署')
+        self.launch_deployment(getattr(self,'_all_deployment_targets',targets),file_paths)
+
+    def launch_deployment(self,targets,file_paths):
+        group=getattr(self,'_cleanup_archive_targets',None)
+        self.worker = MultiDeployWorker(targets, root=self.store.root, parent=self, file_paths=file_paths,
+            archive_targets=group if group is not None else self.archive_group(), deferred_preflight=self._deferred_preflight)
         self.worker.log.connect(self.log_message)
         self.worker.status.connect(self.show_status)
         self.worker.result_changed.connect(self.receive_result)
@@ -440,6 +659,28 @@ class MultiPlatformPublisherPanel(QWidget):
         self.worker.start()
         for panel in self.panels:
             panel.deploy_button.setText('停止部署')
+            panel.pause_button.setEnabled(True)
+            panel.pause_button.setText('暂停全部平台')
+
+    def toggle_pause(self):
+        if self.worker and self.worker.isRunning() and not self.worker.stopping.is_set():
+            if self.worker.pause_requested.is_set():
+                self.worker.resume()
+            else:
+                self.worker.pause_all()
+            self.sync_deployment_buttons()
+
+    def sync_deployment_buttons(self):
+        running = self.busy()
+        deploying = bool(self.worker and self.worker.isRunning())
+        checking = self.preflight_worker is not None or self.cleanup_worker is not None
+        paused = deploying and self.worker.pause_requested.is_set()
+        stopping = deploying and self.worker.stopping.is_set()
+        for panel in self.panels:
+            panel.scan_button.setEnabled(not running)
+            panel.deploy_button.setText('取消启动检查' if checking else '停止部署' if running else '启动部署')
+            panel.pause_button.setText('继续全部平台' if paused else '暂停全部平台')
+            panel.pause_button.setEnabled(bool(deploying and not stopping))
 
     def log_message(self, message):
         for panel in self.panels:
@@ -447,7 +688,8 @@ class MultiPlatformPublisherPanel(QWidget):
 
     def show_status(self, message):
         for panel in self.panels:
-            panel.deploy_status.setText(message)
+            panel.deploy_status.setText(message[:80]+('…' if len(message)>80 else ''))
+            panel.deploy_status.setToolTip(message)
 
     def deployment_finished(self):
         worker = self.worker
@@ -456,12 +698,15 @@ class MultiPlatformPublisherPanel(QWidget):
             worker.deleteLater()
         for panel in self.panels:
             panel.deploy_button.setText('启动部署')
+            panel.pause_button.setEnabled(False)
+            panel.pause_button.setText('暂停全部平台')
         self.show_status('任务已停止，结果已保存；原文件保留表示存在未成功目标或关闭了归档')
         self.refresh_queues()
 
     def receive_result(self, item):
         self.results[item['file_path']] = item
-        self.render_results()
+        if not self.render_timer.isActive():
+            self.render_timer.start()
 
     def restore_results(self):
         folder = self.store.root / 'publish_reports'
@@ -472,101 +717,95 @@ class MultiPlatformPublisherPanel(QWidget):
                     self.results[item['file_path']] = item
             except (OSError, ValueError, KeyError):
                 continue
-        audit = self.store.root / 'result_reviews.json'
-        if audit.exists():
+        # Task reports describe a past run. The persistent ledger contains the
+        # latest outcome, including manual reviews and repaired legacy imports.
+        if (self.store.root/'target_ledger.json').exists():
             try:
-                for review in json.loads(audit.read_text(encoding='utf-8')):
-                    item = self.results.get(review['file_path'])
-                    if item and item['sha256'] == review['sha256'] and review['target'] in item['results']:
-                        result = item['results'][review['target']]
-                        if result.get('updated_at','') < review['updated_at']:
-                            result.update({key:review[key] for key in ('status','message','info','updated_at')})
-            except (OSError, ValueError, KeyError):
-                self.log_message('结果核对记录读取失败，保留原文件，显示任务原始结果')
+                from ..publisher.multi_deploy import MultiTargetLedger
+                ledger=MultiTargetLedger(self.store.root)
+                accounts={'douyin:'+a.account_id for a in self.repository.accounts('douyin')}
+                for item in self.results.values():
+                    for key,result in item.get('results',{}).items():
+                        previous=ledger.result(item['sha256'],key)
+                        if key in accounts:
+                            current=ledger.restore_legacy_success(item['sha256'],key,item['file_path'])
+                            if current.get('status')=='SUCCESS' and previous.get('status')=='UNCONFIRMED':
+                                self.log_message(f'[历史成功恢复] {item["file_name"]} → {key}；已核对本地摘要及旧成功记录，未重新投稿')
+                        else:
+                            current=previous
+                        if current:
+                            result.update(fresh_result(current))
+            except (OSError, ValueError, KeyError) as error:
+                self.log_message(f'最新发布账本读取或恢复失败，保留原记录：{error}')
 
     def refresh_queues(self):
-        for panel in self.panels:
-            panel.scan_queue()
-        self.render_results()
         running = self.busy()
         for check in self.channel_checks.values():
             check.setEnabled(not running)
+        self.sync_deployment_buttons()
         for panel in self.panels:
-            panel.deploy_button.setText('停止部署' if running else '启动部署')
+            panel.refresh_quota()
+        if self.snapshot_worker is not None:
+            return
+        requests = [(panel.platform, panel.queue_request()) for panel in self.panels]
+        self.snapshot_worker = QueueSnapshotWorker(self.store.root, requests, self)
+        self.snapshot_worker.snapshot_ready.connect(self.apply_queue_snapshots)
+        self.snapshot_worker.finished.connect(self.snapshot_finished)
+        self.snapshot_worker.start()
+
+    def snapshot_finished(self):
+        worker = self.snapshot_worker
+        self.snapshot_worker = None
+        worker.deleteLater()
+
+    def apply_queue_snapshots(self, snapshots):
+        for platform, request, files, state, error in snapshots:
+            panel = next(p for p in self.panels if p.platform == platform)
+            if panel.queue_request() != request:
+                continue
+            if error:
+                panel.logs.appendPlainText('[目录/DOM扫描] '+error)
+                continue
+            panel.apply_queue_snapshot(files)
+            if state is not None:
+                panel.dom_state.setText(state.message)
+                panel.dom_state.setToolTip(str(state.reports[-1]) if state.reports else '')
+        self.render_results()
 
     def render_results(self):
-        if not hasattr(self, 'panels'):
+        if not hasattr(self,'panels'):
             return
-        panels = [(p,p.current()) for p in self.panels]
-        for panel, account in panels:
+        for panel in self.panels:
+            account=panel.current()
             if not account:
                 continue
             for row in range(panel.table_queue.rowCount()):
-                name = panel.table_queue.item(row,1)
-                if not name:
+                name=panel.table_queue.item(row,1)
+                path=panel.queue_file_path(row)
+                if not name or not path:
                     continue
-                resolved = str((Path(account.target_dir)/name.text()).resolve())
-                result = self.results.get(resolved, {})
-                try:
-                    stat = Path(resolved).stat()
-                    if result and (result.get('size_bytes') != stat.st_size or result.get('mtime_ns') not in (None,stat.st_mtime_ns)):
-                        result = {}
-                except OSError:
-                    result = {}
-                for column, platform in enumerate(CHANNELS, 5):
-                    entries = [(k,r) for k,r in result.get('results',{}).items() if k.startswith(platform+':')]
-                    text = ' / '.join(STATUS_TEXT.get(r['status'],r['status']) for _,r in entries) or '未选择'
-                    cell = QTableWidgetItem(text)
-                    cell.setToolTip('\n'.join(f'{key}：{r.get("message", "")}' for key,r in entries))
+                result=self.results.get(str(path),{})
+                signature=name.data(Qt.UserRole+1)
+                if result and signature and (result.get('size_bytes')!=signature[0] or result.get('mtime_ns') not in (None,signature[1])):
+                    result={}
+                for column,platform in enumerate(CHANNELS,5):
+                    selected=next((p.current() for p in self.panels if p.platform==platform),None)
+                    key=platform+':'+selected.account_id if selected else ''
+                    entry=result.get('results',{}).get(key,{})
+                    text=result_status_text(entry) if entry else '未选择'
+                    cell=QTableWidgetItem(text)
+                    cell.setTextAlignment(Qt.AlignCenter)
+                    cell.setToolTip(key+'：'+entry.get('message','')+('\n'+entry['quota_message'] if entry.get('quota_message') else '')
+                        +('\n'+entry['blocking_message'] if entry.get('blocking_message') else ''))
+                    panel.table_queue.removeCellWidget(row,column)
                     panel.table_queue.setItem(row,column,cell)
+            size_queue_columns(panel.table_queue)
 
     def busy(self):
-        return bool(self.worker and self.worker.isRunning())
+        return bool(self.cleanup_worker or self.preflight_worker or self.worker and self.worker.isRunning())
 
     def open_douyin_probe(self):
         self.douyin.open_probe()
 
     def login_douyin(self):
         self.douyin.open_probe()
-
-    def review_result(self, panel):
-        if self.busy():
-            QMessageBox.warning(self, '结果核对', '请先停止任务再修正结果')
-            return
-        row = panel.table_queue.currentRow()
-        account = panel.current()
-        if row < 0 or not account:
-            return
-        path = str((Path(account.target_dir) / panel.table_queue.item(row,1).text()).resolve())
-        item = self.results.get(path)
-        if not item:
-            QMessageBox.information(self, '结果核对', '此文件尚无多渠道任务记录')
-            return
-        keys = list(item['results'])
-        key, accepted = QInputDialog.getItem(self, '结果核对', '选择已在平台上核对的目标：', keys, 0, False)
-        if not accepted:
-            return
-        action, accepted = QInputDialog.getItem(self, '结果核对', '请先查看平台作品列表，再选择结论：',
-            ['仅查看原因', '我已核对，确认发布成功', '我已核对，确认未发布，允许下次重试'], 0, False)
-        result = item['results'][key]
-        if not accepted:
-            return
-        if action == '仅查看原因':
-            QMessageBox.information(self, '发布结果', f'{STATUS_TEXT.get(result["status"],result["status"])}\n{result.get("message", "")}\n{result.get("info", "")}')
-            return
-        from ..publisher.multi_deploy import MultiTargetLedger, atomic_json
-        state = 'SUCCESS' if action == '我已核对，确认发布成功' else 'FAILED'
-        try:
-            ledger = MultiTargetLedger(self.store.root)
-            data = ledger.set_result(item['sha256'], key, state, '用户手工核对平台记录', result.get('info'))
-            result.update(data)
-            ledger.data['blocked'].pop(key, None)
-            atomic_json(ledger.path, ledger.data)
-            # Separate audit; the historical task report remains an immutable record of that run.
-            audit = self.store.root / 'result_reviews.json'
-            reviews = json.loads(audit.read_text(encoding='utf-8')) if audit.exists() else []
-            reviews.append({'file_path':path,'sha256':item['sha256'],'target':key,**data})
-            atomic_json(audit, reviews)
-            self.render_results()
-        except (OSError, ValueError) as error:
-            QMessageBox.warning(self, '结果核对', f'未能保存修正：{error}')

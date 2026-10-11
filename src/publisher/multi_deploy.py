@@ -3,22 +3,25 @@ import hashlib
 import json
 import shutil
 import threading
+import time
 import uuid
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 from PySide6.QtCore import QThread, Signal
-from .platforms import ROOT
+from .platforms import ROOT, CHANNELS
 from .douyin.daemon import is_file_fully_written
 from .media import selected_extensions, media_type
 from .douyin.uploader import DouyinUploader, compute_file_md5
 from .youtube import YouTubeUploader
+from .creator_studio import XiaohongshuUploader, KuaishouUploader
+from .status import BLOCKING, RETRYABLE, result_status_text, fresh_result
+from .upload_quota import DailyUploadQuota, DailyQuotaReached
 
 CHINA_TIME = timezone(timedelta(hours=8))
 SUCCESS = 'SUCCESS'
-BLOCKING = {'ACCOUNT_LIMIT', 'AUTH_REQUIRED', 'IDENTITY_MISMATCH', 'CONFIG_REQUIRED'}
-RETRYABLE = {'FAILED'}
+LEGACY_REVIEW_MESSAGE = '发现原抖音成功账本；旧记录缺少本次确认依据，请核对后标记成功或允许重试，避免重复发布'
 
 
 def now():
@@ -30,7 +33,34 @@ def atomic_json(path, data):
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix('.tmp')
     temporary.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding='utf-8')
-    temporary.replace(path)
+    for attempt in range(6):
+        try:
+            temporary.replace(path)
+            return
+        except PermissionError:
+            if attempt==5:
+                raise
+            # Windows readers/security scanners can hold the destination briefly.
+            time.sleep(.05*(attempt+1))
+
+
+def archive_completed_file(source,signature,log=lambda message:None):
+    """Archive without overwriting previous media or subtitles."""
+    source=Path(source)
+    if not is_file_fully_written(source) or (source.stat().st_size,source.stat().st_mtime_ns)!=signature:
+        raise ValueError('目标已完成，但原文件已变化或被占用；保留文件')
+    destination=source.parent/'published'/source.name
+    if destination.exists() or destination.with_suffix('.srt').exists():
+        destination=destination.with_name(source.stem+'_'+uuid.uuid4().hex[:12]+source.suffix)
+    destination.parent.mkdir(exist_ok=True)
+    shutil.move(str(source),str(destination))
+    subtitle=source.with_suffix('.srt')
+    if subtitle.exists() and not destination.with_suffix('.srt').exists():
+        try:
+            shutil.move(str(subtitle),str(destination.with_suffix('.srt')))
+        except OSError as error:
+            log(f'[字幕归档未完成] 媒体已归档，字幕仍保留：{error}')
+    return destination
 
 
 @dataclass
@@ -54,8 +84,11 @@ class MultiTargetLedger:
                 raise ValueError('发布记录版本不支持，保留文件并停止任务')
             self.data.setdefault('plans', {})
 
-    def register_plan(self, digest, targets):
+    def register_plan(self, digest, targets, fixed=False):
         plan = self.data['plans'].setdefault(digest, {'required': [], 'archive_enabled': {}})
+        if fixed:
+            plan['required'] = [t.key for t in targets]
+            plan['archive_enabled'] = {}
         for target in targets:
             if target.key not in plan['required']:
                 plan['required'].append(target.key)
@@ -66,11 +99,43 @@ class MultiTargetLedger:
     def result(self, digest, key):
         return self.data['results'].get(digest, {}).get(key, {})
 
-    def set_result(self, digest, key, status, message, info=None):
-        item = {'status': status, 'message': message, 'info': info, 'updated_at': now()}
+    def set_result(self, digest, key, status, message, info=None, **metadata):
+        item = {'status': status, 'message': message, 'info': info, 'updated_at': now(), **metadata}
         self.data['results'].setdefault(digest, {})[key] = item
         atomic_json(self.path, self.data)
         return item
+
+    def restore_legacy_success(self,digest,key,path,signature=None):
+        """Locally verify a migration downgrade, usable before any deployment."""
+        previous=self.result(digest,key)
+        if (not key.startswith('douyin:') or previous.get('status')!='UNCONFIRMED'
+                or previous.get('message')!=LEGACY_REVIEW_MESSAGE):
+            return previous
+        record=previous.get('info')
+        if (not isinstance(record,dict) or record.get('status')!=SUCCESS
+                or record.get('account_id')!=key.split(':',1)[1]):
+            return previous
+        path=Path(path)
+        try:
+            if not is_file_fully_written(path):
+                return previous
+            before=path.stat()
+            observed=(before.st_size,before.st_mtime_ns)
+            if signature is not None and observed!=signature:
+                return previous
+            sha,md5=hashlib.sha256(),hashlib.md5()
+            with path.open('rb') as stream:
+                for chunk in iter(lambda:stream.read(1024*1024),b''):
+                    sha.update(chunk)
+                    md5.update(chunk)
+            after=path.stat()
+            if ((after.st_size,after.st_mtime_ns)!=observed or sha.hexdigest()!=digest
+                    or md5.hexdigest()!=record.get('file_hash')):
+                return previous
+        except OSError:
+            return previous
+        return self.set_result(digest,key,SUCCESS,
+            '修正旧成功账本迁移状态；同账号、SHA-256及原MD5匹配，沿用历史成功，不重复上传',record)
 
     def block(self, key, status, message):
         self.data['blocked'][key] = {'status': status, 'message': message,
@@ -85,6 +150,19 @@ class MultiTargetLedger:
 class DeferredDouyinUploader(DouyinUploader):
     """Add a durable submission boundary only for multi-target tasks, leaving legacy untouched."""
     before_submit = staticmethod(lambda info: None)
+
+    def upload_single_video(self,*args,**kwargs):
+        success,message,info=super().upload_single_video(*args,**kwargs)
+        if not success and info is None:
+            info={'platform':'douyin','account_id':self.account.account_id,
+                  'confirmation':getattr(self,'_publish_result',None)}
+        return success,message,info
+
+    def reconcile(self,info):
+        return bool(isinstance(info,dict) and info.get('platform')=='douyin'
+            and info.get('account_id')==self.account.account_id
+            and isinstance(info.get('confirmation'),dict)
+            and str(info['confirmation'].get('code'))=='0')
 
     def _get_publish_button(self, page):
         button = super()._get_publish_button(page)
@@ -103,13 +181,21 @@ class MultiDeployWorker(QThread):
     status = Signal(str)
     result_changed = Signal(dict)
 
-    def __init__(self, targets, root=None, parent=None, uploader_factory=None, poll_seconds=300, interval_seconds=30, file_paths=None):
+    def __init__(self, targets, root=None, parent=None, uploader_factory=None, poll_seconds=300, interval_seconds=30, file_paths=None, archive_targets=None, deferred_preflight=None):
         super().__init__(parent)
         self.targets = [PublishTarget(t.platform, replace(t.account), t.profile) for t in targets]
         self.root = Path(root) if root else ROOT / 'data' / 'multi_platform'
+        self.archive_targets = None if archive_targets is None else [PublishTarget(t.platform,replace(t.account),t.profile) for t in archive_targets]
+        self.quota = DailyUploadQuota(self.root)
+        self.attempts_by_target = {}
+        self.jobs_cache = {}
+        self.quota_notices = {}
+        self.deferred_preflight = set(deferred_preflight or ())
         self.factory = uploader_factory or self.make_uploader
         self.poll_seconds, self.interval_seconds = poll_seconds, interval_seconds
         self.stopping = threading.Event()
+        self.pause_requested = threading.Event()
+        self.wake_requested = threading.Event()
         self.blocked = {}
         self.processed = set()
         self.file_paths = None if file_paths is None else {str(Path(p).resolve()) for p in file_paths}
@@ -120,7 +206,46 @@ class MultiDeployWorker(QThread):
 
     def stop(self):
         self.stopping.set()
-        self.status.emit('正在停止当前任务；已提交但未确认的目标将保留待核对')
+        self.wake_requested.set()
+        self.pause_requested.clear()
+        self.status.emit('正在停止当前任务；未确认成功的上传记录为失败，保留原文件')
+
+    def pause_all(self):
+        if self.stopping.is_set():
+            return
+        self.pause_requested.set()
+        self.log.emit('[全平台暂停] 已请求暂停；当前文件完成后暂停，不启动后续文件和重试；浏览器上传与发布确认继续')
+        self.status.emit('已请求暂停全部平台；等待当前文件结束后进入暂停，可点击继续或停止')
+
+    def resume(self):
+        self.pause_requested.clear()
+        self.log.emit('[全平台继续] 继续同一任务及报告，沿用已有发布结果')
+        self.status.emit('全部平台已继续部署')
+
+    def checkpoint(self):
+        """Pause at file boundaries, leaving active browser transfers / confirmation intact."""
+        announced = False
+        while self.pause_requested.is_set() and not self.stopping.is_set():
+            if not announced:
+                self.report['status'] = 'PAUSED'
+                self.save_report()
+                self.status.emit('全部平台已暂停；不会开始后续文件或重试，可继续当前任务')
+                self.log.emit('[全平台暂停] 已进入暂停；保留任务与已有结果')
+                announced = True
+            self.stopping.wait(.1)
+        if announced and not self.stopping.is_set():
+            self.report['status'] = 'RUNNING'
+            self.save_report()
+        return not self.stopping.is_set()
+
+    def controlled_wait(self, seconds):
+        remaining = seconds
+        while remaining > 0 and self.checkpoint():
+            started = time.monotonic()
+            if self.wake_requested.wait(min(.1, remaining)):
+                self.wake_requested.clear()
+                break
+            remaining -= time.monotonic() - started
 
     def make_uploader(self, target, log):
         if target.platform == 'douyin':
@@ -130,28 +255,35 @@ class MultiDeployWorker(QThread):
         if target.platform == 'youtube':
             return YouTubeUploader(target.account, target.profile, self.root / 'dom_reports',
                                    self.stopping.is_set, log)
-        raise ValueError('该平台尚未通过现场DOM验证，不能执行发布')
+        if target.platform in ('xiaohongshu','kuaishou'):
+            adapter=XiaohongshuUploader if target.platform=='xiaohongshu' else KuaishouUploader
+            return adapter(target.account,target.profile,self.root/'dom_reports',self.stopping.is_set,log)
+        raise ValueError('该平台发布执行器尚未实现；DOM 采集状态与发布支持是独立检查项')
 
     def save_report(self):
         entries = [r for f in self.report['files'] for r in f['results'].values()]
         self.report['source_file_count'] = len(self.report['files'])
         self.report['target_count'] = len(entries)
         self.report['success_count'] = sum(r['status'] == SUCCESS for r in entries)
-        self.report['failure_count'] = sum(r['status'] not in {SUCCESS, 'PENDING', 'IN_PROGRESS', 'UNCONFIRMED', 'CANCELLED'} for r in entries)
-        self.report['unconfirmed_count'] = sum(r['status'] == 'UNCONFIRMED' for r in entries)
+        self.report['failure_count'] = sum(r['status'] in {'FAILED','FAILED1','FAILED2'} for r in entries)
+        self.report['unconfirmed_count'] = 0  # Kept for old report readers.
+        self.report['ignored_count'] = sum(r['status']=='IGNORED' for r in entries)
         self.report['cancelled_count'] = sum(r['status'] == 'CANCELLED' for r in entries)
-        failed = lambda item:any(r['status'] not in {SUCCESS,'PENDING','IN_PROGRESS','UNCONFIRMED','CANCELLED'} for r in item['results'].values())
+        failed = lambda item:any(r['status'] in {'FAILED','FAILED1','FAILED2'} for r in item['results'].values())
         summary = lambda item:{key:item[key] for key in ('file_name','file_path','size_bytes','modified_at','results','archived_path')}
-        self.report['success_files'] = [summary(f) for f in self.report['files'] if all(r['status']==SUCCESS for r in f['results'].values())]
+        self.report['success_files'] = [summary(f) for f in self.report['files'] if all(r['status'] in (SUCCESS,'IGNORED') for r in f['results'].values())]
         self.report['failure_files'] = [summary(f) for f in self.report['files'] if failed(f)]
         self.report['source_success_count'] = len(self.report['success_files'])
         self.report['source_failure_count'] = len(self.report['failure_files'])
         self.report['platform_counts'] = {}
         for file in self.report['files']:
             for key, result in file['results'].items():
-                counts = self.report['platform_counts'].setdefault(key.split(':')[0], {'success': 0, 'failure': 0, 'unconfirmed': 0, 'cancelled': 0})
+                counts = self.report['platform_counts'].setdefault(key.split(':')[0], {'success': 0, 'failure': 0, 'unconfirmed': 0, 'cancelled': 0, 'ignored': 0, 'blocked':0, 'waiting':0})
                 state = result['status']
-                counts['success' if state == SUCCESS else 'unconfirmed' if state == 'UNCONFIRMED' else 'cancelled' if state == 'CANCELLED' else 'failure'] += state not in {'PENDING','IN_PROGRESS'}
+                category=('success' if state==SUCCESS else 'failure' if state in ('FAILED','FAILED1','FAILED2')
+                    else 'cancelled' if state=='CANCELLED' else 'ignored' if state=='IGNORED'
+                    else 'waiting' if state in ('PENDING','IN_PROGRESS','RETRYING') else 'blocked')
+                counts[category]+=1
         atomic_json(self.report_path, self.report)
         for item in self.report['files']:
             self.result_changed.emit(item)
@@ -184,7 +316,10 @@ class MultiDeployWorker(QThread):
         for resolved, job in files.items():
             stat = job['path'].stat()
             signature = (stat.st_size, stat.st_mtime_ns)
-            if (resolved, signature) in self.processed:
+            if (resolved, signature) in self.jobs_cache:
+                existing = self.jobs_cache[(resolved,signature)]
+                existing['targets'] = job['targets']
+                jobs.append(existing)
                 continue
             digest = self.fingerprint(job['path'])
             if digest is None:
@@ -195,14 +330,17 @@ class MultiDeployWorker(QThread):
                 continue
             self.processed.add((resolved, signature))
             job.update(digest=digest, signature=signature)
-            plan = self.ledger.register_plan(digest, job['targets'])
+            plan = self.ledger.register_plan(digest, self.archive_targets if self.archive_targets is not None else job['targets'], fixed=self.archive_targets is not None)
             job['plan'] = plan
+            keys = list(dict.fromkeys(plan['required']+[t.key for t in job['targets']]))
             item = {'file_name': job['path'].name, 'file_path': resolved, 'size_bytes': stat.st_size,
                     'sha256': digest, 'mtime_ns': stat.st_mtime_ns,
                     'modified_at': datetime.fromtimestamp(stat.st_mtime, CHINA_TIME).isoformat(),
-                    'results': {key: {**self.ledger.result(digest, key), 'status':self.ledger.result(digest,key).get('status','PENDING'),
-                        'attempts': []} for key in plan['required']}, 'archived_path': None}
+                    'results': {key: fresh_result(self.ledger.result(digest,key)) for key in keys}, 'archived_path': None}
+            for key,result in item['results'].items():
+                result['attempts'] = self.attempts_by_target.setdefault((digest,key),[])
             job['item'] = item
+            self.jobs_cache[(resolved,signature)] = job
             self.report['files'].append(item)
             jobs.append(job)
         self.save_report()
@@ -224,129 +362,221 @@ class MultiDeployWorker(QThread):
                 if record.get('account_id') == target.account.account_id and record.get('status') == SUCCESS:
                     digest = digest or compute_file_md5(job['path'])
                     if record.get('file_hash') == digest:
-                        return self.ledger.set_result(job['digest'], target.key, 'UNCONFIRMED',
-                            '发现原抖音成功账本；旧记录缺少本次确认依据，请核对后标记成功或允许重试，避免重复发布', record)
+                        after=job['path'].stat()
+                        if (after.st_size,after.st_mtime_ns)!=job['signature']:
+                            raise OSError('匹配旧账本时文件发生变化，未迁移成功记录')
+                        return self.ledger.set_result(job['digest'], target.key, SUCCESS,
+                            '沿用原抖音成功记录；同账号及文件MD5匹配，已迁移到SHA-256去重，不重复上传', record)
         return None
+
+    def restore_legacy_success(self,job,target,previous):
+        """Repair only the prior migration downgrade, never a real uncertain post."""
+        result=self.ledger.restore_legacy_success(job['digest'],target.key,job['path'],job['signature'])
+        if result.get('status')==SUCCESS and previous.get('status')!='SUCCESS':
+            self.log.emit(f'[历史成功恢复] {job["path"].name} → {target.key}；旧成功记录匹配，未重新投稿')
+        return result
 
     def attempt(self, job, target):
         item = job['item']['results'][target.key]
-        previous = self.ledger.result(job['digest'], target.key)
-        if previous and previous.get('status') in (SUCCESS, 'UNCONFIRMED', 'PERMANENT_REJECT', 'DURATION_LIMIT'):
-            if previous.get('status') == 'UNCONFIRMED' and target.platform == 'youtube':
-                try:
-                    checker = self.factory(target, self.log.emit)
-                    if checker.reconcile(previous.get('info')):
-                        previous = self.ledger.set_result(job['digest'], target.key, SUCCESS,
-                            '只读核对确认之前提交已生效，未重复上传', previous['info'])
-                except Exception as error:
-                    self.log.emit(f'[待核对] {target.key}：{error}；不重复提交')
+        if not self.checkpoint():
+            if item['status'] not in (SUCCESS, 'IGNORED', 'FAILED1', 'FAILED2'):
+                item.update(status='CANCELLED', message='用户停止，未执行目标')
+                self.save_report()
+            return item['status']
+        previous = self.restore_legacy_success(job, target, self.ledger.result(job['digest'],target.key))
+        if previous.get('status') in (SUCCESS,'IGNORED','PERMANENT_REJECT','DURATION_LIMIT'):
             item.update(previous)
-            self.log.emit(f'[哈希去重] {job["path"].name} → {target.key}；SHA-256={job["digest"]}；已有状态{previous["status"]}，不重复上传')
             self.save_report()
-            return item['status']
-        blocked = self.blocked.get(target.key) or self.ledger.quota_block(target.key)
-        if blocked:
-            item.update(status=blocked['status'], message=blocked['message'])
+            return previous['status']
+        attempts = self.attempts_by_target.setdefault((job['digest'],target.key),[])
+        item['attempts'] = attempts
+        if len(attempts)>=2:
+            item.update(status='FAILED2',attempt_count=2,message=previous.get('message','本任务已尝试两次，不再重试'))
             self.save_report()
-            return item['status']
-        if self.stopping.is_set():
-            item.update(status='CANCELLED', message='用户停止，未执行目标')
+            return 'FAILED2'
+        if previous.get('info') and previous.get('status') in ('UNCONFIRMED','IN_PROGRESS','FAILED','FAILED1','FAILED2'):
+            try:
+                checker=self.factory(target,self.log.emit)
+                reconcile=getattr(checker,'reconcile',None)
+                if callable(reconcile) and reconcile(previous['info']) is True:
+                    item.update(self.ledger.set_result(job['digest'],target.key,SUCCESS,'自动检查确认先前投稿成功，未重新上传',previous['info']))
+                    self.save_report()
+                    return SUCCESS
+            except Exception as error:
+                self.log.emit(f'[自动检查] {target.key}：{error}；未确认成功，按失败重试规则处理')
+        block=self.blocked.get(target.key) or self.ledger.quota_block(target.key)
+        if block:
+            if attempts and item['status'] in ('FAILED1','FAILED2'):
+                item['blocking_message']=block['message']
+            else:
+                item.update(status=block['status'],message=block['message'])
             self.save_report()
-            return 'CANCELLED'
-        path = job['path']
-        if not is_file_fully_written(path) or (path.stat().st_size, path.stat().st_mtime_ns) != job['signature']:
-            item.update(status='FILE_CHANGED', message='文件变化或仍被占用，未上传')
+            return block['status']
+        path=job['path']
+        try:
+            stable=is_file_fully_written(path) and (path.stat().st_size,path.stat().st_mtime_ns)==job['signature']
+        except OSError:
+            stable=False
+        if not stable:
+            item.update(status='FILE_CHANGED',message='文件变化、消失或仍被占用，未上传')
             self.save_report()
             return 'FILE_CHANGED'
-        if target.platform == 'youtube' and media_type(path) != 'video':
-            item.update(self.ledger.set_result(job['digest'],target.key,'PERMANENT_REJECT',
-                'YouTube 当前发布接口仅支持视频，独立音频/图片不上传、不重试，保留源文件'))
+        if target.platform in ('youtube','xiaohongshu','kuaishou') and media_type(path)!='video':
+            item.update(self.ledger.set_result(job['digest'],target.key,'PERMANENT_REJECT','当前自动发布器仅支持视频，保留文件'))
             self.save_report()
-            return item['status']
+            return 'PERMANENT_REJECT'
         if not previous:
             try:
-                historical = self.seed_douyin_success(job, target)
+                historical=self.seed_douyin_success(job,target)
             except RuntimeError as error:
-                message = str(error)
-                self.blocked[target.key] = {'status':'CONFIG_REQUIRED','message':message}
-                item.update(status='CONFIG_REQUIRED',message=message)
-                self.log.emit(f'[停止该账号] {target.key}：{message}；其他目标继续')
+                self.blocked[target.key]={'status':'CONFIG_REQUIRED','message':str(error)}
+                item.update(status='CONFIG_REQUIRED',message=str(error))
                 self.save_report()
                 return 'CONFIG_REQUIRED'
             except OSError as error:
-                item.update(status='FILE_CHANGED', message=f'读取媒体失败：{path}；{error}；未上传')
+                item.update(status='FILE_CHANGED',message=str(error))
                 self.save_report()
                 return 'FILE_CHANGED'
             if historical:
                 item.update(historical)
-                self.log.emit(f'[历史去重待核对] {path.name} → {target.key}；未重复上传')
                 self.save_report()
-                return historical['status']
-        attempt = {'number': len(item['attempts']) + 1, 'started_at': now(), 'logs': []}
-        item['attempts'].append(attempt)
-        item['status'] = 'IN_PROGRESS'
+                return SUCCESS
+        quota=self.quota.snapshot(target.key,getattr(target.account,'daily_upload_limit',10))
+        if not quota['remaining']:
+            item['quota_message']=f'今日已用{quota["used"]}次，上限{quota["limit"]}次；北京时间次日00:00或提高本账号上限后继续'
+            marker=(quota['day'],quota['limit'],quota['used'])
+            if self.quota_notices.get(target.key)!=marker:
+                self.log.emit(f'[每日限额等待] {target.key}：'+item['quota_message'])
+                self.quota_notices[target.key]=marker
+            self.save_report()
+            return 'DAILY_LIMIT'
+        item.pop('quota_message',None)
+        if target.key in self.deferred_preflight:
+            from .preflight import AccountPreflight, prerequisite_results
+            from playwright.sync_api import sync_playwright
+            failures=prerequisite_results([target],self.root/'dom_reports')
+            if not failures:
+                with sync_playwright() as playwright:
+                    result=AccountPreflight(target,self.stopping.is_set,self.log.emit).check(playwright)
+                failures=[] if result.passed else [result]
+            if failures:
+                failure=failures[0]
+                self.blocked[target.key]={'status':failure.status,'message':failure.message}
+                item.update(status=failure.status,message=failure.message)
+                self.save_report()
+                return failure.status
+            self.deferred_preflight.remove(target.key)
+        attempt={'number':len(attempts)+1,'id':uuid.uuid4().hex,'started_at':now(),'logs':[],'upload_started':False}
+        attempts.append(attempt)
+        item['status']='RETRYING' if attempt['number']==2 else 'IN_PROGRESS'
         self.save_report()
         def log(message):
-            attempt['logs'].append({'time': now(), 'message': message})
+            attempt['logs'].append({'time':now(),'message':message})
             del attempt['logs'][:-100]
             self.log.emit(f'[{target.platform}/{target.account.account_name}] {message}')
             self.save_report()
+        quota_error=None
+        boundary_info=previous.get('info')
+        def before_upload():
+            nonlocal quota_error
+            if self.stopping.is_set():
+                raise RuntimeError('用户停止，尚未开始上传')
+            try:
+                attempt['upload_started_at']=self.quota.reserve(target.key,job['digest'],self.report['task_id'],attempt['id'],getattr(target.account,'daily_upload_limit',10))
+            except DailyQuotaReached as error:
+                quota_error=error
+                raise
+            attempt['upload_started']=True
+            usage=self.quota.snapshot(target.key,getattr(target.account,'daily_upload_limit',10))
+            self.log.emit(f'[上传计数] {target.platform}/{target.account.account_name}：今日已用{usage["used"]}次，上限{usage["limit"]}次，剩余{usage["remaining"]}次')
+            self.save_report()
+        def before_submit(info):
+            nonlocal boundary_info
+            boundary_info=info
+            self.ledger.set_result(job['digest'],target.key,'IN_PROGRESS','已提交，等待成功证据；中断后按失败处理',info,
+                task_id=self.report['task_id'],attempt_count=attempt['number'])
+            item.update(message='已提交，等待平台确认',info=info)
+            self.save_report()
         self.status.emit(f'{target.platform}/{target.account.account_name}：{path.name}')
         try:
-            uploader = self.factory(target, log)
-            def before_submit(info):
-                self.ledger.set_result(job['digest'], target.key, 'UNCONFIRMED', '已进入提交边界；中断后必须核对平台结果', info)
-                item.update(status='UNCONFIRMED', message='已进入提交边界，等待平台确认', info=info)
-                self.save_report()
-            uploader.before_submit = before_submit
-            success, message, info = uploader.upload_single_video(path)
-            state = SUCCESS if success else uploader.last_outcome
-            if hasattr(info, 'to_dict'):
-                info = info.to_dict()
+            uploader=self.factory(target,log)
+            uploader.before_upload=before_upload
+            uploader.before_submit=before_submit
+            # Injected adapters without a file-input boundary count their invocation.
+            if getattr(uploader,'supports_upload_boundary',False) is not True:
+                before_upload()
+            success,message,info=uploader.upload_single_video(path)
+            state=SUCCESS if success else getattr(uploader,'last_outcome','FAILED')
+            if not isinstance(state,str):
+                state='FAILED'
+            if hasattr(info,'to_dict'):
+                info=info.to_dict()
         except Exception as error:
-            boundary = self.ledger.result(job['digest'], target.key)
-            state = 'UNCONFIRMED' if boundary.get('status') == 'UNCONFIRMED' else 'FAILED'
-            message = str(error)
-            info = boundary.get('info') if state == 'UNCONFIRMED' else None
-        recorded = self.ledger.set_result(job['digest'], target.key, state, message, info)
-        item.update(recorded)
-        attempt.update(status=state, finished_at=now(), message=message, info=info)
-        if state in BLOCKING:
-            self.blocked[target.key] = {'status': state, 'message': message}
-            if state == 'ACCOUNT_LIMIT':
-                self.ledger.block(target.key, state, message)
-            self.log.emit(f'[停止该账号] {target.key}：{message}；其他目标继续')
+            state,message,info='FAILED',str(error),boundary_info
+        if quota_error:
+            attempts.pop()
+            item.update(status='FAILED1' if attempts else 'PENDING',quota_message=str(quota_error))
+            self.save_report()
+            return 'DAILY_LIMIT'
+        if self.stopping.is_set() and not attempt['upload_started']:
+            state='CANCELLED'
+        if state in ('UNCONFIRMED','FAILED') or state=='CANCELLED' and attempt['upload_started']:
+            state='FAILED'+str(attempt['number'])
+        blocking_state=state if state in BLOCKING else None
+        if blocking_state and attempt['upload_started']:
+            info=dict(info) if isinstance(info,dict) else {}
+            info['account_block']={'status':blocking_state,'message':message}
+            state='FAILED'+str(attempt['number'])
+        if not attempt['upload_started'] and state in BLOCKING | {'CANCELLED','DURATION_LIMIT','PERMANENT_REJECT'}:
+            attempts.pop()
+        item.update(self.ledger.set_result(job['digest'],target.key,state,message,info or boundary_info,
+            task_id=self.report['task_id'],attempt_count=len(attempts)))
+        attempt.update(status=state,finished_at=now(),message=message,info=info)
+        account_block=(info or {}).get('account_block') if isinstance(info,dict) else None
+        if blocking_state:
+            self.blocked[target.key]={'status':blocking_state,'message':message}
+            if blocking_state=='ACCOUNT_LIMIT':
+                self.ledger.block(target.key,blocking_state,message)
+            self.log.emit(f'[停止该账号] {target.key}：{message}；其他账号继续')
+        elif account_block and account_block.get('status') in BLOCKING:
+            self.blocked[target.key]=account_block
+            self.log.emit(f'[停止该账号] {target.key}：{account_block["message"]}；其他账号继续')
         self.save_report()
-        return state
+        return blocking_state or state
 
     def archive(self, job):
         item = job['item']
+        required=job['plan']['required']
+        for key in required:
+            latest=self.ledger.result(job['digest'],key)
+            if latest:
+                if latest.get('status') in (SUCCESS,'IGNORED','PERMANENT_REJECT','DURATION_LIMIT') or latest.get('task_id')==self.report['task_id']:
+                    item['results'][key].update(latest)
         if (self.stopping.is_set() or item['archived_path'] or
-            not all(r['status'] == SUCCESS for r in item['results'].values()) or
+            not required or not all(item['results'][key]['status'] in (SUCCESS,'IGNORED') for key in required) or
             not all(job['plan']['archive_enabled'].values())):
             return
         source = job['path']
-        if not is_file_fully_written(source) or (source.stat().st_size, source.stat().st_mtime_ns) != job['signature']:
-            item['archive_error'] = '全部目标成功，但原文件已变化或被占用；保留文件'
-            self.save_report()
-            return
-        destination = source.parent / 'published' / source.name
-        if destination.exists():
-            item['archive_error'] = '归档存在同名文件，未覆盖'
-            self.save_report()
-            return
-        destination.parent.mkdir(exist_ok=True)
         try:
-            shutil.move(str(source), str(destination))
+            destination=archive_completed_file(source,job['signature'],self.log.emit)
             item['archived_path'] = str(destination)
-            subtitle = source.with_suffix('.srt')
-            if subtitle.exists() and not destination.with_suffix('.srt').exists():
-                shutil.move(str(subtitle), str(destination.with_suffix('.srt')))
-            self.log.emit(f'[统一归档] {source.name}：全部{len(item["results"])}个目标已确认成功')
-        except OSError as error:
+            self.log.emit(f'[统一归档] {source.name}：全部{len(item["results"])}个目标已成功或不再跟踪；保留各目标原状态')
+        except (OSError,ValueError) as error:
             item['archive_error'] = str(error)
         self.save_report()
         self.queue_changed.emit()
+
+    def blocked_summary(self, *, include_reason=False):
+        entries=[]
+        for target in self.targets:
+            block=self.blocked.get(target.key) or self.ledger.quota_block(target.key)
+            if not block:
+                continue
+            text=f'{CHANNELS[target.platform].name}/{target.account.account_name}：{result_status_text(block)}，本轮停止该账号'
+            if include_reason:
+                text+='（'+' '.join(block.get('message','').split())[:220]+'）'
+            entries.append(text)
+        return '；'.join(entries)
 
     def run_batch(self, jobs):
         retries = []
@@ -359,7 +589,7 @@ class MultiDeployWorker(QThread):
                 if self.stopping.is_set():
                     break
                 if len(job['item']['results'][target.key]['attempts']) > before and state not in BLOCKING | {'DURATION_LIMIT','PERMANENT_REJECT','FILE_CHANGED'}:
-                    self.stopping.wait(self.interval_seconds)
+                    self.controlled_wait(self.interval_seconds)
             self.archive(job)
         for job, target in retries:
             if self.stopping.is_set():
@@ -367,36 +597,52 @@ class MultiDeployWorker(QThread):
             self.log.emit(f'[集中重试一次] {job["path"].name} → {target.key}')
             self.attempt(job, target)
             self.archive(job)
-            self.stopping.wait(self.interval_seconds)
+            self.controlled_wait(self.interval_seconds)
+        if jobs and (summary:=self.blocked_summary(include_reason=True)):
+            self.log.emit('[本轮账号限制] '+summary)
 
     def run(self):
         try:
             self.ledger = MultiTargetLedger(self.root)
+            self.quota.bootstrap_history(self.stopping.is_set)
             self.save_report()
             self.log.emit(f'[任务报告] {self.report_path}')
             while not self.stopping.is_set():
+                if not self.checkpoint():
+                    break
                 self.run_batch(self.plan_batch())
-                if self.file_paths is not None:
+                quota_wait=any(r.get('quota_message') for f in self.report['files'] for r in f['results'].values())
+                if self.file_paths is not None and not quota_wait:
                     self.report['status'] = 'STOPPED' if self.stopping.is_set() else 'COMPLETED'
                     break
                 if all(t.key in self.blocked or self.ledger.quota_block(t.key) for t in self.targets):
                     self.report['status'] = 'BLOCKED'
                     break
-                self.status.emit('本轮结束，等待新文件；失败目标仅尝试两轮，未确认目标保留待核对')
-                self.stopping.wait(self.poll_seconds)
+                summary=self.blocked_summary()
+                interval=f'{self.poll_seconds:g}秒'
+                next_scan=(datetime.now(CHINA_TIME)+timedelta(seconds=self.poll_seconds)).strftime('%Y-%m-%d %H:%M:%S')
+                self.report['status']='WAITING_QUOTA' if quota_wait else 'RUNNING'
+                self.status.emit(f'每日限额等待；提高对应账号上限或次日继续' if quota_wait else f'定时扫描等待（每{interval}）；'+(summary or '成功不重传；本任务失败最多尝试两次'))
+                self.log.emit(f'[定时扫描等待] 本轮结束；每{interval}检查目录；下次 {next_scan}（北京时间）；成功不重传，失败2不再重试；限额账号等待跨日或提高上限')
+                self.save_report()
+                current=datetime.now(CHINA_TIME)
+                until_midnight=((current+timedelta(days=1)).replace(hour=0,minute=0,second=0,microsecond=0)-current).total_seconds()
+                self.controlled_wait(min(self.poll_seconds,until_midnight) if quota_wait else self.poll_seconds)
+                if not self.stopping.is_set():
+                    self.log.emit('[定时扫描开始] 正在检查本地媒体目录的新文件；这是目录扫描，不是平台投稿结果查询')
         except Exception as error:
             self.report.update(status='FAILED', error=str(error))
             self.log.emit(f'[任务异常] {error}')
         finally:
-            if self.report['status'] == 'RUNNING':
+            if self.report['status'] in ('RUNNING', 'PAUSED', 'WAITING_QUOTA'):
                 self.report['status'] = 'STOPPED'
             self.report['finished_at'] = now()
             for file in self.report['files']:
                 for result in file['results'].values():
                     if result['status'] == 'PENDING':
                         result.update(status='CANCELLED', message='本次任务结束前尚未执行')
-                    elif result['status'] == 'IN_PROGRESS':
-                        result.update(status='UNCONFIRMED', message='任务异常，可能已提交，需核对')
+                    elif result['status'] in ('IN_PROGRESS','RETRYING','UNCONFIRMED'):
+                        result.update(status='FAILED'+str(min(2,max(1,len(result.get('attempts',[]))))), message='任务中断，未确认成功；保留原文件')
             try:
                 self.save_report()
                 self.log.emit(f'[任务结束] 成功{self.report["success_count"]}，失败{self.report["failure_count"]}，未确认{self.report["unconfirmed_count"]}；{self.report_path}')

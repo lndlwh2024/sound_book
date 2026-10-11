@@ -1056,6 +1056,9 @@ class MainWindow(QMainWindow):
         # ====== 工作台 2: 🚀 抖音矩阵自动发布 ======
         self.douyin_panel = MultiPlatformPublisherPanel()
         self.main_tabs.addTab(self.douyin_panel, "🚀 多平台自动发布")
+        from PySide6.QtWidgets import QTabBar
+        self.main_tabs.tabBar().setTabButton(1,QTabBar.RightSide,self.douyin_panel.channel_view)
+        self.douyin_panel.channel_view.show()
 
     def _build_left_config_panel(self) -> QWidget:
         """构建左侧参数配置区（纯净一体化面板，绝无滑动条）"""

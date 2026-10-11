@@ -18,6 +18,7 @@ from urllib.parse import urlsplit
 
 from playwright.sync_api import sync_playwright, BrowserContext, Page
 
+from ..browser_workflow import BrowserPublishWorkflow
 from .models import DouyinAccountConfig, PublishLedgerRecord
 from .browser import DouyinBrowserManager, DOUYIN_UPLOAD_URL
 
@@ -85,10 +86,12 @@ def resolve_publish_series(file_name: str) -> str:
     return stem.split('_')[0].replace('《', '').replace('》', '').strip()
 
 
-class DouyinUploader:
+class DouyinUploader(BrowserPublishWorkflow):
     """
     抖音创作者中心自动化上传器。
     """
+    stage_interruptions = (PublishCancelled, VideoDurationRejected)
+
     def __init__(self, account: DouyinAccountConfig, headless: bool = False,
                  stop_requested: Optional[Callable[[], bool]] = None,
                  progress_callback: Optional[Callable[[str], None]] = None):
@@ -99,6 +102,8 @@ class DouyinUploader:
         self._stop_requested = stop_requested or (lambda: False)
         self._progress_callback = progress_callback
         self.last_outcome = "FAILED"
+        self.before_upload = lambda: None
+        self.supports_upload_boundary = True
         self._network_events = []
         self.account_limit_reason = None
         self._video_selected = False
@@ -160,20 +165,6 @@ class DouyinUploader:
         logger.info(message)
         if self._progress_callback:
             self._progress_callback(message)
-
-    def _pause(self, page: Page, milliseconds: int):
-        # Keep pumping Playwright events while checking stop at most every 300 ms.
-        remaining = milliseconds
-        self._check_stop()
-        while remaining > 0:
-            step = min(300, remaining)
-            page.wait_for_timeout(step)
-            remaining -= step
-            self._check_stop()
-            if self._video_selected:
-                self._check_duration_notice(page)
-                if not self._publish_armed:
-                    self._read_upload_state(page)
 
     def _check_duration_notice(self, page):
         notices = page.get_by_text(DURATION_LIMIT_NOTICE)
@@ -304,6 +295,7 @@ class DouyinUploader:
                     context.close()
                     return False, "未找到文件上传 Input 元素，请先使用 DOM 探针校准页面", None
 
+                self.before_upload()
                 file_input.set_input_files(str(video_path.resolve()))
                 self._video_selected = True
                 self._progress("视频文件已选择，正在等待作品标题表单")
@@ -312,73 +304,38 @@ class DouyinUploader:
                 # 步骤 2: 等待视频上传并进入编辑页
                 self._pause(page, 3000)
                 # 等待标题输入框出现（标志着上传成功进入作品发布表单）
-                self._required_stage(page, "等待并填写作品标题", lambda: self._prepare_title(page, title))
-                self._pause(page, 2000)
-
-                self._required_stage(page, "选择当前视频画面作为封面", lambda: self._select_video_cover(page))
                 collection_name = self.account.collection_name or book_name
-                self._required_stage(page, f"选择合集：{collection_name}",
-                                     lambda: self._handle_collection_assignment(page, collection_name, episode_num))
-                self._pause(page, 1000)
-                self._required_stage(page, '等待视频上传与处理完成（最多30分钟）', lambda: self._wait_for_upload_ready(page))
-                # 步骤 6: 点击发布
-                logger.info("正在执行最终发布...")
-                publish_btn = self._required_stage(page, "校验发布按钮", lambda: self._get_publish_button(page))
+                publish_btn = self.prepare_publish_form(page,
+                    details=("等待并填写作品标题", lambda: self._prepare_title(page, title)),
+                    cover=("选择当前视频画面作为封面", lambda: self._select_video_cover(page)),
+                    collection=(f"选择合集：{collection_name}",
+                                lambda: self._handle_collection_assignment(page, collection_name, episode_num)),
+                    upload=('等待视频上传与处理完成（最多30分钟）', lambda: self._wait_for_upload_ready(page)),
+                    submit=("校验发布按钮", lambda: self._get_publish_button(page)),
+                    details_pause_ms=2000, options_pause_ms=1000)
 
                 self._check_stop()
                 # 点击超时也可能已提交，先记下边界，避免误报取消成功。
                 publish_submitted = True
                 self._publish_armed = True
                 publish_btn.click()
-                self._progress("已点击发布，等待实际投稿接口确认（最长10分钟）；此时停止将保留待核对文件")
+                self._progress("已点击发布，等待实际投稿接口确认（最长10分钟）；此时停止且未确认成功将记为失败，保留文件")
 
                 # Only this attempt's actual create API acknowledgement confirms submission.
-                success = False
-                err_detail = None
                 wait_start = time.time()
-                while time.time() - wait_start < 600:
-                    self._check_stop()
-                    if self._publish_result is not None:
-                        if self._publish_result['code'] == '0':
-                            self._progress('实际投稿接口返回业务码0，平台已确认接收作品')
-                            success = True
-                            break
-                        err_detail = f"投稿接口业务码{self._publish_result['code']}：{self._publish_result['message']}"
-                        break
-                    if self.account_limit_reason:
-                        err_detail = self.account_limit_reason
-                        break
-                    quota_notice = page.get_by_text(re.compile(r'(今日|今天).*(投稿|发布).*(上限|限额)'))
-                    for index in range(quota_notice.count()):
-                        if quota_notice.nth(index).is_visible():
-                            self.account_limit_reason = quota_notice.nth(index).inner_text()
-                            err_detail = self.account_limit_reason
-                            break
-                    if self.account_limit_reason:
-                        break
-                    # 条件 D: 显式探测失败告警提示，提前退出避免无谓等待
-                    try:
-                        fail_msg = page.get_by_text(re.compile(r"发布失败|包含违规|敏感词|视频格式不支持|请填写作品标题")).first
-                        if fail_msg.count() > 0 and fail_msg.is_visible():
-                            err_detail = fail_msg.inner_text()
-                            logger.error(f"捕获到平台发布拒绝提示: {err_detail}")
-                            break
-                    except Exception:
-                        pass
-
-                    # 循环使用 page.wait_for_timeout 维持消息分发
-                    self._pause(page, 1000)
+                result = self._wait_for_confirmation(page, lambda: self._publish_confirmation(page))
+                success, err_detail = result if result else (False, None)
 
                 if not success:
                     self.last_outcome = ('ACCOUNT_LIMIT' if self.account_limit_reason else
-                                         ('UNCONFIRMED' if not err_detail else 'FAILED'))
+                                         'FAILED')
                     reason = f"平台返回错误: {err_detail}" if err_detail else "点击发布后未能在规定时间内捕获成功提示或页面跳转"
                     self._progress(f"[发布核对] 等待 {time.time() - wait_start:.1f} 秒；页面：{urlsplit(page.url).path}；结果未确认")
                     self._save_diagnostics(page, "发布未确认", reason)
-                    context.close()
+                    self._close_publish_context(context,page,publish_submitted)
                     return False, reason, None
 
-                context.close()
+                self._close_publish_context(context,page,publish_submitted)
 
                 logger.info(f"作品 [{title}] 在抖音平台发布成功！")
 
@@ -392,8 +349,8 @@ class DouyinUploader:
             self._progress(f'[不可重试] {error}；保留原文件，继续下一个视频')
             return False, str(error), None
         except PublishCancelled:
-            self.last_outcome = "UNCONFIRMED" if publish_submitted else "CANCELLED"
-            msg = ("已停止：已点击发布，平台结果尚未确认，请核对作品列表；本地文件未归档"
+            self.last_outcome = "FAILED" if self._video_selected else "CANCELLED"
+            msg = ("已停止：已点击发布，平台结果未确认，按失败处理；本地文件未归档"
                    if publish_submitted else "已停止：当前任务已取消，未点击发布，本地文件未归档")
             self._progress(msg)
             return False, msg, None
@@ -401,11 +358,34 @@ class DouyinUploader:
             if self.account_limit_reason:
                 self.last_outcome = 'ACCOUNT_LIMIT'
             elif publish_submitted:
-                self.last_outcome = "UNCONFIRMED"
+                self.last_outcome = "FAILED"
             err_msg = (f"账号今日投稿达到上限: {self.account_limit_reason}" if self.account_limit_reason
                        else f"自动化上传流程异常: {e}")
             logger.error(err_msg)
             return False, err_msg, None
+
+    def _publish_confirmation(self, page):
+        if self._publish_result is not None:
+            if self._publish_result['code'] == '0':
+                self._progress('实际投稿接口返回业务码0，平台已确认接收作品')
+                return True, None
+            return False, f"投稿接口业务码{self._publish_result['code']}：{self._publish_result['message']}"
+        if self.account_limit_reason:
+            return False, self.account_limit_reason
+        quota_notice = page.get_by_text(re.compile(r'(今日|今天).*(投稿|发布).*(上限|限额)'))
+        for index in range(quota_notice.count()):
+            if quota_notice.nth(index).is_visible():
+                self.account_limit_reason = quota_notice.nth(index).inner_text()
+                return False, self.account_limit_reason
+        try:
+            fail_msg = page.get_by_text(re.compile(r"发布失败|包含违规|敏感词|视频格式不支持|请填写作品标题")).first
+            if fail_msg.count() > 0 and fail_msg.is_visible():
+                err_detail = fail_msg.inner_text()
+                logger.error(f"捕获到平台发布拒绝提示: {err_detail}")
+                return False, err_detail
+        except Exception:
+            pass
+        return None
 
     def _get_publish_button(self, page: Page):
         self._check_stop()
@@ -448,55 +428,6 @@ class DouyinUploader:
         if isinstance(state, dict) and (state['pending'] or any(p['upload'] for p in state['progress'])):
             self._upload_activity_seen = True
         return state
-
-    def _wait_for_upload_ready(self, page, timeout_secs=1800):
-        deadline = time.monotonic() + timeout_secs
-        last_log = 0
-        quiet_since = None
-        while time.monotonic() < deadline:
-            self._check_stop()
-            self._check_duration_notice(page)
-            state = self._read_upload_state(page)
-            if state['failed']:
-                raise RuntimeError('平台视频上传/处理失败：' + '；'.join(state['failed']))
-            if state['ready'] and not state['pending'] and not state['incomplete']:
-                self._progress('已确认视频上传完成且无正在上传/转码状态，允许提交发布')
-                return
-            # Douyin removes its progress panel on completion without keeping a 100% label.
-            # Absence alone is insufficient: require this file's observed upload activity,
-            # a usable editor/preview/reupload entry, and two seconds of stable quiet state.
-            disappeared = (self._upload_activity_seen and not state['pending']
-                           and not any(p['upload'] for p in state['progress'])
-                           and state['form'] and state['preview'] and state['reupload'])
-            if disappeared:
-                if quiet_since is None:
-                    quiet_since = time.monotonic()
-                if time.monotonic() - quiet_since >= 2:
-                    self._progress('已确认本次上传进度消失，视频预览与重新上传入口就绪，连续2秒无上传/转码状态，允许提交发布')
-                    return
-            else:
-                quiet_since = None
-            if time.monotonic() - last_log >= 30:
-                self._progress(f"[上传等待] 尚未完成：{state['pending']}；进度：{state['progress']}；"
-                               f"本次上传已观测={self._upload_activity_seen}；表单={state['form']}；"
-                               f"预览={state['preview']}；重新上传={state['reupload']}；保持浏览器打开")
-                last_log = time.monotonic()
-            self._pause(page, 300)
-        raise RuntimeError('等待视频上传与处理完成超时；未点击发布，请查看上传状态诊断')
-
-    def _required_stage(self, page: Page, name: str, action):
-        self._progress(name)
-        self._check_stop()
-        started = time.monotonic()
-        try:
-            return action()
-        except (PublishCancelled, VideoDurationRejected):
-            raise
-        except Exception as error:
-            self._save_diagnostics(page, name, str(error))
-            raise RuntimeError(f"{name}失败，未执行发布：{error}") from error
-        finally:
-            self._progress(f"[阶段耗时] {name}：{time.monotonic() - started:.1f} 秒")
 
     def _save_diagnostics(self, page: Page, stage: str, reason: str):
         from .probe import DouyinDOMProbe

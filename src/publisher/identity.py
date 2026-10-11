@@ -36,6 +36,8 @@ def extract_platform_identity(page, platform):
     nickname = result['nickname'].strip()
     if nickname in {'登录','扫码登录','上传视频','发布','用户','创作者','你的频道','Your channel','YouTube'}:
         return None
+    if platform=='kuaishou' and nickname=='TA':
+        return None  # The creator centre uses TA while identity is absent/restricted.
     channel = re.match(r'/channel/(UC[\w-]{22})(?:/|$)', address.path) if platform == 'youtube' else None
     return {'nickname':nickname, 'platform_uid':channel.group(1) if channel else '',
             'channel_id':channel.group(1) if channel else '', 'source':result.get('source','own-profile')}

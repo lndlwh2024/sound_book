@@ -119,7 +119,7 @@ def test_stop_pipeline_never_archives_unconfirmed_file(tmp_path, monkeypatch, st
         assert "未点击发布" in msg
     else:
         publish.click.assert_called_once()
-        assert "结果尚未确认" in msg
+        assert "平台结果未确认，按失败处理" in msg
 
 
 def test_daemon_stop_propagates_to_active_uploader(tmp_path, monkeypatch):

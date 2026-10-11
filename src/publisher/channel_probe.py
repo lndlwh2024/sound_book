@@ -10,19 +10,63 @@ from .platforms import CHANNELS
 
 STAGES = ('自动识别', '上传前', '上传中', '上传完成', '标题与正文', '封面', '合集或播放列表', '视频元素', '检查', '发布前', '发布结果', '异常提示')
 
+# Used by both the uploader and diagnostics. Some security panels have no
+# dialog/alert role, and their headings are ordinary non-semantic elements.
+CREATOR_NOTICES_JS = r'''() => {
+    const visible=e=>{const r=e.getBoundingClientRect(),s=getComputedStyle(e);
+        return r.width>0&&r.height>0&&s.visibility!=='hidden'&&s.display!=='none';};
+    const editable=e=>!!e.closest('input,textarea,[contenteditable=true]');
+    const noticeSelector='[role=alert],[role=dialog],[aria-live=assertive],'
+        +'[class*="message-error"],[class*="message-warning"],[class*="notification"],'
+        +'[class*="toast"],[class*="error"],[class*="warning"]';
+    const accessPage=![...document.querySelectorAll(
+        'input[type=file],input[placeholder="填写标题会有更多赞哦"],#work-description-edit[contenteditable=true]')].some(visible);
+    const elements=[...document.querySelectorAll('*')];
+    const panels=elements.filter(e=>{
+        if(!visible(e)||editable(e)||e.matches('body,html'))return false;
+        const text=(e.innerText||'').trim();
+        if(text.length>600||!/扫码验证|安全验证|人机验证|滑块验证/.test(text))return false;
+        const modal=e.closest('[role=dialog],[aria-modal=true],[class*="modal" i],'
+            +'[class*="captcha" i],[class*="verify" i],[class*="verification" i]');
+        const challenge=/二维码|请.{0,30}扫码|拖动.{0,30}滑块|请求.{0,20}频繁/.test(text);
+        // The current XHS panel is plain DOM with a heading, refresh and help.
+        return !!modal&&challenge || /问题反馈/.test(text)&&
+            (/刷新/.test(text)||/二维码.{0,15}(失效|过期)|扫码验证身份/.test(text));
+    });
+    const messages=elements.filter(e=>{
+        const text=(e.innerText||'').trim();
+        const access=/账号(?:已|已经)?(?:被)?封禁|无法访问创作者中心|账号因违规操作已受到限制/.test(text);
+        return (!e.children.length||access&&text.length<350)&&visible(e)&&!editable(e);
+    }).map(e=>({text:(e.innerText||'').trim(),accessPage,
+        notice:!!e.closest(noticeSelector),verification:panels.some(p=>p.contains(e))}))
+        .filter(m=>m.text.length>0&&m.text.length<350);
+    for(const panel of panels){
+        if(panels.some(p=>p!==panel&&panel.contains(p)))continue;
+        messages.unshift({text:(panel.innerText||'').trim().slice(0,350),
+            accessPage,notice:true,verification:true});
+    }
+    return messages;
+}'''
+
 EXTRACT_JS = r'''() => {
     const nodes = [], roots = [], notices = [];
     const walk = (root, path) => {
         roots.push(path);
         for (const el of root.querySelectorAll('*')) {
             if (el.shadowRoot) walk(el.shadowRoot, path + ' > ' + el.tagName.toLowerCase() + '#' + el.id);
+            // The current Xiaohongshu footer exposes this closed root on its host.
+            // Inspect the actual controls; never change its mode or trigger events.
+            const publishRoot=el.localName==='xhs-publish-btn' && el._sr instanceof ShadowRoot
+                && el._sr.host===el ? el._sr : null;
+            if (publishRoot && publishRoot!==el.shadowRoot) walk(publishRoot,path+' > xhs-publish-btn#'+el.id+' (closed)');
             const noticeText = (el.innerText||el.textContent||'').trim();
-            if (!el.children.length && /上传|转码|处理中|发布成功|发布失败|上限|限额|分钟/.test(noticeText)) {
+            if (!el.children.length && /上传|转码|处理中|发布成功|发布失败|上限|限额|分钟|封禁|无法访问创作者中心/.test(noticeText)) {
                 const nr=el.getBoundingClientRect();
                 if(nr.width>0 && nr.height>0) notices.push({text:noticeText.slice(0,300), root:path});
             }
-            if (!el.matches('input,textarea,button,select,option,a[href],label,[role],[contenteditable="true"],video,progress,canvas,[class*="progress"]')) continue;
             const r = el.getBoundingClientRect(), s = getComputedStyle(el);
+            const semantic=el.matches('input,textarea,button,select,option,a[href],label,[role],[contenteditable="true"],video,progress,canvas,xhs-publish-btn,[class*="progress"],[onclick],[tabindex],[class*="button" i],[class*="btn" i]');
+            if (!semantic && !(s.cursor==='pointer' && noticeText.length>0 && noticeText.length<=80)) continue;
             nodes.push({tag:el.tagName.toLowerCase(), id:el.id, name:el.getAttribute('name'),
                 role:el.getAttribute('role'), type:el.getAttribute('type'), accept:el.getAttribute('accept'),
                 placeholder:el.getAttribute('placeholder') || el.getAttribute('data-placeholder'),
@@ -31,14 +75,27 @@ EXTRACT_JS = r'''() => {
                 ariaSelected:el.getAttribute('aria-selected'), href:el.getAttribute('href'),
                 ariaValueMax:el.getAttribute('aria-valuemax'), className:el.getAttribute('class'),
                 disabled:el.matches(':disabled') || el.getAttribute('aria-disabled')==='true',
+                disabledAttribute:el.hasAttribute('disabled'), ariaDisabled:el.getAttribute('aria-disabled'),
+                pointerEvents:s.pointerEvents,
+                publishComponent:el.localName==='xhs-publish-btn' ? {
+                    rootMode:publishRoot?.mode||null,isPublish:el.getAttribute('is-publish'),
+                    submitText:el.getAttribute('submit-text'),disabled:el.getAttribute('submit-disabled'),
+                    loading:el.getAttribute('submit-loading')} : null,
+                actionOwner:(()=>{const owner=el.closest('button,[role=button],[role=combobox],[role=option]');
+                    return owner ? {tag:owner.tagName.toLowerCase(),className:owner.getAttribute('class'),
+                        disabled:owner.matches(':disabled')||owner.getAttribute('aria-disabled')==='true',
+                        pointerEvents:getComputedStyle(owner).pointerEvents} : null;})(),
                 readOnly:el.readOnly===true, contentEditable:el.isContentEditable,
                 visible:r.width>0 && r.height>0 && s.visibility!=='hidden' && s.display!=='none',
                 text:el.matches('input,textarea') ? '' : (el.innerText||el.textContent||'').trim().slice(0,200),
+                valueNow:el.matches('progress') ? el.value : null, valueMax:el.matches('progress') ? el.max : null,
+                videoReadyState:el.matches('video') ? el.readyState : null,
                 root:path});
         }
     };
     walk(document, 'document');
-    return {title:document.title, nodes, roots, notices, limitation:'Closed shadow roots and native browser prompts are not page DOM'};
+    return {title:document.title, nodes, roots, notices, blockingNotices:('''+CREATOR_NOTICES_JS+r''')(),
+        limitation:'Closed roots are inspected only for exposed xhs-publish-btn roots; other closed roots and native browser prompts are unavailable'};
 }'''
 
 
@@ -107,9 +164,14 @@ class ChannelDOMProbe:
         if active.count() == 1:
             text = active.inner_text().strip()
             return {'详细信息':'标题与正文','视频元素':'视频元素','检查':'检查','公开范围':'发布前'}.get(text,'上传前')
-        published = page.get_by_text(re.compile(r'^视频已发布$'))
+        published = page.get_by_text(re.compile(r'^(?:视频已发布|(?:笔记|作品|视频)?发布成功[！!。\s]*)$'))
         if any(published.nth(i).is_visible() for i in range(published.count())):
             return '发布结果'
         if page.locator('[contenteditable=true][aria-label*="标题"]:visible').count():
+            return '标题与正文'
+        if page.locator('input[placeholder="填写标题会有更多赞哦"]:visible, #work-description-edit[contenteditable=true]:visible').count():
+            busy=page.get_by_text(re.compile(r'^(?:正在上传|上传中|正在转码|转码中)'))
+            if any(busy.nth(i).is_visible() for i in range(busy.count())):
+                return '上传中'
             return '标题与正文'
         return '上传前'

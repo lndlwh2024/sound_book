@@ -14,13 +14,14 @@ class Channel:
     url: str
     host: str
     publish_enabled: bool = False
+    requires_dom: bool = False
 
 
 CHANNELS = {
-    'douyin': Channel('douyin', '抖音', 'https://creator.douyin.com/creator-micro/content/upload', 'creator.douyin.com', True),
-    'xiaohongshu': Channel('xiaohongshu', '小红书', 'https://creator.xiaohongshu.com/publish/publish?source=&published=true', 'creator.xiaohongshu.com'),
-    'kuaishou': Channel('kuaishou', '快手', 'https://cp.kuaishou.com/article/publish/video', 'cp.kuaishou.com'),
-    'youtube': Channel('youtube', 'YouTube', 'https://studio.youtube.com/', 'studio.youtube.com', True),
+    'douyin': Channel('douyin', '抖音', 'https://creator.douyin.com/creator-micro/content/upload', 'creator.douyin.com', True, True),
+    'xiaohongshu': Channel('xiaohongshu', '小红书', 'https://creator.xiaohongshu.com/publish/publish?source=&published=true', 'creator.xiaohongshu.com', True, True),
+    'kuaishou': Channel('kuaishou', '快手', 'https://cp.kuaishou.com/article/publish/video', 'cp.kuaishou.com', True, True),
+    'youtube': Channel('youtube', 'YouTube', 'https://studio.youtube.com/', 'studio.youtube.com', True, True),
 }
 
 
@@ -49,6 +50,7 @@ class ChannelAccount:
     profile_dir: str = ''
     collection_name: str = ''
     default_tags: list[str] = field(default_factory=lambda: ['#有声书', '#知识分享'])
+    daily_upload_limit: int = 10
 
 
 class ChannelAccountStore:
@@ -58,6 +60,7 @@ class ChannelAccountStore:
         self.path = self.root / 'accounts.json'
         self.accounts = []
         self.selected_channels = ['douyin']
+        self.archive_targets = []
         self.load_error = ''
         if self.path.exists():
             try:
@@ -66,6 +69,7 @@ class ChannelAccountStore:
                 for account in self.accounts:
                     self._validate(account)
                 self.selected_channels = [key for key in data.get('selected_channels', ['douyin']) if key in CHANNELS]
+                self.archive_targets = data.get('archive_targets', [])
             except Exception as error:
                 self.accounts = []
                 self.load_error = f'新渠道配置读取失败：{error}；原文件保留，抖音仍可使用。'
@@ -76,6 +80,8 @@ class ChannelAccountStore:
             raise ValueError('新渠道账号存储不接受抖音或未知平台')
         if not account.account_id or any(c not in '0123456789abcdef' for c in account.account_id):
             raise ValueError('账号ID无效')
+        if type(account.daily_upload_limit) is not int or account.daily_upload_limit < 0:
+            raise ValueError('每日上传上限必须为非负整数')
 
     def profile_path(self, account):
         self._validate(account)
@@ -90,6 +96,7 @@ class ChannelAccountStore:
         self.root.mkdir(parents=True, exist_ok=True)
         temporary = self.path.with_suffix('.tmp')
         temporary.write_text(json.dumps({'schema_version': 1, 'selected_channels': self.selected_channels,
+                                        'archive_targets': self.archive_targets,
                                         'accounts': [asdict(a) for a in self.accounts]},
                                         ensure_ascii=False, indent=2), encoding='utf-8')
         temporary.replace(self.path)
@@ -111,7 +118,4 @@ class ChannelAccountStore:
 def deployment_block_reason(channels):
     if not channels:
         return '请至少选择一个发布渠道。'
-    unsupported = [CHANNELS[key].name for key in channels if not CHANNELS[key].publish_enabled]
-    if unsupported:
-        return '、'.join(unsupported) + '缺少现场DOM验证，目前仅支持登录与采集。可选择抖音或YouTube发布。'
     return ''
