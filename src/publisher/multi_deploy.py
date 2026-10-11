@@ -22,6 +22,11 @@ from .upload_quota import DailyUploadQuota, DailyQuotaReached
 CHINA_TIME = timezone(timedelta(hours=8))
 SUCCESS = 'SUCCESS'
 LEGACY_REVIEW_MESSAGE = '发现原抖音成功账本；旧记录缺少本次确认依据，请核对后标记成功或允许重试，避免重复发布'
+LEGACY_FAILED_MESSAGE = '旧未确认投稿按失败处理；新任务允许重试'
+
+
+def legacy_import_needed(previous):
+    return not previous or (previous.get('status')=='FAILED' and previous.get('message')==LEGACY_FAILED_MESSAGE)
 
 
 def now():
@@ -319,6 +324,7 @@ class MultiDeployWorker(QThread):
             if (resolved, signature) in self.jobs_cache:
                 existing = self.jobs_cache[(resolved,signature)]
                 existing['targets'] = job['targets']
+                existing['item']['results'].update(self.reconcile_archive_history(existing))
                 jobs.append(existing)
                 continue
             digest = self.fingerprint(job['path'])
@@ -330,6 +336,7 @@ class MultiDeployWorker(QThread):
                 continue
             self.processed.add((resolved, signature))
             job.update(digest=digest, signature=signature)
+            archive_history=self.reconcile_archive_history(job)
             plan = self.ledger.register_plan(digest, self.archive_targets if self.archive_targets is not None else job['targets'], fixed=self.archive_targets is not None)
             job['plan'] = plan
             keys = list(dict.fromkeys(plan['required']+[t.key for t in job['targets']]))
@@ -337,6 +344,7 @@ class MultiDeployWorker(QThread):
                     'sha256': digest, 'mtime_ns': stat.st_mtime_ns,
                     'modified_at': datetime.fromtimestamp(stat.st_mtime, CHINA_TIME).isoformat(),
                     'results': {key: fresh_result(self.ledger.result(digest,key)) for key in keys}, 'archived_path': None}
+            item['results'].update(archive_history)
             for key,result in item['results'].items():
                 result['attempts'] = self.attempts_by_target.setdefault((digest,key),[])
             job['item'] = item
@@ -345,6 +353,33 @@ class MultiDeployWorker(QThread):
             jobs.append(job)
         self.save_report()
         return jobs
+
+    def reconcile_archive_history(self,job):
+        """Restore old successes even when this task only uploads other platforms."""
+        active={t.key for t in job['targets']}
+        restored={}
+        for target in self.archive_targets or ():
+            if target.platform!='douyin' or target.key in active:
+                continue
+            if not self.checkpoint():
+                break
+            try:
+                previous=self.restore_legacy_success(job,target,self.ledger.result(job['digest'],target.key))
+                if legacy_import_needed(previous) and target.key not in self.blocked:
+                    historical=self.seed_douyin_success(job,target)
+                    if historical:
+                        previous=historical
+                        self.log.emit(f'[历史成功迁移] {job["path"].name} → {target.key}：归档目标的旧成功记录已恢复，未重新上传')
+                if previous:
+                    restored[target.key]=fresh_result(previous)
+            except RuntimeError as error:
+                self.blocked[target.key]={'status':'CONFIG_REQUIRED','message':str(error)}
+                self.log.emit(f'[历史核对失败] {target.key}：{error}；其他上传账号继续，保留文件')
+            except OSError as error:
+                restored[target.key]={'status':'FILE_CHANGED','message':str(error),'attempts':[]}
+            if target.key in self.blocked:
+                restored[target.key]={**self.blocked[target.key],'attempts':[]}
+        return restored
 
     def seed_douyin_success(self, job, target):
         if target.platform != 'douyin':
@@ -425,7 +460,7 @@ class MultiDeployWorker(QThread):
             item.update(self.ledger.set_result(job['digest'],target.key,'PERMANENT_REJECT','当前自动发布器仅支持视频，保留文件'))
             self.save_report()
             return 'PERMANENT_REJECT'
-        if not previous:
+        if legacy_import_needed(previous):
             try:
                 historical=self.seed_douyin_success(job,target)
             except RuntimeError as error:

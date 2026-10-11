@@ -4,7 +4,7 @@ import json
 import threading
 from pathlib import Path
 from PySide6.QtCore import QThread, Signal
-from .multi_deploy import MultiTargetLedger, archive_completed_file, CHINA_TIME
+from .multi_deploy import MultiTargetLedger, archive_completed_file, CHINA_TIME, LEGACY_FAILED_MESSAGE, legacy_import_needed
 from .douyin.daemon import is_file_fully_written
 from .media import selected_extensions
 from .status import fresh_result
@@ -34,7 +34,16 @@ def scan_token(root, targets, archive_targets):
     ledger=Path(root)/'target_ledger.json'
     stamp=(ledger.stat().st_size,ledger.stat().st_mtime_ns) if ledger.exists() else None
     group=tuple(sorted((t.key,t.account.auto_archive) for t in archive_targets))
-    return tuple(listing),group,stamp
+    historical=[]
+    accounts={t.key:t for t in [*archive_targets,*targets] if t.platform=='douyin'}
+    for key,target in sorted(accounts.items()):
+        reports=Path(target.account.target_dir)/'reports'
+        files=[]
+        for report in reports.glob('publish_ledger_*.json'):
+            stat=report.stat()
+            files.append((str(report.resolve()),stat.st_size,stat.st_mtime_ns))
+        historical.append((key,str(reports.resolve()),tuple(sorted(files))))
+    return tuple(listing),group,stamp,tuple(historical)
 
 
 class ScanCleanupWorker(QThread):
@@ -80,7 +89,7 @@ class ScanCleanupWorker(QThread):
 
     def legacy_success(self,ledger,path,digest,md5,target,signature):
         previous=ledger.restore_legacy_success(digest,target.key,path,signature)
-        if previous or target.platform!='douyin':
+        if not legacy_import_needed(previous) or target.platform!='douyin':
             return previous
         for report in (Path(target.account.target_dir)/'reports').glob('publish_ledger_*.json'):
             records=json.loads(report.read_text(encoding='utf-8-sig'))
@@ -142,17 +151,22 @@ class ScanCleanupWorker(QThread):
                         self.log.emit(f'[文件变化] {path.name}；下次扫描再处理')
                         continue
                     digest=sha.hexdigest()
-                    for target in targets:
-                        self.legacy_success(ledger,path,digest,md5.hexdigest(),target,signature)
                     # The upload subset must never shorten the fixed archive group.
                     group={t.key:t for t in self.archive_targets}
                     group.update({t.key:t for t in targets})
+                    # Archive-only accounts still contribute their historical results.
+                    for target in group.values():
+                        self.check_stop()
+                        before_state=ledger.result(digest,target.key).get('status')
+                        restored=self.legacy_success(ledger,path,digest,md5.hexdigest(),target,signature)
+                        if restored.get('status')=='SUCCESS' and before_state!='SUCCESS':
+                            self.log.emit(f'[历史成功迁移] {path.name} → {target.key}：同账号及文件摘要匹配，未重新上传')
                     plan=ledger.register_plan(digest,list(group.values()),fixed=True)
                     results={}
                     for key in plan['required']:
                         previous=ledger.result(digest,key)
                         if previous.get('status')=='UNCONFIRMED':
-                            previous=ledger.set_result(digest,key,'FAILED','旧未确认投稿按失败处理；新任务允许重试',previous.get('info'))
+                            previous=ledger.set_result(digest,key,'FAILED',LEGACY_FAILED_MESSAGE,previous.get('info'))
                         results[key]=fresh_result(previous)
                     item={'file_name':path.name,'file_path':str(path),'size_bytes':before.st_size,
                         'mtime_ns':before.st_mtime_ns,'sha256':digest,'results':results,'archived_path':None,
@@ -179,7 +193,7 @@ class ScanCleanupWorker(QThread):
             removed={item['file_path'] for item in self.items if item['archived_path']}
             expected=tuple((key,folder,extensions,tuple(entry for entry in entries if entry[0] not in removed))
                 for key,folder,extensions,entries in token[0])
-            if cacheable and final_token[0]==expected:
+            if cacheable and final_token[0]==expected and final_token[3]==token[3]:
                 self.cache[cache_key]={'token':final_token,'items':self.items}
             else:
                 self.cache.pop(cache_key,None)

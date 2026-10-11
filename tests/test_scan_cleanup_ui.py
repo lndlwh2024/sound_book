@@ -87,6 +87,23 @@ def test_direct_start_performs_cleanup_and_changed_directory_invalidates_cache(p
     assert panel.douyin.logs.toPlainText().count('[扫描清理完成]')==2
 
 
+@pytest.mark.parametrize('platform',['xiaohongshu','kuaishou'])
+def test_other_platform_cleanup_displays_old_douyin_success_without_upload(panel,tmp_path,platform):
+    import json,hashlib
+    path=tmp_path/'copy.mp4';path.write_bytes(b'video'*500)
+    os.utime(path,(time.time()-10,time.time()-10))
+    directory=tmp_path/'reports';directory.mkdir()
+    original=json.dumps([{'account_id':panel.douyin.current().account_id,'status':'SUCCESS',
+        'file_hash':hashlib.md5(path.read_bytes()).hexdigest()}])
+    report=directory/'publish_ledger_20261006.json';report.write_text(original)
+    page=next(p for p in panel.panels if p.platform==platform)
+    page.scan_button.click();drain(panel)
+    page.scan_queue();panel.render_results()
+    assert page.table_queue.item(0,5).text()=='已成功'
+    assert panel.worker is None and path.exists() and report.read_text()==original
+    assert DailyUploadQuota(panel.store.root).snapshot('douyin:'+panel.douyin.current().account_id)['used']==0
+
+
 def test_cancel_slow_cleanup_keeps_ui_responsive_and_never_starts_preflight(panel,monkeypatch):
     check,factory=local_preflight(panel,monkeypatch)
     started=threading.Event()

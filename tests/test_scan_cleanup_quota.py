@@ -110,6 +110,102 @@ def test_scan_recognizes_renamed_copied_history_per_account(tmp_path,platform):
     assert not (path.parent/'published').exists()
 
 
+def legacy_report(target,content,**changes):
+    directory=Path(target.account.target_dir)/'reports'
+    directory.mkdir(parents=True,exist_ok=True)
+    path=directory/'publish_ledger_20261006.json'
+    record={'account_id':target.account.account_id,'status':'SUCCESS',
+        'file_hash':hashlib.md5(content).hexdigest(),**changes}
+    path.write_text(json.dumps([record]),encoding='utf-8-sig')
+    return path
+
+
+@pytest.mark.parametrize('selected',[(1,),(2,),(1,2)])
+def test_other_platform_cleanup_imports_archive_only_douyin_history(tmp_path,selected):
+    path=media(tmp_path/'copies','renamed.mp4')
+    group=targets(path.parent)
+    group[0].account.target_dir=str(tmp_path/'original-douyin-directory')
+    report=legacy_report(group[0],path.read_bytes())
+    original=report.read_bytes()
+    root=tmp_path/'state'
+    scanner=ScanCleanupWorker([group[i] for i in selected],group,root)
+    scanner.run()
+    assert not scanner.error and path.exists()
+    result=scanner.items[0]['results'][group[0].key]
+    assert result['status']=='SUCCESS' and result['attempts']==[]
+    assert MultiTargetLedger(root).result(scanner.items[0]['sha256'],group[0].key)['status']=='SUCCESS'
+    assert DailyUploadQuota(root).snapshot(group[0].key)['used']==0
+    assert report.read_bytes()==original
+
+
+@pytest.mark.parametrize('changes',[{'account_id':'other'}, {'file_hash':'0'*32}, {'status':'FAILED'}])
+def test_archive_only_legacy_records_require_correct_account_hash_and_success(tmp_path,changes):
+    path=media(tmp_path/'media');group=targets(path.parent)
+    legacy_report(group[0],path.read_bytes(),**changes)
+    scanner=ScanCleanupWorker(group[1:2],group,tmp_path/'state');scanner.run()
+    assert not scanner.error and path.exists()
+    assert scanner.items[0]['results'][group[0].key]['status']=='PENDING'
+
+
+def test_legacy_report_change_invalidates_cache_and_repairs_converted_migration(tmp_path):
+    from src.publisher.multi_deploy import LEGACY_FAILED_MESSAGE
+    path=media(tmp_path/'copies');group=targets(path.parent);root=tmp_path/'state';cache={}
+    group[0].account.target_dir=str(tmp_path/'old-account')
+    digest=hashlib.sha256(path.read_bytes()).hexdigest()
+    record={'account_id':group[0].account.account_id,'status':'SUCCESS','file_hash':hashlib.md5(path.read_bytes()).hexdigest()}
+    MultiTargetLedger(root).set_result(digest,group[0].key,'FAILED',LEGACY_FAILED_MESSAGE,record)
+    first=ScanCleanupWorker(group[1:2],group,root,cache=cache);first.run()
+    assert not first.error and first.items[0]['results'][group[0].key]['status']=='PENDING'
+    # Embedded info alone is insufficient. A matching original success ledger is required.
+    legacy_report(group[0],path.read_bytes())
+    second=ScanCleanupWorker(group[1:2],group,root,cache=cache);second.run()
+    assert not second.error and second.items is not first.items
+    assert second.items[0]['results'][group[0].key]['status']=='SUCCESS'
+
+
+def test_explicit_review_failure_is_not_overridden_by_legacy_import(tmp_path):
+    path=media(tmp_path/'media');group=targets(path.parent);root=tmp_path/'state'
+    legacy_report(group[0],path.read_bytes())
+    digest=hashlib.sha256(path.read_bytes()).hexdigest()
+    MultiTargetLedger(root).set_result(digest,group[0].key,'FAILED','人工更正为失败')
+    scanner=ScanCleanupWorker(group[1:2],group,root);scanner.run()
+    assert not scanner.error and scanner.items[0]['results'][group[0].key]['status']=='PENDING'
+    assert MultiTargetLedger(root).result(digest,group[0].key)['status']=='FAILED'
+
+
+def test_complete_fixed_group_archives_after_restoring_archive_only_success(tmp_path):
+    path=media(tmp_path/'media');group=targets(path.parent);root=tmp_path/'state'
+    legacy_report(group[0],path.read_bytes())
+    digest=hashlib.sha256(path.read_bytes()).hexdigest();ledger=MultiTargetLedger(root)
+    for t in group[1:]:ledger.set_result(digest,t.key,'SUCCESS','confirmed')
+    scanner=ScanCleanupWorker(group[1:2],group,root);scanner.run()
+    assert not scanner.error and not path.exists()
+    assert Path(scanner.items[0]['archived_path']).exists()
+    assert MultiTargetLedger(root).result(digest,group[0].key)['status']=='SUCCESS'
+
+
+@pytest.mark.parametrize('case',['success','corrupt','late_report'])
+def test_worker_reconciles_archive_only_history_without_uploading_that_account(tmp_path,case):
+    path=media(tmp_path/'media');group=targets(path.parent);root=tmp_path/'state'
+    calls=[]
+    class Uploader:
+        def upload_single_video(self,path):return True,'confirmed',None
+    def factory(target,log):calls.append(target.key);return Uploader()
+    if case!='late_report':
+        report=legacy_report(group[0],path.read_bytes())
+        if case=='corrupt':report.write_text('{broken')
+    worker=task(root,group[1:2],factory,group)
+    jobs=worker.plan_batch()
+    if case=='late_report':
+        assert jobs[0]['item']['results'][group[0].key]['status']=='PENDING'
+        legacy_report(group[0],path.read_bytes())
+        assert worker.plan_batch()[0] is jobs[0]
+    assert jobs[0]['item']['results'][group[0].key]['status']==('CONFIG_REQUIRED' if case=='corrupt' else 'SUCCESS')
+    worker.run_batch(jobs)
+    assert calls==[group[1].key] and path.exists()
+    assert DailyUploadQuota(root).snapshot(group[0].key)['used']==0
+
+
 def test_cleanup_fixed_full_group_ignored_counts_complete_even_auto_archive_off(tmp_path):
     path=media(tmp_path/'media')
     group=targets(path.parent)
