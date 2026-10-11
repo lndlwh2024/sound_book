@@ -169,7 +169,7 @@ def install_local_browser(monkeypatch,playwright,mode='api'):
                 if active=='notice':
                     payload={'code':0,'notice':True}
                 elif active=='unconfirmed':
-                    payload={'code':0}
+                    payload={}  # Missing business acknowledgement is uncertain.
                 elif active in ('quota','duration','failed','closed_busy','closed_rate_limit'):
                     payload={'code':42,'message':{'quota':'抱歉，今天投稿次数已达到上限，请明天再试',
                         'duration':'视频时长不得超过60分钟','failed':'发布失败，请稍后重试',
@@ -271,7 +271,8 @@ def test_full_real_adapter_waits_for_upload_and_requires_confirmed_result(tmp_pa
     assert instance.last_outcome==state,message
     assert success==(state=='SUCCESS')
     assert records['calls']==[platform]
-    assert len(boundaries)==1 and boundaries[0]['confirmation'] is None
+    assert len(boundaries)==(2 if state=='SUCCESS' else 1) and boundaries[0]['confirmation'] is None
+    if state=='SUCCESS':assert boundaries[-1]['confirmation']
     assert records['values'][platform]['title']=='一分钟趣味知识'
     assert records['values'][platform]['description'].strip()==''
     assert records['values'][platform]['premature'] is None
@@ -281,7 +282,7 @@ def test_full_real_adapter_waits_for_upload_and_requires_confirmed_result(tmp_pa
     assert source.exists()  # Archival belongs exclusively to the shared task.
     assert any('上传完成' in text for text in logs)
     if state=='SUCCESS':
-        assert info['confirmation']['kind']==('publish_response' if mode in ('api','remount') else 'success_notice')
+        assert info['confirmation']['kind']==('publish_response' if platform=='xiaohongshu' or mode in ('api','remount') else 'success_notice')
     else:
         assert list((tmp_path/'dom_reports'/platform).rglob('*.png'))
 
@@ -453,7 +454,7 @@ def test_real_adapters_obey_task_account_limit_and_retry_isolation(tmp_path,monk
         assert job.report['files'][1]['results'][targets[0].key]['status']==state
         assert not MultiTargetLedger(job.root).quota_block(targets[0].key)
     else:
-        assert records['calls']==['xiaohongshu','kuaishou','xiaohongshu','kuaishou','xiaohongshu']
+        assert records['calls']==['xiaohongshu','kuaishou','xiaohongshu','xiaohongshu','kuaishou']
         assert job.report['success_count']==4 and job.report['failure_count']==0
         assert all((tmp_path/'published'/source.name).exists() for source in sources)
 
@@ -537,7 +538,8 @@ def test_xiaohongshu_collection_is_scoped_and_verified_before_submit(tmp_path,mo
     assert success==(state=='SUCCESS')
     if success:
         assert records['values']['xiaohongshu']['collection']==(target or '一分钟趣味知识')
-        assert records['calls']==['xiaohongshu'] and len(boundaries)==1
+        assert records['calls']==['xiaohongshu'] and len(boundaries)==2
+        assert boundaries[0]['confirmation'] is None and boundaries[1]['confirmation']
     else:
         assert not records['calls'] and not boundaries
     assert source.exists()
@@ -587,7 +589,8 @@ def test_xiaohongshu_current_closed_footer_publishes_after_upload_and_collection
         records=install_local_browser(monkeypatch,playwright,mode)
         success,message,_=instance.upload_single_video(source)
     assert success,message
-    assert records['calls']==['xiaohongshu'] and len(boundaries)==1
+    assert records['calls']==['xiaohongshu'] and len(boundaries)==2
+    assert boundaries[0]['confirmation'] is None and boundaries[1]['confirmation']
     assert records['values']['xiaohongshu']['collection']=='一分钟趣味知识'
     assert records['values']['xiaohongshu']['premature'] is None
     assert instance.publish_details['host']['rootMode']=='closed'
@@ -705,7 +708,7 @@ def test_xhs_real_endpoint_and_logged_in_security_rejection(tmp_path,monkeypatch
         records=install_local_browser(monkeypatch,playwright,mode)
         success,message,info=instance.upload_single_video(source)
     assert instance.last_outcome==state,message
-    assert success==(state=='SUCCESS') and len(boundaries)==1 and source.exists()
+    assert success==(state=='SUCCESS') and len(boundaries)==(2 if state=='SUCCESS' else 1) and source.exists()
     assert instance.account.platform_nickname=='测试账号'
     if state=='SUCCESS':
         assert records['calls']==['xiaohongshu']
@@ -761,8 +764,9 @@ def test_security_panel_takes_priority_over_generic_toast_without_caption_false_
     ('creator.xiaohongshu.com','/web_api/sns/v2/note','POST',True,{'code':123,'msg':'系统繁忙，请稍后再试'},200,'PLATFORM_BUSY'),
     ('edith.xiaohongshu.com','/web_api/sns/v2/note','POST',True,{'success':False,'msg':'请先完成安全验证'},200,'VERIFICATION_REQUIRED'),
     ('edith.xiaohongshu.com','/web_api/sns/v2/note','POST',True,{},429,'PLATFORM_BUSY'),
-    ('edith.xiaohongshu.com','/web_api/sns/v2/note','POST',True,{'code':0},200,''),
+    ('edith.xiaohongshu.com','/web_api/sns/v2/note','POST',True,{'code':0},200,'SUCCESS'),
     ('edith.xiaohongshu.com','/web_api/sns/v2/note','POST',True,{'code':42,'data':{'note_id':'not-posted'}},200,''),
+    ('edith.xiaohongshu.com','/web_api/sns/v2/note','POST',True,{'code':42,'success':True,'data':{'note_id':'not-posted'}},200,''),
     ('edith.xiaohongshu.com','/web_api/sns/v2/note','GET',True,{'code':0,'data':{'note_id':'existing'}},200,''),
     ('edith.xiaohongshu.com','/web_api/sns/v2/note/detail','POST',True,{'code':0,'data':{'note_id':'existing'}},200,''),
     ('other.example','/web_api/sns/v2/note','POST',True,{'code':0,'data':{'note_id':'wrong-origin'}},200,''),
@@ -772,13 +776,17 @@ def test_xhs_endpoint_requires_own_actual_post_and_business_success(tmp_path,hos
     page=MagicMock()
     instance.attach_responses(page)
     callback=page.on.call_args.args[1]
+    requested=page.on.call_args_list[0].args[1]
     instance.submitted=submitted
     response=MagicMock(url='https://'+host+path+'?secret=not-logged',status=http)
     response.request.method=method
+    response.request.url=response.url
     response.json.return_value=body
+    requested(response.request)
     callback(response)
     if expected=='SUCCESS':
-        assert instance.confirmation['post_id']=='posted-note'
+        if body.get('data'):assert instance.confirmation['post_id']=='posted-note'
+        assert instance.confirmation['accepted'] is True
         assert '?' not in instance.confirmation['endpoint']
     elif expected:
         assert instance.platform_error[0]==expected
@@ -786,6 +794,66 @@ def test_xhs_endpoint_requires_own_actual_post_and_business_success(tmp_path,hos
         assert not instance.confirmation
     else:
         assert not instance.confirmation
+
+
+@pytest.mark.parametrize('host',['creator.xiaohongshu.com','edith.xiaohongshu.com'])
+@pytest.mark.parametrize('body',[{'code':0},{'code':0,'data':{'note_id':'note'}},{'success':True}])
+def test_xhs_current_publish_ack_is_durable_and_prevents_retry(tmp_path,host,body):
+    instance=uploader(tmp_path,'xiaohongshu');page=MagicMock();saved=[]
+    instance.before_submit=saved.append
+    instance.file_name='斑马.mp4';instance.title='斑马的条纹，是一件防虫服吗'
+    instance.attach_responses(page)
+    requested,received=[call.args[1] for call in page.on.call_args_list]
+    response=MagicMock(url=f'https://{host}/web_api/sns/v2/note?secret=hidden',status=200)
+    response.request.url=response.url;response.request.method='POST';response.json.return_value=body
+    instance.submitted=True;requested(response.request);received(response)
+    assert len(saved)==1 and saved[0]['confirmation']['accepted'] is True
+    assert instance.reconcile(saved[0]) is True
+    assert '?' not in saved[0]['confirmation']['endpoint']
+    other=dict(saved[0],account_id='other')
+    assert instance.reconcile(other) is False
+
+
+def test_xhs_delayed_response_to_request_before_submit_cannot_confirm_current_file(tmp_path):
+    instance=uploader(tmp_path,'xiaohongshu');page=MagicMock()
+    instance.attach_responses(page)
+    requested,received=[call.args[1] for call in page.on.call_args_list]
+    response=MagicMock(url='https://edith.xiaohongshu.com/web_api/sns/v2/note',status=200)
+    response.request.url=response.url;response.request.method='POST'
+    response.json.return_value={'code':0,'data':{'note_id':'old'}}
+    requested(response.request)  # Created while current file was not submitted.
+    instance.submitted=True;received(response)
+    assert instance.confirmation is None
+
+
+@pytest.mark.parametrize('platform',['xiaohongshu','kuaishou'])
+def test_confirmed_success_survives_exception_after_confirmation(tmp_path,monkeypatch,platform):
+    instance=uploader(tmp_path,platform)
+    instance.account.collection_name='一分钟趣味知识'
+    original=instance.confirm_publish
+    def interrupted(page):
+        original(page)
+        raise RuntimeError('page closed after receiving successful acknowledgement')
+    instance.confirm_publish=interrupted
+    source=tmp_path/'斑马.mp4';source.write_bytes(b'local fixture')
+    saved=[];instance.before_submit=saved.append
+    with sync_playwright() as playwright:
+        records=install_local_browser(monkeypatch,playwright)
+        success,message,info=instance.upload_single_video(source)
+    assert success and instance.last_outcome=='SUCCESS',message
+    assert records['calls']==[platform] and instance.reconcile(info)
+    assert saved[-1]['confirmation'] and info['submitted'] is True
+
+
+@pytest.mark.parametrize('platform',['xiaohongshu','kuaishou'])
+def test_only_current_account_submitted_success_notice_is_reconcilable(tmp_path,platform):
+    instance=uploader(tmp_path,platform)
+    info={'platform':platform,'account_id':instance.account.account_id,'submitted':True,
+        'confirmation':{'kind':'success_notice','text':'发布成功'}}
+    assert instance.reconcile(info)
+    assert not instance.reconcile(dict(info,submitted=False))
+    assert not instance.reconcile(dict(info,account_id='other'))
+    assert not instance.reconcile(dict(info,confirmation={'kind':'success_notice','text':'上传成功'}))
 
 
 def test_platform_restrictions_have_distinct_logged_in_queue_labels():

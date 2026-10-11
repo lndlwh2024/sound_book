@@ -245,14 +245,16 @@ class CreatorStudioUploader(BrowserPublishWorkflow):
             raise PlatformRejected('CONFIG_REQUIRED','上传已完成，但实际发布按钮仍不可用；未提交，请查看按钮属性及诊断报告') from error
 
     def attach_responses(self,page):
+        submitted_requests=set()
+        def requested(request):
+            if self.submitted and request.method=='POST' and self.publish_endpoint(request.url):
+                submitted_requests.add(request)
+        page.on('request',requested)
         def received(response):
-            address=urlsplit(response.url)
-            domain={'xiaohongshu':'xiaohongshu.com','kuaishou':'kuaishou.com'}[self.account.platform]
-            own=address.hostname==domain or (address.hostname or '').endswith('.'+domain)
-            path=address.path.lower()
-            relevant=(self.account.platform=='xiaohongshu' and path=='/web_api/sns/v2/note') or (
-                bool(re.search(r'publish|submit|release',path)) and not re.search(r'upload|draft|precheck|check|limit|metric|log',path))
-            if not own or response.request.method!='POST' or not relevant or not self.submitted:
+            if response.request not in submitted_requests or not self.submitted:
+                return
+            submitted_requests.discard(response.request)
+            if not self.publish_endpoint(response.url):
                 return
             try:
                 body=response.json()
@@ -260,7 +262,7 @@ class CreatorStudioUploader(BrowserPublishWorkflow):
                     return
                 message=str(body.get('message') or body.get('msg') or body.get('error_msg') or body.get('status_msg') or '')
                 code=body.get('code',body.get('status_code',body.get('result')))
-                accepted=body.get('success') is not False and (body.get('success') is True or (
+                accepted=body.get('success') is not False and (body.get('success') is True if code is None else (
                     str(code)=='1' if 'result' in body and 'code' not in body and 'status_code' not in body else str(code)=='0'))
                 self.log(f'[发布接口] {safe_url(response.url)}；HTTP {response.status}；业务码 {code}；{message[:180]}')
                 state=rejection(message)
@@ -272,7 +274,7 @@ class CreatorStudioUploader(BrowserPublishWorkflow):
                     if state in ('ACCOUNT_RESTRICTED','VERIFICATION_REQUIRED','PLATFORM_BUSY'):
                         self.account_block={'status':state,'message':message}
                     return
-                if response.status<400 and accepted:
+                if 200<=response.status<300 and accepted:
                     identifiers=[]
                     def ids(data,depth=0):
                         if not isinstance(data,dict) or depth>3:
@@ -287,14 +289,28 @@ class CreatorStudioUploader(BrowserPublishWorkflow):
                     preferred=('note_id','noteId') if self.account.platform=='xiaohongshu' else ('photo_id','photoId','work_id')
                     post_ids={value for key,value in identifiers if key in preferred}
                     post_ids=post_ids or {value for _,value in identifiers}
-                    if len(post_ids)==1:
-                        self.confirmation={'kind':'publish_response','post_id':next(iter(post_ids)),'endpoint':safe_url(response.url)}
+                    if len(post_ids)<=1:
+                        # An accepted response to this exact publish request is
+                        # proof even when this API version omits the note ID.
+                        self.confirmation={'kind':'publish_response','endpoint':safe_url(response.url),
+                            'accepted':True,'business_code':code}
+                        if post_ids:
+                            self.confirmation['post_id']=next(iter(post_ids))
+                        self.before_submit(self.result_hint())
                 elif (code is not None or body.get('success') is False) and message:
                     self.business_rejected=True
                     self.platform_error=('FAILED',message)
             except Exception:
                 pass  # Unreadable responses never confirm publication.
         page.on('response',received)
+
+    def publish_endpoint(self,url):
+        address=urlsplit(url)
+        if address.scheme!='https' or address.hostname not in ('creator.xiaohongshu.com','edith.xiaohongshu.com'):
+            return False
+        path=address.path.lower().rstrip('/')
+        return path=='/web_api/sns/v2/note' or bool(re.search(r'/(?:publish|submit|release)$',path)
+            and not re.search(r'upload|draft|precheck|check|limit|metric|log|status|list|detail|refresh',path))
 
     def verify_identity(self,page):
         wanted=self.account.platform_nickname.strip()
@@ -398,7 +414,9 @@ class CreatorStudioUploader(BrowserPublishWorkflow):
                 return self.confirmation
             notice=self.success_notice(page)
             if notice:
-                return {'kind':'success_notice','text':notice.inner_text()[:200]}
+                self.confirmation={'kind':'success_notice','text':notice.inner_text()[:200]}
+                self.before_submit(self.result_hint())
+                return self.confirmation
             return None  # Redirects, titles and previews are not publication proof.
         self.stage='等待平台确认本次发布（最长10分钟）'
         self.log(self.stage)
@@ -421,22 +439,27 @@ class CreatorStudioUploader(BrowserPublishWorkflow):
     def result_hint(self):
         return {'platform':self.account.platform,'account_id':self.account.account_id,
                 'nickname':self.account.platform_nickname,'file_name':self.file_name,'title':self.title,
-                'confirmation':self.confirmation,'account_block':self.account_block}
+                'confirmation':self.confirmation,'account_block':self.account_block,'submitted':self.submitted}
 
     def reconcile(self,info):
         """Read captured, account-bound API acknowledgement; titles alone prove nothing."""
         if (not isinstance(info,dict) or info.get('platform')!=self.account.platform
-                or info.get('account_id')!=self.account.account_id):
+                or info.get('account_id')!=self.account.account_id or info.get('submitted') is False):
             return False
         confirmation=info.get('confirmation')
-        if not isinstance(confirmation,dict) or confirmation.get('kind')!='publish_response':
+        if not isinstance(confirmation,dict):
+            return False
+        if confirmation.get('kind')=='success_notice':
+            return bool(info.get('submitted') is True and SUCCESS_NOTICE.fullmatch(str(confirmation.get('text',''))))
+        if confirmation.get('kind')!='publish_response':
             return False
         endpoint=urlsplit(confirmation.get('endpoint',''))
-        if endpoint.scheme!='https' or endpoint.hostname!=self.channel.host:
-            return False
         if self.account.platform=='kuaishou':
-            return confirmation.get('accepted') is True and confirmation.get('business_code')==1
-        return bool(confirmation.get('post_id'))
+            return (endpoint.scheme=='https' and endpoint.hostname==self.channel.host
+                and confirmation.get('accepted') is True and confirmation.get('business_code')==1)
+        return bool(confirmation.get('accepted') is not False and self.publish_endpoint(confirmation.get('endpoint','')) and (
+            confirmation.get('post_id') or confirmation.get('accepted') is True
+            and (confirmation.get('business_code') is None or str(confirmation.get('business_code')) in ('0','1'))))
 
     def upload_single_video(self,video):
         video=Path(video)
@@ -508,13 +531,22 @@ class CreatorStudioUploader(BrowserPublishWorkflow):
                         except Exception:
                             pass
         except UploadStopped:
+            if self.confirmation:
+                self.last_outcome='SUCCESS'
+                return True,'平台已确认发布成功；保留停止前的成功回执',self.result_hint()
             self.last_outcome='FAILED' if self._video_selected else 'CANCELLED'
             return False,'用户停止；未确认成功按失败处理' if self.submitted else '用户停止；未提交发布',self.result_hint()
         except PlatformRejected as error:
+            if self.confirmation:
+                self.last_outcome='SUCCESS'
+                return True,'平台已确认发布成功；保留有效发布回执',self.result_hint()
             certain=error.status in ('ACCOUNT_LIMIT','DURATION_LIMIT','PERMANENT_REJECT','CONFIG_REQUIRED') or self.business_rejected or bool(re.search(r'发布失败|提交失败',str(error)))
             self.last_outcome='FAILED' if self.submitted and not certain else error.status
             return False,str(error),self.result_hint()
         except Exception as error:
+            if self.confirmation:
+                self.last_outcome='SUCCESS'
+                return True,'平台已确认发布成功；关闭页面异常不改变发布结果',self.result_hint()
             self.last_outcome='FAILED'
             return False,str(error),self.result_hint()
 
@@ -674,6 +706,7 @@ class KuaishouUploader(CreatorStudioUploader):
                 if accepted:
                     self.confirmation={'kind':'publish_response','endpoint':safe_url(response.url),
                                        'business_code':1,'accepted':True}
+                    self.before_submit(self.result_hint())
                     self.log('[提交确认] 快手已确认接收本次作品；后续审核/转码由平台处理')
                     return
                 state=rejection(message)

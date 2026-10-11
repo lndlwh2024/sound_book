@@ -12,7 +12,7 @@ from .upload_quota import DailyUploadQuota
 from datetime import datetime
 
 
-def scan_token(root, targets, archive_targets):
+def scan_token(root, targets, archive_targets, history_targets=None):
     """Cheap metadata validation; only the background worker computes hashes."""
     listing=[]
     for target in targets:
@@ -35,7 +35,8 @@ def scan_token(root, targets, archive_targets):
     stamp=(ledger.stat().st_size,ledger.stat().st_mtime_ns) if ledger.exists() else None
     group=tuple(sorted((t.key,t.account.auto_archive) for t in archive_targets))
     historical=[]
-    accounts={t.key:t for t in [*archive_targets,*targets] if t.platform=='douyin'}
+    history_targets=history_targets if history_targets is not None else archive_targets
+    accounts={t.key:t for t in [*history_targets,*targets] if t.platform=='douyin'}
     for key,target in sorted(accounts.items()):
         reports=Path(target.account.target_dir)/'reports'
         files=[]
@@ -43,7 +44,7 @@ def scan_token(root, targets, archive_targets):
             stat=report.stat()
             files.append((str(report.resolve()),stat.st_size,stat.st_mtime_ns))
         historical.append((key,str(reports.resolve()),tuple(sorted(files))))
-    return tuple(listing),group,stamp,tuple(historical)
+    return tuple(listing),group,stamp,tuple(historical),tuple(sorted(t.key for t in history_targets))
 
 
 class ScanCleanupWorker(QThread):
@@ -51,9 +52,10 @@ class ScanCleanupWorker(QThread):
     status=Signal(str)
     result_changed=Signal(dict)
 
-    def __init__(self,targets,archive_targets,root,parent=None,cache=None,force=False):
+    def __init__(self,targets,archive_targets,root,parent=None,cache=None,force=False,history_targets=None):
         super().__init__(parent)
         self.targets,self.archive_targets=targets,archive_targets
+        self.history_targets=history_targets if history_targets is not None else archive_targets
         self.root=Path(root)
         self.cache=cache if cache is not None else {}
         self.force=force
@@ -104,11 +106,11 @@ class ScanCleanupWorker(QThread):
     def run(self):
         try:
             self.check_stop()
-            token=scan_token(self.root,self.targets,self.archive_targets)
+            token=scan_token(self.root,self.targets,self.archive_targets,self.history_targets)
             cache_key=tuple(sorted(t.key for t in self.targets))
             if not self.force and len(self.targets)>1:
                 cached=[self.cache.get((target.key,),{}) for target in self.targets]
-                if all(entry.get('token')==scan_token(self.root,[target],self.archive_targets)
+                if all(entry.get('token')==scan_token(self.root,[target],self.archive_targets,self.history_targets)
                         for entry,target in zip(cached,self.targets)):
                     self.items=list({item['file_path']:item for entry in cached for item in entry['items']}.values())
                     for item in self.items:
@@ -121,6 +123,13 @@ class ScanCleanupWorker(QThread):
                     self.result_changed.emit(item)
                 self.log.emit('[扫描清理] 账号、目录内容、归档目标及历史结果均未变化，沿用已完成的扫描清理')
                 return
+            hashes={}
+            cached=self.cache.get(cache_key,{})
+            old_token=cached.get('token',())
+            if (not self.force and len(old_token)==len(token)
+                    and all(old_token[i]==token[i] for i in (0,2,3,4))):
+                hashes={item['file_path']:item for item in cached.get('items',[]) if not item['archived_path']}
+                self.log.emit('[扫描清理] 沿用已完成的扫描清理摘要；按本次所选账号重新核对归档范围')
             ledger=MultiTargetLedger(self.root)
             self.import_reports(ledger)
             files={}
@@ -140,43 +149,58 @@ class ScanCleanupWorker(QThread):
                         cacheable=False
                         self.log.emit(f'[等待文件就绪] {path.name}；未清理、未上传')
                         continue
-                    sha,md5=hashlib.sha256(),hashlib.md5()
-                    with path.open('rb') as stream:
-                        for chunk in iter(lambda:stream.read(1024*1024),b''):
-                            self.check_stop()
-                            sha.update(chunk);md5.update(chunk)
+                    cached_item=hashes.get(str(path),{})
+                    if (cached_item.get('size_bytes'),cached_item.get('mtime_ns'))==signature and cached_item.get('md5'):
+                        digest,md5_digest=cached_item['sha256'],cached_item['md5']
+                    else:
+                        sha,md5=hashlib.sha256(),hashlib.md5()
+                        with path.open('rb') as stream:
+                            for chunk in iter(lambda:stream.read(1024*1024),b''):
+                                self.check_stop()
+                                sha.update(chunk);md5.update(chunk)
+                        digest,md5_digest=sha.hexdigest(),md5.hexdigest()
                     after=path.stat()
                     if (after.st_size,after.st_mtime_ns)!=signature:
                         cacheable=False
                         self.log.emit(f'[文件变化] {path.name}；下次扫描再处理')
                         continue
-                    digest=sha.hexdigest()
-                    # The upload subset must never shorten the fixed archive group.
                     group={t.key:t for t in self.archive_targets}
                     group.update({t.key:t for t in targets})
-                    # Archive-only accounts still contribute their historical results.
-                    for target in group.values():
+                    history={t.key:t for t in self.history_targets}
+                    history.update(group)
+                    history_errors={}
+                    # Keep other platform history visible without making it a
+                    # completion prerequisite for a selected-target deployment.
+                    for target in history.values():
                         self.check_stop()
                         before_state=ledger.result(digest,target.key).get('status')
-                        restored=self.legacy_success(ledger,path,digest,md5.hexdigest(),target,signature)
+                        try:
+                            restored=self.legacy_success(ledger,path,digest,md5_digest,target,signature)
+                        except (OSError,ValueError,TypeError) as error:
+                            if target.key in group:
+                                raise
+                            history_errors[target.key]={'status':'CONFIG_REQUIRED','message':str(error),'attempts':[]}
+                            self.log.emit(f'[历史显示未完成] {target.key}：{error}；不影响本任务所选账号上传及归档')
+                            continue
                         if restored.get('status')=='SUCCESS' and before_state!='SUCCESS':
                             self.log.emit(f'[历史成功迁移] {path.name} → {target.key}：同账号及文件摘要匹配，未重新上传')
                     plan=ledger.register_plan(digest,list(group.values()),fixed=True)
                     results={}
-                    for key in plan['required']:
+                    for key in history:
                         previous=ledger.result(digest,key)
                         if previous.get('status')=='UNCONFIRMED':
                             previous=ledger.set_result(digest,key,'FAILED',LEGACY_FAILED_MESSAGE,previous.get('info'))
                         results[key]=fresh_result(previous)
+                    results.update(history_errors)
                     item={'file_name':path.name,'file_path':str(path),'size_bytes':before.st_size,
-                        'mtime_ns':before.st_mtime_ns,'sha256':digest,'results':results,'archived_path':None,
+                        'mtime_ns':before.st_mtime_ns,'sha256':digest,'md5':md5_digest,'results':results,'archived_path':None,
                         'modified_at':datetime.fromtimestamp(before.st_mtime,CHINA_TIME).isoformat()}
-                    if plan['required'] and all(r['status'] in ('SUCCESS','IGNORED') for r in results.values()):
+                    if plan['required'] and all(results[key]['status'] in ('SUCCESS','IGNORED') for key in plan['required']):
                         self.check_stop()
                         try:
                             item['archived_path']=str(archive_completed_file(path,signature,self.log.emit))
                             archived+=1
-                            self.log.emit(f'[清理归档] {path.name}：固定归档目标全部完成，各账号原状态保留')
+                            self.log.emit(f'[清理归档] {path.name}：本次清理的{len(plan["required"])}个目标全部完成，各账号原状态保留')
                         except (OSError,ValueError) as error:
                             cacheable=False
                             item['archive_error']=str(error)
@@ -189,7 +213,7 @@ class ScanCleanupWorker(QThread):
                     cacheable=False
                     self.log.emit(f'[文件暂不能处理] {path}：{error}；保留文件')
             self.check_stop()
-            final_token=scan_token(self.root,self.targets,self.archive_targets)
+            final_token=scan_token(self.root,self.targets,self.archive_targets,self.history_targets)
             removed={item['file_path'] for item in self.items if item['archived_path']}
             expected=tuple((key,folder,extensions,tuple(entry for entry in entries if entry[0] not in removed))
                 for key,folder,extensions,entries in token[0])

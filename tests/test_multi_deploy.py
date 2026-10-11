@@ -184,7 +184,7 @@ def test_all_targets_pause_after_active_file_then_resume_or_stop(tmp_path,stop_i
         thread.join(5)
 
 
-def test_restart_subset_preserves_full_plan_and_skips_prior_success(tmp_path):
+def test_restart_subset_archives_selected_success_without_unselected_failure(tmp_path):
     directory, targets = setup(tmp_path)
     calls = []
     def factory(target, log):
@@ -201,13 +201,11 @@ def test_restart_subset_preserves_full_plan_and_skips_prior_success(tmp_path):
     second = worker(tmp_path,targets[:1],factory)
     second.run_batch(second.plan_batch())
     assert calls.count(targets[0].key)==1
-    assert (directory/'a.mp4').exists()  # Unselected failed YouTube target remains required.
+    assert not (directory/'a.mp4').exists()
     item=second.report['files'][0]
-    assert item['results'][targets[1].key]['status']=='PENDING'
-    def successful(target, log):
-        return MagicMock(upload_single_video=lambda path:(True,'success',None))
-    third=worker(tmp_path,targets[1:],successful)
-    third.run_batch(third.plan_batch())
+    assert item['results'][targets[0].key]['status']=='SUCCESS'
+    assert second.ledger.result(item['sha256'],targets[1].key)['status']=='FAILED2'
+    assert second.report['source_success_count']==1
     assert (directory/'published'/'a.mp4').exists()
 
 

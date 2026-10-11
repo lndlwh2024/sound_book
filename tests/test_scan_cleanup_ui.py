@@ -70,7 +70,8 @@ def test_start_auto_cleans_before_preflight_and_reuses_valid_manual_scan(panel,t
     assert '沿用已完成的扫描清理' in panel.douyin.logs.toPlainText()
     check.start.assert_called_once();factory.assert_not_called()
     panel.preflight_finished();factory.return_value.start.assert_called_once()
-    assert len(factory.call_args.kwargs['archive_targets'])==4
+    assert len(factory.call_args.kwargs['archive_targets'])==1
+    assert len(factory.call_args.kwargs['history_targets'])==4
 
 
 def test_direct_start_performs_cleanup_and_changed_directory_invalidates_cache(panel,tmp_path,monkeypatch):

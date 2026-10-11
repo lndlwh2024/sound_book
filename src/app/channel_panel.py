@@ -443,7 +443,7 @@ class MultiPlatformPublisherPanel(QWidget):
         dialog.resize(720, 380)
         dialog.setStyleSheet('QDialog{background:#1A202C} QLabel{color:#F1F5F9} QListWidget{background:#111827;color:#F1F5F9} QPushButton{background:#2B6CB0;color:white;padding:8px}')
         layout = QVBoxLayout(dialog)
-        layout.addWidget(QLabel('左侧选择本次上传账号；右侧固定归档目标。仅右侧全部账号完成才归档，上传账号自动纳入归档目标。'))
+        layout.addWidget(QLabel('选择本次上传账号；同一文件依次上传所选平台，所选账号全部完成后归档。'))
         listing = QListWidget()
         selected_accounts = {p.platform:p.current() for p in self.panels}
         for index, target in enumerate(choices):
@@ -454,22 +454,7 @@ class MultiPlatformPublisherPanel(QWidget):
             current = selected_accounts.get(target.platform)
             item.setCheckState(Qt.Checked if current and current.account_id == target.account.account_id else Qt.Unchecked)
             listing.addItem(item)
-        archive_listing=QListWidget()
-        all_targets=self.all_targets()
-        try:
-            archive_keys={t.key for t in self.archive_group()}
-        except ValueError:
-            archive_keys=set(self.store.archive_targets)
-        for index,target in enumerate(all_targets):
-            item=QListWidgetItem(f'{CHANNELS[target.platform].name} · {target.account.account_name}')
-            item.setData(Qt.UserRole,index)
-            item.setFlags(item.flags()|Qt.ItemIsUserCheckable)
-            item.setCheckState(Qt.Checked if target.key in archive_keys else Qt.Unchecked)
-            archive_listing.addItem(item)
-        lists=QHBoxLayout()
-        lists.addWidget(listing)
-        lists.addWidget(archive_listing)
-        layout.addLayout(lists)
+        layout.addWidget(listing)
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.button(QDialogButtonBox.Ok).setText('启动部署')
         chosen = []
@@ -489,11 +474,6 @@ class MultiPlatformPublisherPanel(QWidget):
                         and (not re.fullmatch(r'UC[\w-]{22}', target.account.channel_id) or target.account.made_for_kids is None)):
                     QMessageBox.warning(dialog, 'YouTube配置', '请先保存频道ID并设置是否面向儿童')
                     return
-            group={all_targets[archive_listing.item(i).data(Qt.UserRole)].key
-                for i in range(archive_listing.count()) if archive_listing.item(i).checkState()==Qt.Checked}
-            group.update(t.key for t in chosen)
-            self.store.archive_targets=sorted(group)
-            self.store.save()
             dialog.accept()
         buttons.accepted.connect(accept)
         buttons.rejected.connect(dialog.reject)
@@ -534,14 +514,9 @@ class MultiPlatformPublisherPanel(QWidget):
             for key in CHANNELS for account in self.repository.accounts(key) if account.enabled and account.target_dir]
 
     def archive_group(self):
-        available={t.key:t for t in self.all_targets()}
-        if self.store.archive_targets:
-            missing=set(self.store.archive_targets)-available.keys()
-            if missing:
-                raise ValueError('固定归档目标的账号已删除或停用，请在启动部署时重新选择归档目标：'+', '.join(sorted(missing)))
-            return [available[key] for key in self.store.archive_targets]
-        return [available[p.platform+':'+p.current().account_id] for p in self.panels
-            if p.current() and p.platform+':'+p.current().account_id in available]
+        # Standalone history cleanup checks all configured targets. A deployment
+        # uses its selected accounts instead; obsolete saved groups are ignored.
+        return self.all_targets()
 
     def scan_cleanup(self,panel):
         if self.busy():
@@ -560,13 +535,10 @@ class MultiPlatformPublisherPanel(QWidget):
 
     def begin_cleanup(self,targets,force):
         try:
-            group={t.key:t for t in self.archive_group()}
+            group={t.key:t for t in (targets if self._pending_deployment else self.archive_group())}
             group.update({t.key:t for t in targets})
-            if not self.store.archive_targets:
-                self.store.archive_targets=sorted(group)
-                self.store.save()
-            self._cleanup_archive_targets=list(group.values())
-            self.cleanup_worker=ScanCleanupWorker(targets,list(group.values()),self.store.root,parent=self,cache=self.cleanup_cache,force=force)
+            self.cleanup_worker=ScanCleanupWorker(targets,list(group.values()),self.store.root,parent=self,
+                cache=self.cleanup_cache,force=force,history_targets=self.all_targets())
             self.cleanup_worker.log.connect(self.log_message)
             self.cleanup_worker.status.connect(self.show_status)
             self.cleanup_worker.result_changed.connect(self.receive_result)
@@ -648,9 +620,8 @@ class MultiPlatformPublisherPanel(QWidget):
         self.launch_deployment(getattr(self,'_all_deployment_targets',targets),file_paths)
 
     def launch_deployment(self,targets,file_paths):
-        group=getattr(self,'_cleanup_archive_targets',None)
         self.worker = MultiDeployWorker(targets, root=self.store.root, parent=self, file_paths=file_paths,
-            archive_targets=group if group is not None else self.archive_group(), deferred_preflight=self._deferred_preflight)
+            archive_targets=targets, history_targets=self.all_targets(), deferred_preflight=self._deferred_preflight)
         self.worker.log.connect(self.log_message)
         self.worker.status.connect(self.show_status)
         self.worker.result_changed.connect(self.receive_result)
