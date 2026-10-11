@@ -746,3 +746,34 @@ YouTube和DOM读取50项、界面与采集35项通过，随后新增高级入口
 ### 修改历史
 
 代码提交：19ee279bbeda5702710e9d24ea4e0fc38ba8db65（feat(publisher): add directory cleanup and durable per-account upload quotas）。新增scan_cleanup.py、upload_quota.py；调整multi_deploy.py、status.py、账号模型/存储/仓库、共用界面及四平台上传计数边界，更新相应测试、docs/MULTI_PLATFORM_PHASE2.md与界面预览。本记录后续提交同时整理browser_workflow.py文件末尾空白。
+
+## 专项四十七：只上传其他平台时漏读抖音历史成功（2026-10-12）
+
+### 问题现象
+
+用户选择小红书、快手部署后，队列中多数抖音结果显示待上传，但这些视频此前已上传抖音。只读核对当时的目录发现73个视频均能按原抖音账号及完整文件MD5匹配旧SUCCESS账本；新SHA-256账本只有其中7个成功，另外66个结果缺失。截图中的第21问、第23问属于此类。
+
+### 排查过程
+
+分别读取账号配置、完整固定归档目标、旧publish_ledger日账本、新target_ledger和最新任务报告。对当前视频同时计算SHA-256和MD5，确认账号未换、内容未换、旧成功记录仍在。用临时独立账本运行修复后的清理流程读取真实媒体及原历史，73个均恢复抖音SUCCESS；另三个目标在隔离账本未完成，未归档任何原文件，也未执行上传或修改运行中任务账本。
+
+### 根因结论
+
+ScanCleanupWorker仅对本轮扫描的上传账号调用legacy_success，但构造队列时又为完整归档组生成结果。本轮只有小红书/快手，未执行抖音旧账本导入，缺失值被生成PENDING。MultiDeployWorker原来同样仅在真正尝试抖音上传时迁移旧MD5记录，未覆盖仅参与归档的抖音账号。因此其他平台的真实成功与抖音的假待上传同时出现，完整目标组的归档判断也受影响。原扫描缓存未包含旧账本签名，后续新增旧成功记录时亦可能沿用旧待上传结果。
+
+### 固化参数
+
+- 扫描的媒体范围保持为当前账号绑定目录；历史核对覆盖上传账号与固定归档账号的完整并集，旧抖音账本仍从对应抖音账号的目录读取。
+- 同平台同账号、旧记录SUCCESS、文件MD5完全匹配才迁移到本次计算的SHA-256；改名或放入其他平台目录不妨碍内容匹配。账号、MD5或旧状态不符保持待上传，人工明确更正失败不被旧记录覆盖。
+- 部署规划及后续缓存作业同步检查仅参与归档的抖音历史，不调用该账号上传器、不增加上传尝试或每日计数。归档目标旧账本损坏时标记核对阻断并保留文件，其他上传账号继续。
+- 旧未确认迁移已经转为失败时，恢复仍需原SUCCESS账本证据，不能仅凭结果info中的成功字样。已有可信SUCCESS/IGNORED等记录保持。
+- 扫描缓存加入完整目标组旧日账本的路径、大小和修改时间；历史在扫描期间变化时不缓存。归档依然要求完整固定组全部SUCCESS或IGNORED。
+- 当前小红书和快手任务继续使用已加载代码；不热改其内存或账本、不重启进程。用户完成当前上传后重启源码并执行一次扫描目录清理文件，导入缺失历史。
+
+### 最小回归测试
+
+envs/main/Scripts/python.exe -X utf8 -m pytest tests/test_scan_cleanup_quota.py tests/test_scan_cleanup_ui.py tests/test_multi_deploy.py -q：92项通过。新增覆盖只扫描小红书、快手或两者，旧账本位于另一目录、媒体复制改名、错误账号/MD5/失败旧记录、已转失败迁移的原账本证明、明确人工失败保持、旧账本变动使缓存失效、完整组归档、规划及缓存作业补读、损坏归档目标不拦截其他上传、两平台队列显示已成功及零抖音额度。编译及git diff --check通过；真实媒体隔离核验73/73成功，无投稿、无原媒体移动、无真实结果修复写入。
+
+### 修改历史
+
+代码提交：fb70e00ff0ce6d3426ada9403ef7a64dfec799c3（fix(publisher): restore history for archive-only Douyin accounts）。涉及src/publisher/scan_cleanup.py、src/publisher/multi_deploy.py、tests/test_scan_cleanup_quota.py、tests/test_scan_cleanup_ui.py及docs/MULTI_PLATFORM_PHASE2.md。
