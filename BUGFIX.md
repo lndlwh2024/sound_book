@@ -813,3 +813,34 @@ envs/main/Scripts/python.exe -X utf8 -m pytest tests/test_task_scope_order.py te
 ### 修改历史
 
 代码提交：0276a3d739081ed02ddf395842bb2aba4483c9e6（fix(publisher): archive selected targets and schedule uploads per file）。涉及src/app/channel_panel.py、src/publisher/multi_deploy.py、src/publisher/scan_cleanup.py、src/publisher/creator_studio.py及相关回归，新增tests/test_task_scope_order.py，更新docs/MULTI_PLATFORM_PHASE2.md。
+
+## 专项四十九：手动扫描清理未遵循勾选平台（2026-10-12）
+
+### 问题现象
+
+用户查看抖音目录，只勾选小红书和快手，点击“扫描目录清理文件”后扫描73个文件、归档0个。队列中两者已成功，未选YouTube仍待上传。
+
+### 排查过程
+
+沿实际按钮检查scan_cleanup、begin_cleanup和ScanCleanupWorker。启动部署前已有所选账号范围，手动按钮却调用archive_group并返回全部已配置启用账号。界面入口与后台还分别把扫描来源账号加入归档条件，所以仅修正平台复选框仍可能让未勾选的当前查看账号阻挡归档。在真实按钮回归中构造未选抖音和YouTube失败、所选小红书和快手成功，并验证媒体、字幕、原平台状态和额度。
+
+### 根因结论
+
+上一轮漏改独立手动清理入口，错误保留全账号完成要求；扫描目录的来源账号与决定归档的账号未完全分开。未选YouTube及其他账号继续成为完成条件，导致归档0个。本轮统一手动与自动清理的所选账号规则。
+
+### 固化参数
+
+- 手动清理扫描当前查看账号的目录，归档只要求下方勾选平台各自当前账号SUCCESS或IGNORED；未勾选的查看账号只提供扫描来源与历史显示，不追加到归档条件。其他账号、旧固定归档名单和未选平台不阻挡。
+- 保存当前查看及所选账号的可见配置后快照范围；切换账号或平台选择影响下一次清理。无勾选、无当前账号或所选账号未启用时提示并保留媒体，不回退全平台清理。
+- 日志新增“清理范围”，明确扫描目录和归档账号；按钮提示说明当前目录和勾选账号的关系。后台仍读取其他平台历史显示，归档保留各账号原状态，不产生上传或消耗额度。
+- 启动部署前清理继续按账号选择窗口中的明确目标执行；扫描来源账号不再隐式扩展归档范围。成功判定、字幕移动、防覆盖、文件变化保护及已有去重规则保持。
+
+### 最小回归测试
+
+envs/main/Scripts/python.exe -X utf8 -m pytest tests/test_scan_cleanup_ui.py tests/test_task_scope_order.py tests/test_scan_cleanup_quota.py tests/test_multi_deploy.py tests/test_common_platform_accounts.py -q：166项通过。新增实际按钮场景覆盖未选抖音视图中只勾选小红书和快手成功归档、字幕和状态保留、零上传额度、所选失败保留及取消勾选后重新判断、同平台当前账号切换、无平台和禁用账号不回退。编译及git diff --check通过。
+
+只读真实媒体及历史，在临时独立账本中替换实际移动函数进行模拟：73个视频中55个满足所选小红书与快手完成条件，18个仍须保留；原视频移动0个，原文件签名未改变，未写真实账本或执行投稿。应用重启加载修复后，用户再点击清理即可按勾选范围实际归档。
+
+### 修改历史
+
+代码提交：d0d71fd2619fa26b4b073f6fb090a49271e6a10b（fix(publisher): honor checked accounts during manual cleanup）。涉及src/app/channel_panel.py、src/app/platform_account_panel.py、src/publisher/scan_cleanup.py、tests/test_scan_cleanup_ui.py、tests/test_common_platform_accounts.py和docs/MULTI_PLATFORM_PHASE2.md。
