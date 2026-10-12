@@ -514,9 +514,18 @@ class MultiPlatformPublisherPanel(QWidget):
             for key in CHANNELS for account in self.repository.accounts(key) if account.enabled and account.target_dir]
 
     def archive_group(self):
-        # Standalone history cleanup checks all configured targets. A deployment
-        # uses its selected accounts instead; obsolete saved groups are ignored.
-        return self.all_targets()
+        selected=self.selected_channels()
+        if not selected:
+            raise ValueError('请至少勾选一个平台作为本次清理的归档目标')
+        targets=[]
+        for panel in self.panels:
+            if panel.platform not in selected:
+                continue
+            account=panel.current()
+            if not account or not account.enabled:
+                raise ValueError(f'{CHANNELS[panel.platform].name}：请选择并启用本次清理的账号')
+            targets.append(PublishTarget(panel.platform,self.repository.publish_account(account),self.repository.profile(account)))
+        return targets
 
     def scan_cleanup(self,panel):
         if self.busy():
@@ -526,9 +535,16 @@ class MultiPlatformPublisherPanel(QWidget):
                 or not any(check.isChecked() for check in panel.media_checks.values())):
             panel.scan_queue(feedback=True)
             return
-        if not panel.current() or not panel.save_current():
+        if not panel.current():
             self.log_message('[扫描清理] 请先选择并保存当前账号')
             return
+        # Viewing a directory and selecting completion accounts are independent.
+        # Save the selected forms before taking their account snapshots.
+        for current in self.panels:
+            if current is panel or current.platform in self.selected_channels():
+                if not current.save_current():
+                    self.log_message('[扫描清理] '+CHANNELS[current.platform].name+'：请先选择并保存当前账号')
+                    return
         account=panel.current()
         target=PublishTarget(panel.platform,self.repository.publish_account(account),self.repository.profile(account))
         self.begin_cleanup([target],force=True)
@@ -536,7 +552,8 @@ class MultiPlatformPublisherPanel(QWidget):
     def begin_cleanup(self,targets,force):
         try:
             group={t.key:t for t in (targets if self._pending_deployment else self.archive_group())}
-            group.update({t.key:t for t in targets})
+            self.log_message('[清理范围] 扫描目录：'+'；'.join(dict.fromkeys(t.account.target_dir for t in targets))+
+                '；归档账号：'+'、'.join(CHANNELS[t.platform].name+'/'+t.account.account_name for t in group.values()))
             self.cleanup_worker=ScanCleanupWorker(targets,list(group.values()),self.store.root,parent=self,
                 cache=self.cleanup_cache,force=force,history_targets=self.all_targets())
             self.cleanup_worker.log.connect(self.log_message)

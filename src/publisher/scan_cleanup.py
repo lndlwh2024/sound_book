@@ -165,9 +165,9 @@ class ScanCleanupWorker(QThread):
                         self.log.emit(f'[文件变化] {path.name}；下次扫描再处理')
                         continue
                     group={t.key:t for t in self.archive_targets}
-                    group.update({t.key:t for t in targets})
                     history={t.key:t for t in self.history_targets}
                     history.update(group)
+                    history.update({t.key:t for t in targets})
                     history_errors={}
                     # Keep other platform history visible without making it a
                     # completion prerequisite for a selected-target deployment.

@@ -1,5 +1,6 @@
 """UI acceptance: cleanup is automatic, cancellable and does not block the UI."""
 import os
+import hashlib
 import threading
 import time
 from unittest.mock import MagicMock
@@ -10,7 +11,7 @@ from PySide6.QtCore import QTimer
 from src.app import channel_panel as ui
 from src.publisher.platforms import ChannelAccountStore
 from src.publisher.douyin.config import DouyinAccountManager
-from src.publisher.multi_deploy import PublishTarget
+from src.publisher.multi_deploy import PublishTarget,MultiTargetLedger
 from src.publisher.preflight import PreflightResult
 from src.publisher.upload_quota import DailyUploadQuota
 
@@ -60,6 +61,85 @@ def local_preflight(panel,monkeypatch):
     return check,factory
 
 
+def select_channels(panel,*platforms):
+    for key,check in panel.channel_checks.items():
+        check.setChecked(key in platforms)
+
+
+def test_manual_cleanup_from_unselected_view_archives_only_checked_accounts(panel,tmp_path):
+    path=tmp_path/'clip.mp4';path.write_bytes(b'video'*500)
+    os.utime(path,(time.time()-10,time.time()-10))
+    path.with_suffix('.srt').write_text('subtitle')
+    digest=hashlib.sha256(path.read_bytes()).hexdigest()
+    ledger=MultiTargetLedger(panel.store.root)
+    for target in panel.all_targets():
+        ledger.set_result(digest,target.key,'SUCCESS' if target.platform in ('xiaohongshu','kuaishou') else 'FAILED','history')
+    select_channels(panel,'xiaohongshu','kuaishou')
+    panel.store.archive_targets=[target.key for target in panel.all_targets()]
+    panel.douyin.scan_button.click();drain(panel)
+    assert not path.exists() and (tmp_path/'published'/'clip.mp4').exists()
+    assert (tmp_path/'published'/'clip.srt').exists()
+    result=MultiTargetLedger(panel.store.root)
+    required=result.data['plans'][digest]['required']
+    assert required==[target.key for target in panel.all_targets() if target.platform in ('xiaohongshu','kuaishou')]
+    assert result.result(digest,'douyin:'+panel.douyin.current().account_id)['status']=='FAILED'
+    assert result.result(digest,'youtube:'+panel.new_panels[2].current().account_id)['status']=='FAILED'
+    assert '[清理范围]' in panel.douyin.logs.toPlainText()
+    assert '归档1个' in panel.douyin.logs.toPlainText()
+    assert panel.worker is None
+    assert all(DailyUploadQuota(panel.store.root).snapshot(t.key)['used']==0 for t in panel.all_targets())
+
+
+def test_manual_cleanup_waits_for_failed_selected_account_and_rechecks_changed_scope(panel,tmp_path):
+    path=tmp_path/'clip.mp4';path.write_bytes(b'video'*500)
+    os.utime(path,(time.time()-10,time.time()-10))
+    digest=hashlib.sha256(path.read_bytes()).hexdigest();ledger=MultiTargetLedger(panel.store.root)
+    for target in panel.all_targets():
+        ledger.set_result(digest,target.key,'FAILED2' if target.platform=='xiaohongshu' else 'SUCCESS','history')
+    select_channels(panel,'xiaohongshu','kuaishou')
+    panel.douyin.scan_button.click();drain(panel)
+    assert path.exists() and '归档0个' in panel.douyin.logs.toPlainText()
+    select_channels(panel,'kuaishou')
+    panel.douyin.scan_button.click();drain(panel)
+    assert not path.exists() and '归档1个' in panel.douyin.logs.toPlainText()
+
+
+def test_manual_cleanup_does_not_fall_back_to_all_accounts_when_none_selected(panel,tmp_path):
+    path=tmp_path/'clip.mp4';path.write_bytes(b'video'*500)
+    os.utime(path,(time.time()-10,time.time()-10))
+    select_channels(panel)
+    panel.douyin.scan_button.click();drain(panel)
+    assert path.exists() and not (tmp_path/'published').exists()
+    assert panel.worker is None and not (panel.store.root/'target_ledger.json').exists()
+    assert '请至少勾选一个平台' in panel.douyin.logs.toPlainText()
+
+
+def test_manual_cleanup_uses_current_selected_account_not_every_account(panel,tmp_path):
+    path=tmp_path/'clip.mp4';path.write_bytes(b'video'*500)
+    os.utime(path,(time.time()-10,time.time()-10))
+    page=panel.new_panels[0];first=page.current()
+    other=panel.repository.add('xiaohongshu','Other')
+    other.target_dir=str(tmp_path);panel.repository.save(other)
+    page.reload();page.accounts.setCurrentRow(1)
+    select_channels(panel,'xiaohongshu')
+    digest=hashlib.sha256(path.read_bytes()).hexdigest()
+    MultiTargetLedger(panel.store.root).set_result(digest,'xiaohongshu:'+other.account_id,'SUCCESS','history')
+    panel.douyin.scan_button.click();drain(panel)
+    assert not path.exists()
+    assert MultiTargetLedger(panel.store.root).data['plans'][digest]['required']==['xiaohongshu:'+other.account_id]
+    assert not MultiTargetLedger(panel.store.root).result(digest,'xiaohongshu:'+first.account_id)
+
+
+def test_manual_cleanup_rejects_disabled_selected_account_without_fallback(panel,tmp_path):
+    path=tmp_path/'clip.mp4';path.write_bytes(b'video'*500)
+    os.utime(path,(time.time()-10,time.time()-10))
+    select_channels(panel,'xiaohongshu')
+    panel.new_panels[0].enabled.setChecked(False)
+    panel.douyin.scan_button.click();drain(panel)
+    assert path.exists() and not (tmp_path/'published').exists()
+    assert '请选择并启用本次清理的账号' in panel.douyin.logs.toPlainText()
+
+
 def test_start_auto_cleans_before_preflight_and_reuses_valid_manual_scan(panel,tmp_path,monkeypatch):
     path=tmp_path/'clip.mp4';path.write_bytes(b'video'*500)
     os.utime(path,(time.time()-10,time.time()-10))
@@ -98,6 +178,7 @@ def test_other_platform_cleanup_displays_old_douyin_success_without_upload(panel
         'file_hash':hashlib.md5(path.read_bytes()).hexdigest()}])
     report=directory/'publish_ledger_20261006.json';report.write_text(original)
     page=next(p for p in panel.panels if p.platform==platform)
+    select_channels(panel,platform)
     page.scan_button.click();drain(panel)
     page.scan_queue();panel.render_results()
     assert page.table_queue.item(0,5).text()=='已成功'

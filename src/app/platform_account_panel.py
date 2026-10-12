@@ -279,6 +279,7 @@ class PlatformAccountPanel(QWidget):
         queue_buttons = QHBoxLayout()
         scan, upload = [QPushButton(label) for label in ['扫描目录清理文件','手动上传所选媒体']]
         self.scan_button = scan
+        scan.setToolTip('扫描当前查看账号的目录；仅按下方勾选平台的当前账号判断归档')
         scan.clicked.connect(lambda:self.controller.scan_cleanup(self))
         upload.clicked.connect(self.upload_selected)
         upload.setStyleSheet('background:#D69E2E;color:white;font-weight:bold;')

@@ -417,6 +417,7 @@ def test_manual_cleanup_archives_completed_ignored_plan_even_when_auto_archive_d
     os.utime(path,(time.time()-10,time.time()-10))
     digest=hashlib.sha256(path.read_bytes()).hexdigest()
     ledger=MultiTargetLedger(panel.store.root)
+    for check in panel.channel_checks.values():check.setChecked(True)
     group=panel.archive_group()
     for target in group:
         target.account.auto_archive=archive
