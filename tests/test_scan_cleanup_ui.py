@@ -134,7 +134,7 @@ def test_manual_cleanup_uses_current_selected_account_not_every_account(panel,tm
     page=panel.new_panels[0];first=page.current()
     other=panel.repository.add('xiaohongshu','Other')
     other.target_dir=str(tmp_path);panel.repository.save(other)
-    page.reload();page.accounts.setCurrentRow(1)
+    page.reload();page.accounts.setCurrentIndex(1)
     select_channels(panel,'xiaohongshu')
     digest=hashlib.sha256(path.read_bytes()).hexdigest()
     MultiTargetLedger(panel.store.root).set_result(digest,'xiaohongshu:'+other.account_id,'SUCCESS','history')

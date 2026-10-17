@@ -4,18 +4,15 @@ import re
 import time
 import sqlite3
 from pathlib import Path
-from PySide6.QtCore import Qt, QTimer, QSize
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QCheckBox, QComboBox,
-    QListWidget, QListWidgetItem, QLineEdit, QPushButton, QFileDialog, QMessageBox,
+    QLineEdit, QPushButton, QFileDialog, QMessageBox,
     QPlainTextEdit, QGroupBox, QSplitter, QTableWidget, QTableWidgetItem,
     QGridLayout, QSpinBox, QTabWidget, QButtonGroup)
 from ..publisher.platforms import CHANNELS
 from ..publisher.media import MEDIA_TYPES, media_type
 from ..publisher.dom_readiness import account_dom_state
 
-LIST_STYLE = '''QListWidget {background:#1A202C;border:1px solid #2D3748;border-radius:6px;color:#E2E8F0;padding:4px;}
-QListWidget::item {padding:2px;border-bottom:1px solid #2D3748;}
-QListWidget::item:selected {background:#2B6CB0;color:white;border-radius:4px;}'''
 TABLE_STYLE = '''QTableWidget {background:#1A202C;border:1px solid #2D3748;color:#CBD5E0;}
 QHeaderView::section {background:#2D3748;color:#E2E8F0;padding:4px;font-weight:bold;}'''
 LOG_STYLE = '''QPlainTextEdit {background:#0F172A;color:#38BDF8;font-family:Consolas,'Microsoft YaHei';
@@ -38,8 +35,6 @@ class PlatformAccountPanel(QWidget):
         self.repository = parent.repository
         self.dialog = None
         self._accounts = []
-        self.enable_buttons = {}
-        self.cloud_badges = {}
         self.main = QVBoxLayout(self)
         self.main.setContentsMargins(8,8,8,8)
         split = QSplitter(Qt.Horizontal)
@@ -62,20 +57,48 @@ class PlatformAccountPanel(QWidget):
         account_layout = QVBoxLayout(accounts)
         account_layout.setContentsMargins(6,4,6,6)
         account_layout.setSpacing(4)
-        listing = QGroupBox('账号列表')
+        listing = QGroupBox('账号选择-0个账号')
+        self.account_selector_group = listing
         listing_layout = QVBoxLayout(listing)
         listing_layout.setContentsMargins(6,4,6,6)
         listing_layout.setSpacing(4)
-        self.accounts = QListWidget()
-        self.accounts.setMinimumHeight(95)
-        self.accounts.setStyleSheet(LIST_STYLE)
-        self.accounts.currentItemChanged.connect(self.load_current)
-        listing_layout.addWidget(self.accounts)
+        self.accounts = QComboBox()
+        self.accounts.setObjectName('publisherAccountSelector')
+        self.accounts.setAccessibleName('选择平台账号')
+        self.accounts.setPlaceholderText('暂无账号，请先添加')
+        self.accounts.setMinimumWidth(0)
+        self.accounts.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.accounts.setMinimumContentsLength(10)
+        self.accounts.setMaxVisibleItems(12)
+        self.accounts.setMinimumHeight(38)
+        self.accounts.setStyleSheet('QComboBox#publisherAccountSelector {min-height:24px;max-height:24px;padding:6px 8px;font-size:13px;}')
+        self.accounts.currentIndexChanged.connect(self.load_current)
+        selector_row = QHBoxLayout()
+        selector_row.setSpacing(8)
+        selector_row.addWidget(self.accounts,1)
+        self.account_switch = QButtonGroup(self)
+        self.account_switch.setExclusive(True)
+        self.enable_button,self.disable_button = QPushButton('启用'),QPushButton('关闭')
+        for button,value in ((self.enable_button,True),(self.disable_button,False)):
+            button.setCheckable(True)
+            button.setFixedWidth(52)
+            button.setMinimumHeight(36)
+            button.setStyleSheet('QPushButton {min-height:24px;padding:5px;background:#303B49;color:#C2CFDF;border:1px solid #506174;} '
+                'QPushButton:checked {background:#247F91;color:white;} QPushButton:disabled {color:#788493;background:#303743;}')
+            button.clicked.connect(lambda checked,value=value:self.set_account_enabled(self.current().account_id,value) if self.current() else None)
+            self.account_switch.addButton(button)
+            selector_row.addWidget(button)
+        listing_layout.addLayout(selector_row)
+        self.account_status = QLabel('请先添加账号')
+        self.account_status.setStyleSheet('color:#A6BDD3;font-size:12px;')
+        self.account_status.setWordWrap(True)
+        listing_layout.addWidget(self.account_status)
         buttons = QHBoxLayout()
         for label, callback in [('添加账号',self.add_account),('删除账号',self.delete_account)]:
             button = QPushButton(label)
             button.clicked.connect(callback)
             button.setEnabled(not self.repository.error(platform))
+            if label=='删除账号': self.delete_account_button=button
             buttons.addWidget(button)
         listing_layout.addLayout(buttons)
         account_layout.addWidget(listing)
@@ -122,6 +145,10 @@ class PlatformAccountPanel(QWidget):
         resource_layout.setContentsMargins(6,6,6,6)
         resource_layout.setAlignment(Qt.AlignTop)
         self.drive = DriveBindingWidget(directory_only=True)
+        self.drive.setStyleSheet(self.drive.styleSheet()+' QLineEdit,QSpinBox {min-height:22px;max-height:26px;padding:5px 6px;font-size:13px;} '
+            'QPushButton {min-height:22px;padding:5px 8px;font-size:13px;}')
+        for control in (self.drive.folder,self.drive.choose,self.drive.check,self.drive.interval):
+            control.setMinimumHeight(34)
         resource_layout.addWidget(self.drive)
         self.drive.connect_requested.connect(lambda:parent.connect_drive(self))
         self.drive.disconnect_requested.connect(parent.disconnect_drive)
@@ -130,10 +157,14 @@ class PlatformAccountPanel(QWidget):
         local = QGroupBox('本地目录绑定')
         local_layout = QHBoxLayout(local)
         self.directory = QLineEdit()
+        self.directory.setMinimumHeight(34)
+        self.directory.setStyleSheet('QLineEdit {min-height:22px;max-height:26px;padding:5px 6px;font-size:13px;}')
         local_layout.addWidget(QLabel('本地目录:'))
         local_layout.addWidget(self.directory,1)
         browse = QPushButton('浏览…')
         self.browse_button = browse
+        browse.setMinimumHeight(34)
+        browse.setStyleSheet('QPushButton {min-height:22px;padding:5px 8px;font-size:13px;}')
         browse.clicked.connect(self.browse)
         local_layout.addWidget(browse)
         resource_layout.addWidget(local)
@@ -144,7 +175,7 @@ class PlatformAccountPanel(QWidget):
         config.setObjectName('publisherDeploymentPage')
         config.setTitle('')
         config.setStyleSheet('QGroupBox#publisherDeploymentPage {margin-top:0;border:0;} '
-            'QLineEdit,QComboBox,QSpinBox {min-height:0;max-height:28px;padding:3px 5px;}')
+            'QLineEdit,QComboBox,QSpinBox {min-height:22px;max-height:28px;padding:4px 6px;}')
         config_layout = QVBoxLayout(config)
         config_layout.setContentsMargins(6,6,6,6)
         config_layout.setSpacing(4)
@@ -343,9 +374,9 @@ class PlatformAccountPanel(QWidget):
         compact = self.width() < 1450
         if getattr(self,'_compact_settings',None) != compact:
             self._compact_settings = compact
-            self.left_settings.setStyleSheet(('QLabel,QCheckBox,QGroupBox {font-size:12px;} '
-                'QLineEdit,QComboBox,QSpinBox {font-size:12px;min-height:0;max-height:24px;padding:2px 4px;} '
-                'QPushButton {min-height:0;font-size:12px;padding:3px 5px;} '
+            self.left_settings.setStyleSheet(('QLabel,QCheckBox,QGroupBox {font-size:13px;} '
+                'QLineEdit,QComboBox,QSpinBox {font-size:13px;min-height:0;max-height:30px;padding:4px 6px;} '
+                'QPushButton {min-height:0;font-size:13px;padding:5px 7px;} '
                 'QGroupBox {margin-top:8px;}') if compact else '')
             self.settings_tabs.tabBar().setStyleSheet('')
             for layout in self._configuration_layouts:
@@ -353,7 +384,7 @@ class PlatformAccountPanel(QWidget):
                 layout.setSpacing(2 if compact else 4)
             for button in (self.save_button,self.login_button,self.capture_button,
                            self.deploy_button,self.pause_button):
-                button.setFixedHeight(28 if compact else 32)
+                button.setFixedHeight(34 if compact else 36)
             if self.platform == 'youtube':
                 specs = list(self._field_specs)
                 if compact:
@@ -369,11 +400,6 @@ class PlatformAccountPanel(QWidget):
                     self.platform_fields.addWidget(title,row,col*2)
                     self.platform_fields.addWidget(control,row,col*2+1,1,3 if full else 1)
                     index += 2 if full else 1
-            for index in range(self.accounts.count()):
-                self.accounts.item(index).setSizeHint(QSize(200,60))
-        row_height=self.accounts.sizeHintForRow(0) if self.accounts.count() else 60
-        self.accounts.setMinimumHeight(0)
-        self.accounts.setFixedHeight(round(row_height*(2 if compact else 2.5))+10)
         self.account_group.setFixedHeight(self.account_group.sizeHint().height())
 
     @property
@@ -381,80 +407,56 @@ class PlatformAccountPanel(QWidget):
         return self.current()
 
     def current(self):
-        item = self.accounts.currentItem()
-        return next((a for a in self._accounts if item and a.account_id==item.data(Qt.UserRole)),None)
+        identity = self.accounts.currentData()
+        return next((a for a in self._accounts if a.account_id==identity),None)
 
     def account_label(self, account):
         state = '已登录' if account.login_status=='AUTHORIZED' else '已手工确认' if account.login_status=='USER_CONFIRMED' else '未核对'
-        return f'• {account.platform_nickname or account.account_name} [{state}]'
+        return f'{account.platform_nickname or account.account_name} [{state}]'+(' · 已关闭' if not account.enabled else '')
 
     def reload(self):
         previous = self.current().account_id if self.current() else None
+        previous_index = self.accounts.currentIndex()
         self._accounts = self.repository.accounts(self.platform)
+        blocked = self.accounts.blockSignals(True)
         self.accounts.clear()
-        self.enable_buttons = {}
-        self.cloud_badges = {}
         for account in self._accounts:
-            item = QListWidgetItem()
-            item.setData(Qt.AccessibleTextRole,self.account_label(account))
-            item.setData(Qt.UserRole,account.account_id)
-            item.setSizeHint(QSize(200,60))
-            self.accounts.addItem(item)
-            row = QWidget()
-            row.setStyleSheet('QWidget {background:transparent;}')
-            layout = QHBoxLayout(row)
-            layout.setContentsMargins(6,6,6,6)
-            label = QLabel(self.account_label(account))
-            label.setMinimumHeight(label.fontMetrics().height()+2)
-            label.setAttribute(Qt.WA_TransparentForMouseEvents)
-            label.setToolTip(self.account_label(account))
-            identity_layout = QVBoxLayout()
-            identity_layout.setSpacing(4)
-            identity_layout.addWidget(label)
-            badge = QLabel()
-            badge.setStyleSheet('color:#B9DBEA;font-size:11px;')
-            badge.setMinimumHeight(16)
-            badge.setAttribute(Qt.WA_TransparentForMouseEvents)
-            self.cloud_badges[account.account_id] = badge
-            identity_layout.addWidget(badge)
-            layout.addLayout(identity_layout,1)
-            group = QButtonGroup(row)
-            group.setExclusive(True)
-            buttons = []
-            for text, value in [('启用',True),('关闭',False)]:
-                button = QPushButton(text)
-                button.setCheckable(True)
-                button.setChecked(account.enabled == value)
-                button.setFixedWidth(48)
-                button.setToolTip('启用后参与自动部署；关闭保留配置、历史记录及平台登录')
-                button.setStyleSheet('QPushButton {padding:3px;} QPushButton:checked {background:#247F91;color:white;}')
-                button.clicked.connect(lambda checked, identity=account.account_id, value=value:self.set_account_enabled(identity,value))
-                group.addButton(button)
-                layout.addWidget(button)
-                buttons.append(button)
-            self.enable_buttons[account.account_id] = (buttons,label)
-            self.accounts.setItemWidget(item,row)
-        if self.accounts.count():
-            index = next((i for i,a in enumerate(self._accounts) if a.account_id == previous),0)
-            self.accounts.setCurrentRow(index)
-        self.refresh_cloud_badges()
+            self.accounts.addItem(self.account_label(account),account.account_id)
+            self.accounts.setItemData(self.accounts.count()-1,self.account_label(account),Qt.ToolTipRole)
+        index = self.accounts.findData(previous) if previous else -1
+        if index<0:
+            index = min(max(0,previous_index),self.accounts.count()-1)
+        self.accounts.setCurrentIndex(index)
+        self.accounts.blockSignals(blocked)
+        self.accounts.setEnabled(bool(self._accounts))
+        self.account_selector_group.setTitle(f'账号选择-{len(self._accounts)}个账号')
+        self.load_current()
+        self.allocate_configuration_height()
 
     def refresh_cloud_badges(self):
         from ..publisher.drive_config import DriveBinding
+        account = self.current()
+        self.account_switch.setExclusive(False)
+        for button,value in ((self.enable_button,True),(self.disable_button,False)):
+            button.setEnabled(account is not None)
+            button.setChecked(bool(account and account.enabled==value))
+        self.account_switch.setExclusive(True)
+        if not account:
+            self.account_status.setText('添加账号后可配置目录与部署参数')
+            return
         connected = self.controller.drive_credentials.connected()
         worker = self.controller.worker
         active = bool(worker and worker.isRunning() and not worker.stopping.is_set() and worker.file_paths is None)
         keys = {t.key for t in worker.targets} if active else set()
-        for account in self._accounts:
-            badge = self.cloud_badges.get(account.account_id)
-            if not badge:
-                continue
-            enabled = DriveBinding.read(account.drive_binding).enabled
-            badge.setVisible(enabled)
-            text = ('账号已关闭' if not account.enabled else '仅本地发布' if not self.store.cloud_ingest_enabled else '云盘已断开' if not connected else
-                '云盘已暂停' if active and worker.pause_requested.is_set() else
-                '云盘监听中' if self.platform+':'+account.account_id in keys else '云盘待启动')
-            badge.setText(text)
+        listening = DriveBinding.read(account.drive_binding).enabled
+        text = ('账号已关闭 · 配置与历史记录保留' if not account.enabled else
+            '账号已启用 · 未启用云盘监听' if not listening else
+            '账号已启用 · 仅本地发布' if not self.store.cloud_ingest_enabled else
+            '账号已启用 · 云盘已断开' if not connected else
+            '账号已启用 · 云盘已暂停' if active and worker.pause_requested.is_set() else
+            '账号已启用 · 云盘监听中' if self.platform+':'+account.account_id in keys else '账号已启用 · 云盘待启动')
+        self.account_status.setText(text)
+        self.account_status.setStyleSheet('color:'+('#4CBD87' if account.enabled else '#A6BDD3')+';font-size:12px;')
 
     def set_account_enabled(self, identity, enabled):
         account = next((a for a in self._accounts if a.account_id == identity),None)
@@ -466,8 +468,7 @@ class PlatformAccountPanel(QWidget):
             self.repository.save(account)
         except (OSError,ValueError,sqlite3.Error) as error:
             account.enabled = previous
-            for button,value in zip(self.enable_buttons[identity][0],(True,False)):
-                button.setChecked(previous == value)
+            self.refresh_cloud_badges()
             QMessageBox.warning(self,'账号状态',str(error))
             return
         if self.current() is account:
@@ -477,10 +478,13 @@ class PlatformAccountPanel(QWidget):
             worker.target_enabled[self.platform+':'+identity] = enabled
             worker.wake_requested.set()
         self.controller.sync_drive_watch()
+        index=self.accounts.findData(identity)
+        if index>=0: self.accounts.setItemText(index,self.account_label(account))
         self.refresh_cloud_badges()
 
     def load_current(self,*_):
         account = self.current()
+        self.accounts.setToolTip(self.account_label(account) if account else '请先添加账号')
         self.name.setText(account.account_name if account else '')
         blocked = self.directory.blockSignals(True)
         self.directory.setText(account.target_dir if account else '')
@@ -520,6 +524,9 @@ class PlatformAccountPanel(QWidget):
             combo.setCurrentIndex(max(0,combo.findData(account.title_mode if account else 'series')))
         if self.platform=='xiaohongshu':
             self.collection.setText(account.collection_name if account else '')
+        for control in (self.settings_tabs,self.save_button,self.login_button,self.capture_button,self.delete_account_button):
+            control.setEnabled(account is not None)
+        self.refresh_cloud_badges()
         self.scan_queue()
         self.refresh_dom_state()
 
@@ -572,9 +579,7 @@ class PlatformAccountPanel(QWidget):
         except (OSError,ValueError,sqlite3.Error) as error:
             QMessageBox.warning(self,'保存配置',str(error))
             return False
-        self.accounts.currentItem().setData(Qt.AccessibleTextRole,self.account_label(account))
-        if account.account_id in self.enable_buttons:
-            self.enable_buttons[account.account_id][1].setText(self.account_label(account))
+        self.accounts.setItemText(self.accounts.currentIndex(),self.account_label(account))
         self.scan_queue()
         self.refresh_quota()
         if self.controller.worker:
@@ -689,7 +694,7 @@ class PlatformAccountPanel(QWidget):
     def add_account(self):
         account = self.repository.add(self.platform,'新账号（待登录）')
         self.reload()
-        self.accounts.setCurrentRow(next(i for i,a in enumerate(self._accounts) if a.account_id == account.account_id))
+        self.accounts.setCurrentIndex(next(i for i,a in enumerate(self._accounts) if a.account_id == account.account_id))
 
     def delete_account(self):
         if self.dialog and self.dialog.worker.isRunning():
@@ -735,11 +740,8 @@ class PlatformAccountPanel(QWidget):
         except (OSError,ValueError) as error:
             self.logs.appendPlainText(f'昵称已识别但保存失败：{error}')
             return
-        for index in range(self.accounts.count()):
-            if self.accounts.item(index).data(Qt.UserRole)==account.account_id:
-                self.accounts.item(index).setData(Qt.AccessibleTextRole,self.account_label(account))
-                if account.account_id in self.enable_buttons:
-                    self.enable_buttons[account.account_id][1].setText(self.account_label(account))
+        index=self.accounts.findData(account.account_id)
+        if index>=0: self.accounts.setItemText(index,self.account_label(account))
         self._accounts = [account if a.account_id==account.account_id else a for a in self._accounts]
         self.logs.appendPlainText(f'[平台昵称] 已获取：{identity["nickname"]}；账号ID与浏览器目录保持原值')
         if self.current() and self.current().account_id==account.account_id:

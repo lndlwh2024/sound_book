@@ -176,23 +176,18 @@ def pump_until(condition, seconds=3):
 
 
 @pytest.mark.parametrize('index',range(4))
-def test_account_identity_and_cloud_badge_fit_separate_lines(panel,index):
-    from PySide6.QtCore import QPoint
+def test_account_selector_and_status_fit_without_list_rows(panel,index):
+    from PySide6.QtWidgets import QComboBox
     panel.channel_view.setCurrentIndex(index)
     panel.resize(1280,800)
     panel.show()
     view=panel.panels[index]
-    identity=view.current().account_id
-    badge=view.cloud_badges[identity]
-    badge.setText('云盘监听中')
-    badge.show()
     QApplication.processEvents()
-    label=view.enable_buttons[identity][1]
-    row=view.accounts.itemWidget(view.accounts.currentItem())
-    top=label.mapTo(row,QPoint(0,0)).y()
-    badge_top=badge.mapTo(row,QPoint(0,0)).y()
-    assert top>=0 and badge_top>=top+label.height()
-    assert badge_top+badge.height()<=row.height()
+    assert isinstance(view.accounts,QComboBox)
+    assert view.accounts.currentData()==view.current().account_id
+    assert view.account_status.isVisible()
+    assert view.accounts.mapTo(view.account_selector_group,view.accounts.rect().bottomLeft()).y()<view.account_status.y()
+    assert view.accounts.height()<=56
 
 
 @pytest.mark.parametrize('connected',[False,True])
@@ -240,10 +235,10 @@ def test_binding_persists_without_changing_identity_and_no_nickname_editor(panel
     assert restored.account_id==identity and repo.profile(restored)==profile
     assert view.name.isHidden() and view.nickname.isHidden()
     assert not view.configuration_group.isAncestorOf(view.save_button)
-    view.enable_buttons[identity][0][1].click()
+    view.disable_button.click()
     assert not view.current().enabled
     assert not panel.repository.accounts(view.platform)[0].enabled
-    view.enable_buttons[identity][0][0].click()
+    view.enable_button.click()
     assert view.current().enabled
 
 

@@ -147,7 +147,7 @@ def test_same_form_saves_and_reloads_common_fields(panel,index):
     original_id,original_profile=account.account_id,panel.repository.profile(account)
     current.name.setText('新备注')
     current.identity.setText('核对备注')
-    current.enable_buttons[account.account_id][0][1].click()
+    current.disable_button.click()
     current.auto_archive.setChecked(False)
     for key,check in current.media_checks.items():
         check.setChecked(key in ('audio','image'))
@@ -183,7 +183,7 @@ def test_identity_updates_captured_account_without_changing_id_profile_or_select
     original_id,profile=captured.account_id,panel.repository.profile(captured)
     other=panel.repository.add(current.platform,'第二账号')
     current.reload()
-    current.accounts.setCurrentRow(1)
+    current.accounts.setCurrentIndex(1)
     current.apply_identity(captured,{'nickname':'平台真实昵称','platform_uid':'UC'+'a'*22 if current.platform=='youtube' else ''})
     assert current.current().account_id==other.account_id
     assert current.name.text()=='第二账号'
@@ -392,25 +392,58 @@ def test_ui_scan_and_deploy_share_media_selection_including_empty(panel,index,tm
     assert current.table_queue.rowCount()==0 and not worker.plan_batch()
 
 
-def test_accounts_show_two_and_half_rows_with_scroll_and_no_configuration_void(panel):
-    from PySide6.QtWidgets import QApplication
-    for current in panel.panels:
-        for number in range(3):
-            panel.repository.add(current.platform,f'additional {number}')
-        current.reload()
+def test_account_selector_height_does_not_grow_with_more_accounts(panel):
+    from PySide6.QtWidgets import QApplication,QComboBox
     panel.resize(1640,940)
     panel.show()
     app=QApplication.instance()
     for index,current in enumerate(panel.panels):
         panel.channel_view.setCurrentIndex(index)
         app.processEvents()
-        assert abs(current.accounts.viewport().height()-current.accounts.sizeHintForRow(0)*2.5)<=3
-        for row in range(2):
-            assert current.accounts.viewport().rect().contains(current.accounts.visualItemRect(current.accounts.item(row)))
-        assert current.accounts.verticalScrollBar().maximum()>0
-        card=current.configuration_group
-        # Saving is directly below the visible fields, without a blank filler underneath.
-        assert card.height()-current.save_button.mapTo(card,current.save_button.rect().bottomLeft()).y()<16
+        initial_height=current.account_group.height()
+        for number in range(15):
+            panel.repository.add(current.platform,f'additional {number}')
+        current.reload()
+        app.processEvents()
+        assert isinstance(current.accounts,QComboBox)
+        assert current.accounts.count()==len(current._accounts)
+        assert current.account_selector_group.title()==f'账号选择-{current.accounts.count()}个账号'
+        assert abs(current.account_group.height()-initial_height)<=4
+
+
+@pytest.mark.parametrize('index',range(4))
+def test_selector_count_crud_and_enable_state_are_per_account(panel,monkeypatch,index):
+    view=panel.panels[index]
+    original=view.current()
+    view.add_account()
+    added=view.current()
+    assert added.account_id!=original.account_id and view.accounts.count()==2
+    assert view.account_selector_group.title()=='账号选择-2个账号'
+    view.disable_button.click()
+    assert not view.current().enabled
+    view.accounts.setCurrentIndex(view.accounts.findData(original.account_id))
+    assert view.current().enabled and view.enable_button.isChecked()
+    view.accounts.setCurrentIndex(view.accounts.findData(added.account_id))
+    assert view.disable_button.isChecked()
+    profile=Path(panel.repository.profile(added));profile.mkdir(parents=True,exist_ok=True)
+    marker=profile/'retained-test-marker';marker.write_text('test profile')
+    monkeypatch.setattr(ui.QMessageBox,'question',lambda *a,**kw:ui.QMessageBox.No)
+    view.delete_account()
+    assert view.accounts.count()==2
+    monkeypatch.setattr(ui.QMessageBox,'question',lambda *a,**kw:ui.QMessageBox.Yes)
+    view.delete_account()
+    assert view.accounts.count()==1 and view.current().account_id==original.account_id
+    assert marker.exists() and view.account_selector_group.title()=='账号选择-1个账号'
+    view.delete_account()
+    assert view.accounts.count()==0 and view.current() is None
+    assert view.account_selector_group.title()=='账号选择-0个账号'
+    assert not view.accounts.isEnabled() and not view.enable_button.isEnabled()
+    assert not view.disable_button.isEnabled() and not view.settings_tabs.isEnabled()
+    assert not view.enable_button.isChecked() and not view.disable_button.isChecked()
+    assert not view.save_button.isEnabled() and view.shared_drive.isEnabled()
+    view.add_account()
+    assert view.accounts.count()==1 and view.current() is not None
+    assert view.settings_tabs.isEnabled() and view.save_button.isEnabled()
 
 
 @pytest.mark.parametrize('index',range(4))

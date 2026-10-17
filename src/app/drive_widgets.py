@@ -82,7 +82,7 @@ class SharedDriveWidget(QGroupBox):
                 QPushButton {padding:3px 7px;background:#315F89;color:#FFFFFF;}
                 QPushButton:disabled {background:#303743;color:#788493;border:1px solid #414956;}
             ''')
-        height = max(28, *(control.sizeHint().height() for control in controls))
+        height = max(36, *(control.sizeHint().height() for control in controls))
         for control in controls:
             control.setFixedHeight(height)
         layout.addLayout(row)

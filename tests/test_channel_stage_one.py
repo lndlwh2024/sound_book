@@ -90,7 +90,7 @@ def test_startup_repairs_legacy_success_and_uses_current_ledger(app,tmp_path,mon
         panel.close()
 
 
-def test_short_window_shows_two_accounts_and_platform_dropdown(app, tmp_path, monkeypatch):
+def test_short_window_shows_account_selector_and_platform_dropdown(app, tmp_path, monkeypatch):
     from PySide6.QtWidgets import QTabWidget, QTabBar, QWidget, QScrollArea
     from src.publisher.douyin.config import DouyinAccountManager
     manager = DouyinAccountManager(tmp_path/'legacy.json', tmp_path/'profiles')
@@ -130,8 +130,11 @@ def test_short_window_shows_two_accounts_and_platform_dropdown(app, tmp_path, mo
                 app.processEvents()
                 assert control.isVisible()
                 assert panel.rect().contains(control.mapTo(panel,control.rect().center()))
-            for row in range(2):
-                assert account_list.viewport().rect().contains(account_list.visualItemRect(account_list.item(row)))
+            assert account_list.count()==2
+            first=current.current().account_id
+            account_list.setCurrentIndex(1)
+            assert current.current().account_id!=first
+            account_list.setCurrentIndex(0)
     finally:
         panel.prepare_shutdown()
         panel.close()
@@ -189,7 +192,8 @@ def test_real_theme_keeps_configuration_dark_and_channels_above_start(app, tmp_p
         # Both tabs retain a complete, bounded page without configuration scroll areas.
         assert all(height > 0 for _,height in config_bounds)
         for current in panel.panels:
-            assert abs(current.accounts.viewport().height()-current.accounts.sizeHintForRow(0)*(2 if current._compact_settings else 2.5))<=3
+            assert current.accounts.height()<=56
+            assert current.account_selector_group.title()==f'账号选择-{current.accounts.count()}个账号'
     finally:
         panel.prepare_shutdown()
         panel.close()

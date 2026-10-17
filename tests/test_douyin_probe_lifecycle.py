@@ -175,7 +175,7 @@ def test_deploy_button_uses_selected_account_and_selection_does_not_retarget_run
     widget=shared_ui
     factory = MagicMock()
     monkeypatch.setattr(shared, 'MultiDeployWorker', factory)
-    widget.douyin.accounts.setCurrentRow(1)
+    widget.douyin.accounts.setCurrentIndex(1)
     account=widget.douyin.current()
     assert account.account_id == 'new'
     target=PublishTarget('douyin',widget.repository.publish_account(account),widget.repository.profile(account))
@@ -195,12 +195,12 @@ def test_deploy_button_uses_selected_account_and_selection_does_not_retarget_run
         time.sleep(.005)
     assert widget.cleanup_worker is None
     check.start.assert_called_once()
-    widget.douyin.accounts.setCurrentRow(0)
+    widget.douyin.accounts.setCurrentIndex(0)
     widget.preflight_finished()
     fixed=factory.call_args.args[0]
     assert fixed[0].account.account_id=='new'
     factory.return_value.start.assert_called_once()
-    widget.douyin.accounts.setCurrentRow(0)
+    widget.douyin.accounts.setCurrentIndex(0)
     assert fixed[0].account.account_id=='new' and factory.call_count==1
 
 
@@ -210,7 +210,7 @@ def test_deployment_dialog_allows_explicit_multi_account_selection_and_cancel(ap
     from pathlib import Path
     widget=shared_ui
     try:
-        widget.douyin.accounts.setCurrentRow(1)
+        widget.douyin.accounts.setCurrentIndex(1)
         defaults = []
         def select_accounts():
             dialog = app.activeModalWidget()
