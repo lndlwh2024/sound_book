@@ -18,9 +18,9 @@ from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QLabel, QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox, QSlider, QPushButton,
     QProgressBar, QFileDialog, QMessageBox, QGroupBox, QScrollArea,
-    QFrame, QTextEdit, QTabWidget, QDialog, QCheckBox, QSizePolicy, QApplication
+    QFrame, QTextEdit, QTabWidget, QDialog, QCheckBox, QSizePolicy, QApplication, QTimeEdit
 )
-from PySide6.QtCore import Qt, QSize, QTimer, Signal, QObject, QPointF, QRectF, QSettings
+from PySide6.QtCore import Qt, QSize, QTimer, Signal, QObject, QPointF, QRectF, QSettings, QTime
 from PySide6.QtGui import QPixmap, QFont, QIcon, QPainter, QColor, QPolygonF, QFontMetrics
 from PySide6.QtWidgets import QStyle, QProxyStyle
 
@@ -214,178 +214,7 @@ class SpinBoxArrowStyle(QProxyStyle):
         super().drawPrimitive(element, option, painter, widget)
 
 
-class ResourceMonitorBar(QFrame):
-    """
-    硬件负载实时监控条。
-    【为什么这样设计】
-    置于管线流程图下方，实时显示 CPU 整体负载、系统内存已用/总量、独显显存已用/总量、CUDA 计算核利用率与核心温度，
-    底层使用原生 Windows API 与低开销后台探测，无外部重型依赖，彻底消除用户对系统资源消耗黑盒不可知的问题。
-    """
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setStyleSheet("""
-            QFrame {
-                background-color: #15151C;
-                border: 1px solid #333345;
-                border-radius: 5px;
-                padding: 4px 8px;
-            }
-            QLabel {
-                font-size: 11px;
-                color: #A0A0B8;
-                font-family: 'Consolas', 'Segoe UI', monospace;
-            }
-        """)
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(8, 2, 8, 2)
-        layout.setSpacing(10)
-
-        icon_lbl = QLabel("📊 硬件负载:")
-        icon_lbl.setStyleSheet("font-weight: bold; color: #4DA6FF;")
-        layout.addWidget(icon_lbl)
-
-        self.lbl_cpu = QLabel("CPU: --%")
-        self.lbl_mem = QLabel("内存: --/-- GB (--%)")
-        self.lbl_cuda_status = QLabel("CUDA: --")
-        self.lbl_gpu_load = QLabel("GPU: --%")
-        self.lbl_gpu_temp = QLabel("GPU温度: --°C")
-        self.lbl_gpu_mem = QLabel("显存: --/-- GB (--%)")
-
-        layout.addWidget(self.lbl_cpu)
-        layout.addWidget(self.lbl_mem)
-        layout.addWidget(self.lbl_cuda_status)
-        layout.addWidget(self.lbl_gpu_load)
-        layout.addWidget(self.lbl_gpu_temp)
-        layout.addWidget(self.lbl_gpu_mem)
-        layout.addStretch()
-
-        self._last_cpu_times = self._get_cpu_times()
-        self._pdh_query = None
-        self._pdh_counter = None
-        self._init_pdh()
-
-        self.timer = QTimer(self)
-        self.timer.timeout.connect(self._refresh_metrics)
-        self.timer.start(1500)
-
-    def _init_pdh(self):
-        """初始化 Windows 原生 PDH 性能计数器以精准对齐任务管理器 CPU 负载"""
-        try:
-            pdh = ctypes.windll.pdh
-            h_query = ctypes.c_void_p()
-            h_counter = ctypes.c_void_p()
-            if pdh.PdhOpenQueryW(None, 0, ctypes.byref(h_query)) == 0:
-                # 采样与任务管理器 1:1 对应的处理器效用率计数器 (考虑现代 CPU 睿频)
-                if pdh.PdhAddEnglishCounterW(h_query, "\\Processor Information(_Total)\\% Processor Utility", 0, ctypes.byref(h_counter)) == 0:
-                    pdh.PdhCollectQueryData(h_query)
-                    self._pdh_query = h_query
-                    self._pdh_counter = h_counter
-        except Exception as e:
-            logger.debug(f"PDH 初始化失败，将自动降级回退到 GetSystemTimes: {e}")
-
-    def _get_cpu_times(self):
-        try:
-            class FILETIME(ctypes.Structure):
-                _fields_ = [("dwLow", ctypes.c_uint), ("dwHigh", ctypes.c_uint)]
-            idle, kernel, user = FILETIME(), FILETIME(), FILETIME()
-            ctypes.windll.kernel32.GetSystemTimes(ctypes.byref(idle), ctypes.byref(kernel), ctypes.byref(user))
-            def to_int(ft): return (ft.dwHigh << 32) + ft.dwLow
-            return to_int(idle), to_int(kernel), to_int(user)
-        except Exception:
-            return 0, 0, 0
-
-    def _refresh_metrics(self):
-        # 1. CPU (优先使用 PDH 采集与任务管理器 100% 一致的 Processor Utility)
-        cpu_pct = None
-        if self._pdh_query and self._pdh_counter:
-            try:
-                pdh = ctypes.windll.pdh
-                class PDH_FMT_COUNTERVALUE(ctypes.Structure):
-                    _fields_ = [('CStatus', ctypes.c_uint), ('doubleValue', ctypes.c_double)]
-                if pdh.PdhCollectQueryData(self._pdh_query) == 0:
-                    val = PDH_FMT_COUNTERVALUE()
-                    if pdh.PdhGetFormattedCounterValue(self._pdh_counter, 0x00000200, None, ctypes.byref(val)) == 0:
-                        if val.CStatus == 0:
-                            cpu_pct = max(0.0, min(100.0, val.doubleValue))
-            except Exception:
-                pass
-
-        if cpu_pct is None:
-            try:
-                i2, k2, u2 = self._get_cpu_times()
-                i1, k1, u1 = self._last_cpu_times
-                self._last_cpu_times = (i2, k2, u2)
-                idle = i2 - i1
-                kernel = k2 - k1
-                user = u2 - u1
-                total = kernel + user
-                if total > 0:
-                    cpu_pct = max(0.0, min(100.0, ((total - idle) / total) * 100))
-            except Exception:
-                cpu_pct = 0.0
-
-        c_color = "#FF6B6B" if cpu_pct > 85 else ("#FFD93D" if cpu_pct > 60 else "#70DB93")
-        self.lbl_cpu.setText(f'CPU: <span style="color:{c_color}; font-weight:bold;">{cpu_pct:.1f}%</span>')
-
-        # 2. 内存 (RAM)
-        try:
-            class MEMORYSTATUSEX(ctypes.Structure):
-                _fields_ = [
-                    ('dwLength', ctypes.c_ulong), ('dwMemoryLoad', ctypes.c_ulong),
-                    ('ullTotalPhys', ctypes.c_ulonglong), ('ullAvailPhys', ctypes.c_ulonglong),
-                    ('ullTotalPageFile', ctypes.c_ulonglong), ('ullAvailPageFile', ctypes.c_ulonglong),
-                    ('ullTotalVirtual', ctypes.c_ulonglong), ('ullAvailVirtual', ctypes.c_ulonglong),
-                    ('sullAvailExtendedVirtual', ctypes.c_ulonglong),
-                ]
-            stat = MEMORYSTATUSEX()
-            stat.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
-            ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(stat))
-            used_gb = (stat.ullTotalPhys - stat.ullAvailPhys) / (1024**3)
-            total_gb = stat.ullTotalPhys / (1024**3)
-            m_pct = stat.dwMemoryLoad
-            m_color = "#FF6B6B" if m_pct > 85 else ("#FFD93D" if m_pct > 70 else "#70DB93")
-            self.lbl_mem.setText(f'内存: <span style="color:{m_color};">{used_gb:.1f}/{total_gb:.1f}GB ({m_pct}%)</span>')
-        except Exception:
-            pass
-
-        # 3. GPU 显存、负载与 CUDA 状态
-        try:
-            res = subprocess.run(
-                ["nvidia-smi", "--query-gpu=utilization.gpu,memory.total,memory.used,temperature.gpu", "--format=csv,noheader,nounits"],
-                capture_output=True, text=True, timeout=1, creationflags=0x08000000
-            )
-            if res.returncode == 0:
-                parts = [p.strip() for p in res.stdout.strip().split(",")]
-                if len(parts) >= 4:
-                    gpu_util = int(parts[0])
-                    mem_total = int(parts[1])
-                    mem_used = int(parts[2])
-                    temp = int(parts[3])
-                    mem_pct = (mem_used / max(1, mem_total)) * 100
-                    g_color = "#FF6B6B" if mem_pct > 85 else ("#FFD93D" if mem_pct > 65 else "#70DB93")
-                    # GPU负载
-                    load_color = "#FF6B6B" if gpu_util > 80 else ("#FFD93D" if gpu_util > 30 else "#70DB93")
-                    self.lbl_gpu_load.setText(f'GPU: <span style="color:{load_color}; font-weight:bold;">{gpu_util}%</span>')
-                    t_color = "#FF6B6B" if temp > 75 else "#70DB93"
-                    self.lbl_gpu_temp.setText(f'GPU温度: <span style="color:{t_color};">{temp}°C</span>')
-                    # 显存严格以 GB 为单位
-                    mem_used_gb = mem_used / 1024.0
-                    mem_total_gb = mem_total / 1024.0
-                    self.lbl_gpu_mem.setText(f'显存: <span style="color:{g_color}; font-weight:bold;">{mem_used_gb:.2f}/{mem_total_gb:.2f}GB ({mem_pct:.0f}%)</span>')
-
-            # CUDA 状态：通过检测是否有 CUDA 计算进程来判断（而非 utilization.gpu 综合值）
-            cuda_res = subprocess.run(
-                ["nvidia-smi", "--query-compute-apps=pid", "--format=csv,noheader"],
-                capture_output=True, text=True, timeout=1, creationflags=0x08000000
-            )
-            if cuda_res.returncode == 0:
-                cuda_procs = [l.strip() for l in cuda_res.stdout.strip().splitlines() if l.strip()]
-                if cuda_procs:
-                    self.lbl_cuda_status.setText(f'CUDA: <span style="color:#00E676; font-weight:bold;">活跃 ({len(cuda_procs)}进程)</span>')
-                else:
-                    self.lbl_cuda_status.setText('CUDA: <span style="color:#888888;">空闲</span>')
-        except Exception:
-            pass
+from .resource_monitor import ResourceMonitorBar
 
 
 class PipelineFlowWidget(QWidget):
@@ -620,9 +449,9 @@ class MainWindow(QMainWindow):
             avail = screen.availableGeometry()
             base_w = max(1360, min(1500, int(avail.width() * 0.92)))
             init_w = min(avail.width(), round(base_w * 1.10))
-            init_h = max(840, min(960, int(avail.height() * 0.93)))
+            init_h = min(avail.height(), max(920, min(1100, int(avail.height() * 0.98))))
             self.resize(init_w, init_h)
-        self.setMinimumSize(1100, 750)
+        self.setMinimumSize(min(1100, screen.availableGeometry().width()) if screen else 1100, min(790, screen.availableGeometry().height()) if screen else 790)
 
         # 设置主窗口左上角图标为 package/logo.png
         logo_path = Path(__file__).resolve().parent.parent.parent / "package" / "logo.png"
@@ -675,6 +504,9 @@ class MainWindow(QMainWindow):
         dn_icon = str((project_root / "resources" / "icons" / "spin_down.png").resolve()).replace("\\", "/")
         dn_hov = str((project_root / "resources" / "icons" / "spin_down_hover.png").resolve()).replace("\\", "/")
 
+        check_icon = str((project_root / "resources" / "icons" / "checkbox_checked.svg").resolve()).replace("\\", "/")
+        partial_icon = str((project_root / "resources" / "icons" / "checkbox_partial.svg").resolve()).replace("\\", "/")
+
         style_text = """
             QMainWindow {
                 background-color: #1E1E24;
@@ -683,6 +515,27 @@ class MainWindow(QMainWindow):
                 color: #E0E0E0;
                 font-family: 'Segoe UI', 'Microsoft YaHei', sans-serif;
                 font-size: 13px;
+            }
+            QCheckBox { spacing: 6px; }
+            QCheckBox::indicator {
+                width: 16px; height: 16px;
+                border: 2px solid #FFFFFF;
+                border-radius: 3px;
+                background-color: #202028;
+            }
+            QCheckBox::indicator:unchecked:hover { background-color: #3B3B49; }
+            QCheckBox::indicator:checked {
+                background-color: #247F91;
+                image: url("@@CHECK_ICON@@");
+            }
+            QCheckBox::indicator:indeterminate {
+                background-color: #247F91;
+                image: url("@@PARTIAL_ICON@@");
+            }
+            QCheckBox:disabled { color: #8D8D9B; }
+            QCheckBox::indicator:disabled {
+                border-color: #C8C8D0;
+                background-color: #35353F;
             }
             QGroupBox {
                 border: 1px solid #33333F;
@@ -733,7 +586,7 @@ class MainWindow(QMainWindow):
                 padding: 4px;
             }
             /* 【根治文字截断】微调框：设置 28px 最小高度，右侧预留紧凑箭头按钮，文本空间最大化 */
-            QSpinBox, QDoubleSpinBox {
+            QSpinBox, QDoubleSpinBox, QTimeEdit {
                 background-color: #16161C;
                 border: 1px solid #444455;
                 border-radius: 4px;
@@ -742,10 +595,10 @@ class MainWindow(QMainWindow):
                 font-size: 12px;
                 color: #FFFFFF;
             }
-            QSpinBox:focus, QDoubleSpinBox:focus {
+            QSpinBox:focus, QDoubleSpinBox:focus, QTimeEdit:focus {
                 border: 1px solid #007ACC;
             }
-            QSpinBox::up-button, QDoubleSpinBox::up-button {
+            QSpinBox::up-button, QDoubleSpinBox::up-button, QTimeEdit::up-button {
                 subcontrol-origin: border;
                 subcontrol-position: top right;
                 width: 20px;
@@ -754,18 +607,18 @@ class MainWindow(QMainWindow):
                 background-color: #252535;
                 border-top-right-radius: 4px;
             }
-            QSpinBox::up-button:hover, QDoubleSpinBox::up-button:hover {
+            QSpinBox::up-button:hover, QDoubleSpinBox::up-button:hover, QTimeEdit::up-button:hover {
                 background-color: #38384E;
             }
-            QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {
+            QSpinBox::up-arrow, QDoubleSpinBox::up-arrow, QTimeEdit::up-arrow {
                 image: url("@@UP_ICON@@");
                 width: 12px;
                 height: 8px;
             }
-            QSpinBox::up-arrow:hover, QDoubleSpinBox::up-arrow:hover {
+            QSpinBox::up-arrow:hover, QDoubleSpinBox::up-arrow:hover, QTimeEdit::up-arrow:hover {
                 image: url("@@UP_HOV@@");
             }
-            QSpinBox::down-button, QDoubleSpinBox::down-button {
+            QSpinBox::down-button, QDoubleSpinBox::down-button, QTimeEdit::down-button {
                 subcontrol-origin: border;
                 subcontrol-position: bottom right;
                 width: 20px;
@@ -773,15 +626,15 @@ class MainWindow(QMainWindow):
                 background-color: #252535;
                 border-bottom-right-radius: 4px;
             }
-            QSpinBox::down-button:hover, QDoubleSpinBox::down-button:hover {
+            QSpinBox::down-button:hover, QDoubleSpinBox::down-button:hover, QTimeEdit::down-button:hover {
                 background-color: #38384E;
             }
-            QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {
+            QSpinBox::down-arrow, QDoubleSpinBox::down-arrow, QTimeEdit::down-arrow {
                 image: url("@@DN_ICON@@");
                 width: 12px;
                 height: 8px;
             }
-            QSpinBox::down-arrow:hover, QDoubleSpinBox::down-arrow:hover {
+            QSpinBox::down-arrow:hover, QDoubleSpinBox::down-arrow:hover, QTimeEdit::down-arrow:hover {
                 image: url("@@DN_HOV@@");
             }
             /* 竖向专业音量滑条样式 */
@@ -1003,6 +856,8 @@ class MainWindow(QMainWindow):
             .replace("@@UP_HOV@@", up_hov)
             .replace("@@DN_ICON@@", dn_icon)
             .replace("@@DN_HOV@@", dn_hov)
+            .replace("@@CHECK_ICON@@", check_icon)
+            .replace("@@PARTIAL_ICON@@", partial_icon)
         )
         self.setStyleSheet(style_text)
 
@@ -1063,6 +918,7 @@ class MainWindow(QMainWindow):
     def _build_left_config_panel(self) -> QWidget:
         """构建左侧参数配置区（纯净一体化面板，绝无滑动条）"""
         panel = QWidget()
+        panel.setStyleSheet("QLineEdit,QSpinBox,QDoubleSpinBox,QComboBox,QTimeEdit {min-height:22px;padding-top:2px;padding-bottom:2px;}")
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
@@ -1071,6 +927,7 @@ class MainWindow(QMainWindow):
         grp_book = QGroupBox("【书籍与基础版式】")
         g_layout = QGridLayout(grp_book)
         g_layout.setSpacing(8)
+        g_layout.setVerticalSpacing(4)
         g_layout.setColumnStretch(0, 0)
         g_layout.setColumnStretch(1, 1)
         g_layout.setColumnStretch(2, 0)
@@ -1234,6 +1091,7 @@ class MainWindow(QMainWindow):
         grp_voice = QGroupBox("【TTS 引擎与音色配置】")
         v_layout = QGridLayout(grp_voice)
         v_layout.setSpacing(8)
+        v_layout.setVerticalSpacing(4)
         # 统一 4 列网格比例，与下方视频版式严格拉长对齐
         v_layout.setColumnStretch(0, 0)
         v_layout.setColumnStretch(1, 1)
@@ -1359,7 +1217,18 @@ class MainWindow(QMainWindow):
         lbl_split_mode = QLabel("分集模式:")
         lbl_split_mode.setFixedWidth(68)
         m_layout.addWidget(lbl_split_mode, 0, 0)
-        m_layout.addWidget(self.cmb_split_mode, 0, 1, 1, 3)
+        split_row = QHBoxLayout()
+        split_row.addWidget(self.cmb_split_mode, 1)
+        self.chk_chapter_max_duration = QCheckBox("分集最大时长")
+        self.spn_chapter_max_duration = QSpinBox()
+        self.spn_chapter_max_duration.setRange(1, 1440)
+        self.spn_chapter_max_duration.setValue(60)
+        self.spn_chapter_max_duration.setSuffix(" 分钟")
+        self.spn_chapter_max_duration.setEnabled(False)
+        self.chk_chapter_max_duration.toggled.connect(self._sync_production_controls)
+        split_row.addWidget(self.chk_chapter_max_duration)
+        split_row.addWidget(self.spn_chapter_max_duration)
+        m_layout.addLayout(split_row, 0, 1, 1, 3)
 
         # 行 1 (自然章节模式): 指定章节范围 (起始至结束)
         self.lbl_target_chapter = QLabel("指定章节:")
@@ -1433,7 +1302,7 @@ class MainWindow(QMainWindow):
         gpu_layout.setContentsMargins(0, 0, 0, 0)
         gpu_layout.setSpacing(6)
 
-        self.chk_gpu_enable = QCheckBox("开启")
+        self.chk_gpu_enable = QCheckBox("GPU温控")
         self.chk_gpu_enable.setChecked(False)
         self.chk_gpu_enable.setToolTip("开启/关闭 GPU 硬件温控保护策略（默认关闭，开启后才执行温控）")
         self.chk_gpu_enable.toggled.connect(self._on_gpu_protect_toggled)
@@ -1444,7 +1313,7 @@ class MainWindow(QMainWindow):
         self.spn_gpu_temp_limit.setRange(75, 80)
         self.spn_gpu_temp_limit.setValue(75)
         self.spn_gpu_temp_limit.setSuffix(" °C")
-        self.spn_gpu_temp_limit.setMinimumWidth(85)
+        self.spn_gpu_temp_limit.setMinimumWidth(62)
         self.spn_gpu_temp_limit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self.spn_gpu_temp_limit.setAlignment(Qt.AlignCenter)
         self.spn_gpu_temp_limit.setToolTip("触发安全挂起的 GPU 核心温度上限（75 至 80°C）")
@@ -1457,7 +1326,7 @@ class MainWindow(QMainWindow):
         self.spn_gpu_temp_resume.setRange(55, 65)
         self.spn_gpu_temp_resume.setValue(60)
         self.spn_gpu_temp_resume.setSuffix(" °C")
-        self.spn_gpu_temp_resume.setMinimumWidth(85)
+        self.spn_gpu_temp_resume.setMinimumWidth(62)
         self.spn_gpu_temp_resume.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self.spn_gpu_temp_resume.setAlignment(Qt.AlignCenter)
         self.spn_gpu_temp_resume.setToolTip("冷却完成后允许恢复生产的 GPU 温度下限（55 至 65°C）")
@@ -1470,7 +1339,7 @@ class MainWindow(QMainWindow):
         self.spn_gpu_cooling_minutes.setRange(1, 60)
         self.spn_gpu_cooling_minutes.setValue(1)
         self.spn_gpu_cooling_minutes.setSuffix(" 分")
-        self.spn_gpu_cooling_minutes.setMinimumWidth(85)
+        self.spn_gpu_cooling_minutes.setMinimumWidth(62)
         self.spn_gpu_cooling_minutes.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self.spn_gpu_cooling_minutes.setAlignment(Qt.AlignCenter)
         self.spn_gpu_cooling_minutes.setToolTip("进入温控休眠后的最小强制冷却时长（1 至 60 分钟）")
@@ -1485,8 +1354,52 @@ class MainWindow(QMainWindow):
         gpu_layout.addWidget(self.lbl_gpu_cooling_min, 0)
         gpu_layout.addWidget(self.spn_gpu_cooling_minutes, 1)
 
-        m_layout.addWidget(lbl_gpu_ctrl, 2, 0)
-        m_layout.addLayout(gpu_layout, 2, 1, 1, 3)
+        self.gpu_control_frame = QFrame()
+        self.gpu_control_frame.setObjectName("gpuControlFrame")
+        self.gpu_control_frame.setStyleSheet("QFrame#gpuControlFrame {border:1px solid #333345;border-radius:4px;padding:2px;}")
+        self.gpu_control_frame.setLayout(gpu_layout)
+        gpu_layout.setContentsMargins(4, 2, 4, 2)
+        self.gpu_control_frame.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Preferred)
+        for field in (self.spn_gpu_temp_limit, self.spn_gpu_temp_resume, self.spn_gpu_cooling_minutes):
+            field.setFixedWidth(104)
+        self.spn_gpu_temp_limit.setSuffix("°")
+        self.spn_gpu_temp_resume.setSuffix("°")
+        schedule_row = QHBoxLayout()
+        schedule_row.setContentsMargins(0, 0, 0, 0)
+        schedule_row.setSpacing(6)
+        self.chk_execution_duration = QCheckBox("执行时长")
+        self.spn_execution_duration = QSpinBox()
+        self.spn_execution_duration.setRange(1, 10080)
+        self.spn_execution_duration.setValue(60)
+        self.spn_execution_duration.setSuffix(" 分")
+        self.chk_execution_time = QCheckBox("执行到")
+        self.time_execution = QTimeEdit(QTime(23, 0))
+        self.time_execution.setDisplayFormat("HH:mm")
+        self.time_execution.setCalendarPopup(False)
+        self.time_execution.setButtonSymbols(QSpinBox.UpDownArrows)
+        self.spn_execution_duration.setFixedWidth(108)
+        self.time_execution.setFixedWidth(96)
+        for field in (self.spn_execution_duration, self.time_execution):
+            field.setFixedHeight(32)
+            field.setAlignment(Qt.AlignCenter)
+        self.chk_execution_duration.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Preferred)
+        self.chk_execution_time.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Preferred)
+        self.time_execution.setStyleSheet("QTimeEdit:disabled {color:#686874;background:#1C1C24;}")
+        self.time_execution.setToolTip("北京时间下一次到达此时刻，完成当前分镜TTS后暂停")
+        schedule_row.addWidget(self.chk_execution_duration)
+        schedule_row.addWidget(self.spn_execution_duration)
+        schedule_row.addSpacing(16)
+        schedule_row.addWidget(self.chk_execution_time)
+        schedule_row.addWidget(self.time_execution)
+        schedule_row.addWidget(QLabel("北京时间暂停"))
+        schedule_row.addStretch(1)
+        m_layout.addLayout(schedule_row, 2, 0, 1, 4)
+        self.chk_execution_duration.toggled.connect(self._sync_production_controls)
+        self.chk_execution_time.toggled.connect(self._sync_production_controls)
+        self._restore_production_controls()
+        for field in (self.spn_chapter_max_duration, self.spn_execution_duration,
+                      self.spn_gpu_temp_limit, self.spn_gpu_temp_resume, self.spn_gpu_cooling_minutes):
+            field.setStyleSheet("QSpinBox:disabled {color:#686874;background:#1C1C24;}")
 
         layout.addWidget(grp_exec)
         layout.addStretch(1)
@@ -1913,20 +1826,15 @@ class MainWindow(QMainWindow):
         return left_btn_widget, right_status_widget
 
     def _build_bottom_monitor_bar(self) -> QWidget:
-        """
-        构建底部硬件负载实时监控条与全局任务进度条。
-        【为什么这样设计】
-        横跨窗口全宽底沿，左侧紧凑展示 6 项硬件负荷指标，右侧充分延展全局进度与耗时，
-        视觉饱满修长且不浪费屏幕纵向空间。
-        """
+        """两行等高监控：硬件指标在首行，磁盘、温控、进度和用时在次行。"""
         panel = QWidget()
-        bottom_monitor_layout = QHBoxLayout(panel)
+        bottom_monitor_layout = QVBoxLayout(panel)
         bottom_monitor_layout.setContentsMargins(0, 0, 0, 0)
         bottom_monitor_layout.setSpacing(12)
 
-        # 左侧：硬件监控条 (自适应紧凑包裹 6 项核心指标，右侧绝无闲置空白)
+        # 首行：十项监控，保持原有后台缓存采样。
         self.resource_monitor_bar = ResourceMonitorBar()
-        self.resource_monitor_bar.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Preferred)
+        self.resource_monitor_bar.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         bottom_monitor_layout.addWidget(self.resource_monitor_bar, 0)
 
         # 右侧：进度条与本次任务执行耗时指示 (Expanding 充分延展，饱满修长)
@@ -1963,7 +1871,29 @@ class MainWindow(QMainWindow):
         prog_layout.addWidget(self.progress_bar, 1)
         prog_layout.addWidget(self.lbl_elapsed_time, 0)
 
-        bottom_monitor_layout.addWidget(prog_widget, 1)
+        self.monitor_second_row = QWidget()
+        second_row = QHBoxLayout(self.monitor_second_row)
+        second_row.setContentsMargins(0, 0, 0, 0)
+        second_row.setSpacing(8)
+        second_row.addWidget(self.resource_monitor_bar.lbl_disk)
+        second_row.addWidget(self.resource_monitor_bar.lbl_output_disk)
+        second_row.addWidget(self.gpu_control_frame)
+        second_row.addWidget(prog_widget, 1)
+        bottom_monitor_layout.addWidget(self.monitor_second_row)
+        # 同一高度容纳温控输入框，首行不再被压缩成细条。
+        row_height = max(48, self.monitor_second_row.sizeHint().height(), self.resource_monitor_bar.sizeHint().height())
+        self.resource_monitor_bar.setFixedHeight(row_height)
+        self.monitor_second_row.setFixedHeight(row_height)
+        self.progress_bar.setMinimumWidth(60)
+        self.resource_monitor_bar.disk_width_budget = lambda: max(0,
+            self.monitor_second_row.width()-self.gpu_control_frame.sizeHint().width()
+            -self.lbl_elapsed_time.sizeHint().width()-60-32)
+        def resize_monitor_rows(height):
+            self.resource_monitor_bar.setFixedHeight(max(row_height, height))
+            self.monitor_second_row.setFixedHeight(max(row_height, height))
+        self.resource_monitor_bar.disk_height_changed.connect(resize_monitor_rows)
+        self.resource_monitor_bar.set_output_path(self.txt_output_dir.text())
+        self.txt_output_dir.textChanged.connect(self.resource_monitor_bar.set_output_path)
 
         return panel
 
@@ -2330,6 +2260,44 @@ class MainWindow(QMainWindow):
             if w is not None:
                 w.setEnabled(checked)
 
+    def _restore_production_controls(self):
+        settings = QSettings("SoundBook", "App")
+        for key, widget in self._production_control_fields().items():
+            value = settings.value("production_controls/"+key, None)
+            if value is not None:
+                if isinstance(widget, QCheckBox): widget.setChecked(str(value).lower() in ("true", "1"))
+                elif isinstance(widget, QTimeEdit): widget.setTime(QTime.fromString(str(value), "HH:mm"))
+                else: widget.setValue(int(value))
+        for widget in self._production_control_fields().values():
+            signal = widget.toggled if isinstance(widget, QCheckBox) else widget.timeChanged if isinstance(widget, QTimeEdit) else widget.valueChanged
+            signal.connect(self._save_production_controls)
+        self._sync_production_controls()
+
+    def _production_control_fields(self):
+        return {"chapter_max_enabled": self.chk_chapter_max_duration,
+                "chapter_max_minutes": self.spn_chapter_max_duration,
+                "duration_enabled": self.chk_execution_duration,
+                "duration_minutes": self.spn_execution_duration,
+                "time_enabled": self.chk_execution_time, "time": self.time_execution,
+                "gpu_enabled": self.chk_gpu_enable, "gpu_limit": self.spn_gpu_temp_limit,
+                "gpu_resume": self.spn_gpu_temp_resume, "gpu_cooling": self.spn_gpu_cooling_minutes}
+
+    def _save_production_controls(self, *args):
+        settings = QSettings("SoundBook", "App")
+        for key, widget in self._production_control_fields().items():
+            value = widget.isChecked() if isinstance(widget, QCheckBox) else widget.time().toString("HH:mm") if isinstance(widget, QTimeEdit) else widget.value()
+            settings.setValue("production_controls/"+key, value)
+
+    def _sync_production_controls(self, *args):
+        unlocked = getattr(self, '_config_unlocked', True)
+        for check_name, input_name in (("chk_chapter_max_duration", "spn_chapter_max_duration"),
+                                       ("chk_execution_duration", "spn_execution_duration"),
+                                       ("chk_execution_time", "time_execution")):
+            check, field = getattr(self, check_name, None), getattr(self, input_name, None)
+            if check is not None and field is not None:
+                check.setEnabled(unlocked)
+                field.setEnabled(unlocked and check.isChecked())
+
     def _on_split_mode_changed(self, idx: int = 0) -> None:
         """
         分集模式联动处理。
@@ -2339,6 +2307,10 @@ class MainWindow(QMainWindow):
         """
         if hasattr(self, 'cmb_split_mode'):
             is_by_duration = "时长" in self.cmb_split_mode.currentText()
+            for widget in (getattr(self, 'chk_chapter_max_duration', None), getattr(self, 'spn_chapter_max_duration', None)):
+                if widget is not None:
+                    widget.setVisible(not is_by_duration)
+            self._sync_production_controls()
             # 时长项的显示/隐藏与可用性
             for w in (getattr(self, 'lbl_target_dur', None),
                       getattr(self, 'spn_target_duration', None),
@@ -2856,7 +2828,14 @@ class MainWindow(QMainWindow):
         gpu_temp_resume = int(self.spn_gpu_temp_resume.value()) if hasattr(self, 'spn_gpu_temp_resume') else 60
         gpu_cooling_minutes = int(self.spn_gpu_cooling_minutes.value()) if hasattr(self, 'spn_gpu_cooling_minutes') else 1
 
+        self._save_production_controls()
         return {
+            "chapter_max_duration_enabled": self.chk_chapter_max_duration.isChecked(),
+            "chapter_max_duration_minutes": self.spn_chapter_max_duration.value(),
+            "execution_duration_enabled": self.chk_execution_duration.isChecked(),
+            "execution_duration_minutes": self.spn_execution_duration.value(),
+            "execution_time_enabled": self.chk_execution_time.isChecked(),
+            "execution_time": self.time_execution.time().toString("HH:mm"),
             "book_path": self.txt_book_path.text().strip(),
             "book_title": self.txt_book_title.text().strip(),
             "output_dir": self.txt_output_dir.text().strip(),
@@ -2947,7 +2926,11 @@ class MainWindow(QMainWindow):
         在生产流水线启动后，锁定全部输入，防止参数在运行中被意外篡改；
         在任务暂停、完成或出错时，恢复解冻。
         """
+        self._config_unlocked = enabled
         input_widgets = [
+            self.chk_chapter_max_duration, self.spn_chapter_max_duration,
+            self.chk_execution_duration, self.spn_execution_duration,
+            self.chk_execution_time, self.time_execution,
             getattr(self, 'txt_book_path', None),
             getattr(self, 'btn_browse_book', None),
             getattr(self, 'txt_book_title', None),
@@ -2983,6 +2966,7 @@ class MainWindow(QMainWindow):
             if w is not None:
                 w.setEnabled(enabled)
 
+        self._sync_production_controls()
         # 特殊联动控件恢复时，尊重其内部规则
         if enabled:
             if hasattr(self, '_on_split_mode_changed'):
@@ -3091,7 +3075,7 @@ class MainWindow(QMainWindow):
             "STORYBOOK_ILLUSTRATING": ("🟢", "【7/8】正在生成/匹配小人书场景专属插画 (STORYBOOK_ILLUSTRATING)"),
             "COMPLETED": ("🎉", "【8/8】生产完成！全部视频与音频已就绪 (COMPLETED)"),
             "COOLING": ("❄️", "【GPU温控保护中】核心温度超标，正在冷却休眠 (COOLING)..."),
-            "PAUSING": ("🟠", "【安全暂停中】等待当前切片落盘后停机 (PAUSING)..."),
+            "PAUSING": ("🟠", "【安全暂停中】等待当前完整分镜TTS落盘 (PAUSING)..."),
             "PAUSED": ("⏸️", "任务已安全暂停 (PAUSED)，支持随时断点续跑"),
             "FAILED": ("🔴", "生产任务异常终止 (FAILED)")
         }
@@ -3262,6 +3246,11 @@ class MainWindow(QMainWindow):
         if not hasattr(self, 'btn_gen_plan') or not hasattr(self, 'btn_start'):
             return
 
+        worker = getattr(self.bridge, 'worker', None)
+        if state == "PAUSED" and worker is not None and worker.isRunning():
+            state = "PAUSING"
+            self._is_producing = True
+
         # 1. 处于正式生产流水线全生命周期中
         if getattr(self, "_is_producing", False):
             if state in ["PAUSED"]:
@@ -3278,7 +3267,15 @@ class MainWindow(QMainWindow):
                 self.btn_pause.setEnabled(False)
                 self.btn_resume.setEnabled(False)
                 self._set_config_inputs_enabled(True)
+            elif state == "PAUSING":
+                self.btn_gen_plan.setEnabled(False)
+                self.btn_start.setEnabled(False)
+                self.btn_pause.setEnabled(False)
+                self.btn_pause.setText("暂停中…")
+                self.btn_resume.setEnabled(False)
+                self._set_config_inputs_enabled(False)
             else:
+                self.btn_pause.setText("安全暂停")
                 # 生产流水线内部所有流转节点（含中间 PLANNED 与 COOLING 温控冷却）：坚决锁定，仅安全暂停激活！
                 self.btn_gen_plan.setEnabled(False)
                 self.btn_start.setEnabled(False)
@@ -3348,6 +3345,8 @@ class MainWindow(QMainWindow):
                 f"• 自动分集规划: 共 {total_eps} 集\n",
                 f"--- 分集详细规划表 ---"
             ]
+            if self.chk_chapter_max_duration.isChecked() and "自然章节" in self.cmb_split_mode.currentText():
+                lines.insert(4, f"• 已启用分集最大时长 {self.spn_chapter_max_duration.value()} 分钟；当前为章节预估，最终分段以实际TTS时长为准。\n")
 
             for ep in getattr(plan, "episodes", []):
                 # 兼容读取：EpisodePreview 实际字段为 total_chars，保留 char_count 作为降级
@@ -3377,6 +3376,11 @@ class MainWindow(QMainWindow):
         )
 
     def _on_worker_task_paused(self) -> None:
+        worker = getattr(self.bridge, 'worker', None)
+        if worker is not None and worker.isRunning():
+            self._apply_button_lock_state("PAUSING")
+            QTimer.singleShot(50, self._on_worker_task_paused)
+            return
         self._timer_elapsed.stop()
         self._timer_breathing.stop()
         self._is_producing = False

@@ -26,7 +26,13 @@ from ..audio.ffmpeg_utils import concat_wavs, _generate_silence
 from ..video.video_composer import VideoComposer
 from ..video.storybook_composer import StorybookComposer
 from ..video.storybook_layout import export_storybook_ass
-from ..core.scene_splitter import SceneSplitter
+from ..core.scene_splitter import SceneSplitter, ScenePlan
+from ..core.production_control import ProductionControl, SafePause
+from ..core.episode_segments import unit_ranges, segment_scenes, synthesis_fingerprint
+from ..utils.resource_sampler import ResourceSampler
+from types import SimpleNamespace
+import json
+import math
 from ..ai.illustration_manager import IllustrationManager
 from ..state.models import TaskStatus, EpisodeManifest, BookStructure
 from ..state.manifest import ManifestManager
@@ -71,35 +77,7 @@ def _clean_book_name(title: str) -> str:
 
 
 def _query_gpu_temperature() -> Optional[float]:
-    """
-    通过 nvidia-smi 实时查询 GPU 核心温度 (°C)。
-    【为什么这样设计】
-    专为硬件温控闭环提供轻量、低开销的温度探测。
-    在无独立显卡或驱动未就绪时静默返回 None，不干扰普通工作流。
-    """
-    import subprocess
-    try:
-        cmd = [
-            "nvidia-smi",
-            "--query-gpu=temperature.gpu",
-            "--format=csv,noheader,nounits"
-        ]
-        res = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=2,
-            creationflags=0x08000000 if os.name == 'nt' else 0
-        )
-        if res.returncode == 0 and res.stdout.strip():
-            lines = [l.strip() for l in res.stdout.strip().splitlines() if l.strip()]
-            temps = [float(l) for l in lines if l.replace('.', '', 1).isdigit()]
-            if temps:
-                return max(temps)
-    except Exception as e:
-        logger.debug(f"GPU 核心温度查询未执行或失败: {e}")
-    return None
-
+    return ResourceSampler.shared().gpu().get("temperature")
 
 
 class PlanWorker(QThread):
@@ -194,22 +172,113 @@ class ProductionWorker(QThread):
         self.task_config = task_config
         self._pause_requested = False
         self._is_running = True
+        self._active_stage = "IDLE"
+
+    def _status(self, stage):
+        self._active_stage = stage
+        self.sig_status_changed.emit(stage)
 
     def request_safe_pause(self) -> None:
         """用户点击安全暂停：设置标志位，等待当前微段落安全完成后停机"""
         logger.info("收到安全暂停请求，正在等待当前生成单元完成...")
         self._pause_requested = True
-        self.sig_status_changed.emit("PAUSING")
-        self.sig_progress_updated.emit(-1.0, "【安全暂停中 (PAUSING)】等待当前语音切片落盘后停机...")
+        self._status("PAUSING")
+        self.sig_progress_updated.emit(-1.0, "【安全暂停中】等待当前完整分镜TTS落盘后暂停…")
 
     def run(self) -> None:
         """主生产流水线"""
         try:
+            self._control = ProductionControl(self.task_config)
+            self._pause_announced = False
+            self._sampler = ResourceSampler.shared()
+            if self._control.deadline:
+                self.sig_progress_updated.emit(-1.0, "定时暂停目标（北京时间）："+self._control.deadline.strftime("%Y-%m-%d %H:%M"))
             self._execute_pipeline()
+        except SafePause:
+            self._save_control_checkpoint("PAUSED")
+            self.sig_dual_progress_updated.emit("", "")
+            self._status("PAUSED")
+            self.sig_progress_updated.emit(-1.0, "已安全暂停："+"、".join(sorted(self._control.reasons)))
+            self.sig_task_paused.emit()
         except Exception as e:
             logger.exception(f"后台生产流水线异常终止: {e}")
             self.sig_error.emit("PIPELINE_ERROR", str(e))
-            self.sig_status_changed.emit("FAILED")
+            self._status("FAILED")
+
+    def _poll_controls(self):
+        if self._pause_requested:
+            self._control.reasons.add("用户安全暂停")
+        requested = self._control.poll()
+        self._control.observe_temperature(_query_gpu_temperature())
+        if requested and not self._pause_announced:
+            self._pause_announced = True
+            self._status("PAUSING")
+            self.sig_progress_updated.emit(-1.0, "等待当前完整分镜TTS落盘："+"、".join(sorted(self._control.reasons)))
+        return requested
+
+    def _boundary(self):
+        requested = self._poll_controls()
+        if self._control.thermal_pending:
+            self._control.begin_cooling()
+        if requested:
+            raise SafePause()
+        if self._control.thermal_pending:
+            self._stage_before_cooling = self._active_stage
+            self._status("COOLING")
+            while True:
+                self._save_control_checkpoint("COOLING")
+                if self._poll_controls():
+                    raise SafePause()
+                temperature = _query_gpu_temperature()
+                if self._control.cooled(temperature):
+                    self._control.end_cooling()
+                    self._save_control_checkpoint("RUNNING")
+                    self._status(self._stage_before_cooling)
+                    break
+                self.sig_progress_updated.emit(-1.0, "GPU温控冷却："+(f"{temperature:.1f}°C" if temperature is not None else "温度未知，等待有效读数")+"；达到冷却时长及复工温度后自动继续")
+                time.sleep(1)
+
+    def _save_control_checkpoint(self, state):
+        if not hasattr(self, '_manifest_mgr'):
+            return
+        data = dict(self._checkpoint)
+        data.update(state=state, pause_reasons=sorted(self._control.reasons),
+                    cooling_started_at=getattr(self, '_cooling_wall_start', None))
+        if self._control.cool_started is not None and not data['cooling_started_at']:
+            self._cooling_wall_start = time.time()
+            data['cooling_started_at'] = self._cooling_wall_start
+        if self._control.cool_started is None:
+            self._cooling_wall_start = None
+            data['cooling_started_at'] = None
+        self._manifest_mgr._atomic_write(self._manifest_mgr.book_dir / 'production_checkpoint.json', data)
+
+    def _restore_cooling(self):
+        path = self._manifest_mgr.book_dir / 'production_checkpoint.json'
+        if not self.task_config.get('gpu_protect_enabled') or not path.exists():
+            return
+        previous = json.loads(path.read_text(encoding='utf-8'))
+        began = previous.get('cooling_started_at')
+        if began:
+            self._control.begin_cooling()
+            self._control.prior_cooling_seconds = max(0, time.time()-float(began))
+            self._control.thermal_pending = True
+            self._cooling_wall_start = began
+
+    def _completed_part_valid(self, manifest, duration, expect_video):
+        try:
+            from ..audio.ffmpeg_utils import get_audio_info
+            result = AudioQC().check_wav(Path(manifest.audio_file))
+            if not result.get("valid") or abs(result.get("duration", 0)-duration) > 0.01:
+                return False
+            if not manifest.subtitle_file or not Path(manifest.subtitle_file).is_file():
+                return False
+            if expect_video:
+                video = Path(manifest.video_file)
+                return (video.is_file() and video.stat().st_size > 10240
+                        and abs(get_audio_info(video).get("duration", 0)-duration) <= 0.1)
+            return True
+        except (OSError, ValueError, TypeError):
+            return False
 
     def _execute_pipeline(self) -> None:
         cfg = self.task_config
@@ -221,10 +290,6 @@ class ProductionWorker(QThread):
         target_ep_mins = float(cfg.get("target_duration_mins", 15.0))
         start_ch = int(cfg.get("start_chapter", 1))
         end_ch = int(cfg.get("end_chapter", 1))
-        gpu_protect_enabled = bool(cfg.get("gpu_protect_enabled", False))
-        gpu_temp_limit = float(cfg.get("gpu_temp_limit", 75.0))
-        gpu_temp_resume = float(cfg.get("gpu_temp_resume", 60.0))
-        gpu_cooling_minutes = float(cfg.get("gpu_cooling_minutes", 1.0))
         cover_path = str(cfg.get("cover_path", "")).strip() if cfg.get("cover_path") else ""
         bgm_path = str(cfg.get("bgm_path", "")).strip() if cfg.get("bgm_path") else ""
         main_title = str(cfg.get("main_title", f"《{book_title}》精选")).strip()
@@ -266,9 +331,14 @@ class ProductionWorker(QThread):
         book_dir = (project_root / "books" / book_id).resolve()
         book_dir.mkdir(parents=True, exist_ok=True)
         manifest_mgr = ManifestManager(book_dir=book_dir)
+        self._manifest_mgr = manifest_mgr
+        self._checkpoint = {"book_id": book_id}
+        self._sampler.set_output_path(output_base)
+        self._restore_cooling()
+        self._boundary()
 
         # 1. 解析阶段
-        self.sig_status_changed.emit("PARSED")
+        self._status("PARSED")
         self.sig_progress_updated.emit(5.0, "【1/8 结构解析 (PARSED)】正在解析电子书正文结构与章节...")
         if book_path.suffix.lower() == ".pdf":
             parser = PDFParser()
@@ -277,20 +347,23 @@ class ProductionWorker(QThread):
             parser = EPUBParser()
             structure = parser.parse(str(book_path))
 
+        self._boundary()
         # 2. 清洗阶段
-        self.sig_status_changed.emit("CLEANED")
+        self._status("CLEANED")
         self.sig_progress_updated.emit(10.0, "【2/8 正文清洗 (CLEANED)】正在执行确定性正文清洗...")
         cleaner = TextCleaner()
         cleaned_structure, cleaning_report = cleaner.clean(structure, skip_english=skip_english)
 
+        self._boundary()
         # 3. 校验阶段
-        self.sig_status_changed.emit("VALIDATED")
+        self._status("VALIDATED")
         self.sig_progress_updated.emit(15.0, "【3/8 质量校验 (VALIDATED)】正在校验正文字符完整性...")
         validator = TextValidator(config.get("validation", {}))
         val_report = validator.validate(cleaned_structure, cleaning_report)
         if not val_report.passed:
             logger.warning(f"正文清洗校验发现问题: {val_report.issues}")
 
+        self._boundary()
         # 4. 分集规划阶段 (阶段一)
         split_mode = cfg.get("split_mode", "by_duration")
         planner = EpisodePlanner(target_duration_mins=target_ep_mins)
@@ -310,7 +383,7 @@ class ProductionWorker(QThread):
                 logger.warning(f"自然章节范围生产：未能匹配到第 {start_ch} 至第 {end_ch} 章，将保持全书规划")
 
         self.sig_plan_ready.emit(plan)
-        self.sig_status_changed.emit("PLANNED")
+        self._status("PLANNED")
         self.sig_progress_updated.emit(20.0, f"【4/8 规划就绪 (PLANNED)】共规划 {plan.total_episodes} 集 (模式: {split_mode})，即将启动语音合成...")
 
         # 5. SpeechUnit 构建
@@ -319,26 +392,22 @@ class ProductionWorker(QThread):
         manifest_mgr.save_tts_manifest(chunks)
 
         # 6. 真实 TTS 循环与分集生产
-        self.sig_status_changed.emit("TTS_GENERATING")
+        self._status("TTS_GENERATING")
 
         subtitle_engine = NativeTTSSubtitleEngine()
         audio_mixer = AudioMixer(voice_volume_percent=voice_vol, bgm_volume_percent=bgm_vol)
         video_composer = VideoComposer(layout_name=layout_name)
 
-        episodes_manifests: List[EpisodeManifest] = []
+        episodes_manifests: List[EpisodeManifest] = manifest_mgr.load_episode_manifest() or []
         production_start_time = time.time()
 
         for ep in plan.episodes:
-            if self._pause_requested:
-                manifest_mgr.save_episode_manifest(episodes_manifests)
-                self.sig_status_changed.emit("PAUSED")
-                self.sig_task_paused.emit()
-                return
-
+            self._boundary()
+            self._checkpoint["episode_order"] = ep.episode_order
             # 【为什么这样设计】
             # 响应问题一：连续多集生产时，每一集进入语音合成必须向前端显式广播 TTS_GENERATING 状态，
             # 驱动前端管线图从上一集完成的“混音渲染”或“视频合成”状态精准回退重置至“语音合成”高亮状态。
-            self.sig_status_changed.emit("TTS_GENERATING")
+            self._status("TTS_GENERATING")
 
             ep_order = ep.episode_order
             self.sig_progress_updated.emit(
@@ -377,17 +446,19 @@ class ProductionWorker(QThread):
 
             # 【工程切片目录准备】
             # 基于确定性 MD5 哈希的 book_dir，断点续跑 100% 精确命中已有音频切片
-            ep_units_dir = book_dir / f"ep_{ep_order:02d}_units"
+            synth_key = synthesis_fingerprint(ep_units, dict(cfg, tts_settings=config.get("tts", {})))
+            ep_units_dir = book_dir / "speech_cache" / synth_key
+            self._checkpoint["synthesis_key"] = synth_key
             ep_units_dir.mkdir(parents=True, exist_ok=True)
 
             if storybook_enabled and ep_units:
                 scene_splitter = SceneSplitter(paragraphs_per_scene=paragraphs_per_scene)
-                scenes_cache_file = book_dir / f"ep_{ep_order:02d}_scenes.json"
+                scene_key = hashlib.sha256(f"{synth_key}:{paragraphs_per_scene}:{storybook_style}:{context_scenes}:{storybook_llm_model}".encode()).hexdigest()[:16]
+                scenes_cache_file = book_dir / f"scenes_{scene_key}.json"
 
                 # 优先尝试从本地工程缓存秒级载入分镜 Prompt，杜绝每次重启重新提炼 1~2 分钟
                 if scenes_cache_file.exists() and scenes_cache_file.stat().st_size > 100:
                     try:
-                        import json
                         with open(scenes_cache_file, "r", encoding="utf-8") as f:
                             c_data = json.load(f)
                         storybook_scenes = [ScenePlan(**d) for d in c_data]
@@ -432,7 +503,6 @@ class ProductionWorker(QThread):
 
                             # 提炼完毕立即落盘保存为 ep_XX_scenes.json
                             try:
-                                import json
                                 with open(scenes_cache_file, "w", encoding="utf-8") as f_sc:
                                     json.dump([s.to_dict() for s in storybook_scenes], f_sc, ensure_ascii=False, indent=2)
                                 logger.info(f"第 {ep_order:02d} 集分镜 Prompt 已成功持久化落盘至: {scenes_cache_file.name}")
@@ -451,6 +521,24 @@ class ProductionWorker(QThread):
                     prompt_thread = threading.Thread(target=_run_prompt_step_a, daemon=True)
                     prompt_thread.start()
 
+            safety_scenes = SceneSplitter(paragraphs_per_scene=paragraphs_per_scene).split_by_text(ep_units) if storybook_enabled else []
+            scene_ends = {scene.end_unit_index for scene in safety_scenes}
+            checked_through = -1
+            def unit_finished(index, unit):
+                nonlocal checked_through
+                if not math.isfinite(unit.audio_duration) or unit.audio_duration <= 0:
+                    raise ValueError(f"语音切片{index+1}缺少有效音频时长")
+                self._checkpoint["last_unit"] = unit.unit_id
+                self._poll_controls()
+                if not storybook_enabled or index in scene_ends or index == len(ep_units)-1:
+                    for audio in unit_wavs[checked_through+1:index+1]:
+                        if not AudioQC().check_wav(audio).get("valid", False):
+                            raise ValueError(f"语音切片质检失败，不能将分镜标记为完成：{audio.name}")
+                    checked_through = index
+                    self._checkpoint["next_unit_index"] = index + 1
+                    self._save_control_checkpoint("RUNNING")
+                    self._boundary()
+
             tts_engine_name = str(cfg.get("tts_engine", "f5")).lower()
             voice_profile = cfg.get("voice_profile", "E1")
 
@@ -464,367 +552,396 @@ class ProductionWorker(QThread):
                 for idx in range(total_u)
             )
 
-            if all_units_ready:
-                # 【零开销跳过机制】全部切片已存在，彻底跳过 TTS 引擎加载与会话冷启动，0秒直通！
-                logger.info(f"【断点秒级复用】第 {ep_order:02d} 集全部 {total_u} 句切片音频已 100% 就绪，跳过 TTS 引擎冷启动！")
-                cur_tts_text = f"【4/12 语音合成】第 {ep_order:02d} 集 · 全部 {total_u} 句音频切片已就绪，秒级载入！"
-                self.sig_progress_updated.emit(65.0, cur_tts_text)
-                if storybook_enabled:
-                    self.sig_dual_progress_updated.emit(cur_tts_text, cur_prompt_text)
+            try:
+                if all_units_ready:
+                    # 【零开销跳过机制】全部切片已存在，彻底跳过 TTS 引擎加载与会话冷启动，0秒直通！
+                    logger.info(f"【断点秒级复用】第 {ep_order:02d} 集全部 {total_u} 句切片音频已 100% 就绪，跳过 TTS 引擎冷启动！")
+                    cur_tts_text = f"【4/12 语音合成】第 {ep_order:02d} 集 · 全部 {total_u} 句音频切片已就绪，秒级载入！"
+                    self.sig_progress_updated.emit(65.0, cur_tts_text)
+                    if storybook_enabled:
+                        self.sig_dual_progress_updated.emit(cur_tts_text, cur_prompt_text)
 
-                from ..audio.ffmpeg_utils import get_audio_info
-                for idx, u in enumerate(ep_units):
-                    u_wav = (ep_units_dir / f"unit_{idx:04d}.wav").resolve()
-                    info = get_audio_info(u_wav)
-                    u.audio_duration = info.get("duration", max(1.5, len(u.text) * 0.2))
-                    unit_wavs.append(u_wav)
+                    from ..audio.ffmpeg_utils import get_audio_info
+                    for idx, u in enumerate(ep_units):
+                        u_wav = (ep_units_dir / f"unit_{idx:04d}.wav").resolve()
+                        info = get_audio_info(u_wav)
+                        u.audio_duration = info.get("duration", max(1.5, len(u.text) * 0.2))
+                        unit_wavs.append(u_wav)
+                        unit_finished(idx, u)
 
-                if prompt_thread and prompt_thread.is_alive():
-                    logger.info("音频切片已就绪，正在等待 CPU 场景意象提炼线程汇合...")
-                    prompt_thread.join(timeout=180.0)
-            else:
-                tts_router = create_tts_router(config.get("tts", {}))
-                tts_backend = tts_router.get_backend(tts_engine_name, raise_if_missing=False)
-                if tts_backend:
-                    logger.info(f"正在使用 TTS 引擎 [{tts_engine_name}] (音色: {voice_profile}, 步数: {nfe_step}, CFG: {cfg_strength}) 启动分集合成会话")
-                    tts_backend.start_session()
-                    try:
-                        for idx, u in enumerate(ep_units):
-                            if self._pause_requested:
-                                break
-                            u_wav = (ep_units_dir / f"unit_{idx:04d}.wav").resolve()
-                            if not u_wav.exists() or u_wav.stat().st_size <= 1000:
-                                clean_text = u.text.strip().replace('\n', ' ')
-                                tot_chars = len(clean_text)
-                                # 【为什么这样设计】
-                                # 响应问题二：移除 22 字的源头硬编码腰斩截断，
-                                # 后端对外发射完整的正文文本（仅保留 200 字极端超长兜底保护），
-                                # 状态栏在右侧拥有 800~1100px 广阔空间，由前端通过 QFontMetrics 动态测量与自适应展开。
-                                if tot_chars > 200:
-                                    preview_fmt = f"{clean_text[:90]}...{clean_text[-90:]}(共{tot_chars}字)"
-                                else:
-                                    preview_fmt = f"{clean_text}(共{tot_chars}字)"
-
-                                cur_tts_text = f"【4/12 语音合成 (GPU)】第 {ep_order:02d} 集 · 朗读 {idx+1}/{total_u} 句 | 原文: \"{preview_fmt}\""
-                                self.sig_progress_updated.emit(
-                                    20.0 + ((idx + 1) / max(1, total_u)) * 45.0,
-                                    cur_tts_text
-                                )
-                                if storybook_enabled:
-                                    self.sig_dual_progress_updated.emit(cur_tts_text, cur_prompt_text)
-
-                                # 【核心设计：读显分离】
-                                # u.text 严格保持阿拉伯数字格式，确保 SRT 字幕与画面保持原书排版；
-                                # 送入 F5 大模型推理时使用 normalize_for_tts 转换为标准中文口语词，彻底杜绝英文读音
-                                from ..text.normalizer import normalize_for_tts
-                                spoken_text = normalize_for_tts(u.text)
-
-                                res = tts_backend.synthesize(
-                                    text=spoken_text,
-                                    output_path=u_wav,
-                                    voice=voice_profile,
-                                    speed=speech_speed,
-                                    options={
-                                        "nfe_step": nfe_step,
-                                        "cfg_strength": cfg_strength
-                                    }
-                                )
-                                from ..audio.ffmpeg_utils import get_audio_info
-                                if u_wav.exists() and u_wav.stat().st_size > 100:
-                                    phys_info = get_audio_info(u_wav)
-                                    if phys_info.get("duration", 0) > 0:
-                                        u.audio_duration = phys_info["duration"]
-                                    elif res.success and res.duration > 0:
-                                        u.audio_duration = res.duration
-                                    else:
-                                        u.audio_duration = max(1.5, len(u.text) * 0.2)
-                                else:
-                                    if res.success and res.duration > 0:
-                                        u.audio_duration = res.duration
-                                    else:
-                                        u.audio_duration = max(1.5, len(u.text) * 0.2)
-                            else:
-                                from ..audio.ffmpeg_utils import get_audio_info
-                                info = get_audio_info(u_wav)
-                                u.audio_duration = info.get("duration", max(1.5, len(u.text) * 0.2))
-                            unit_wavs.append(u_wav)
-
-                            # 【GPU 硬件温控安全挂起与自愈机制】
-                            # 【为什么这样设计】
-                            # 严格落实用户三大温控准则：
-                            # 1. 触发上限后必须等待当前语音切片（Unit）完整落盘，再进入挂起，杜绝半截破损音频；
-                            # 2. 挂起冷却期间，绝不中断整集上下文（处于当前集内循环），无缝衔接下一句，杜绝把一集中断成两半；
-                            # 3. 必须同时满足“冷却时间达到最小冷却时间”与“当前温度降至复工温度以下”，方可自动唤醒恢复流水线！
-                            if gpu_protect_enabled:
-                                cur_temp = _query_gpu_temperature()
-                                if cur_temp is not None and cur_temp >= gpu_temp_limit:
-                                    logger.warning(
-                                        f"GPU 核心温度达到 {cur_temp:.1f}°C (>= 上限 {gpu_temp_limit}°C)，"
-                                        f"单句 #{idx+1} 音频已完整落盘，执行安全挂起冷却 (至少 {gpu_cooling_minutes} 分钟且直至 <= {gpu_temp_resume}°C)..."
-                                    )
-                                    self.sig_status_changed.emit("COOLING")
-                                    cool_start_time = time.time()
-                                    min_cool_secs = gpu_cooling_minutes * 60.0
-
-                                    while not self._pause_requested:
-                                        time.sleep(3)
-                                        now_temp = _query_gpu_temperature() or 0.0
-                                        elapsed_cool = time.time() - cool_start_time
-                                        remain_cool_secs = max(0.0, min_cool_secs - elapsed_cool)
-
-                                        temp_str = f"{now_temp:.1f}°C" if now_temp > 0 else "N/A"
-                                        status_msg = (
-                                            f"【GPU降温保护中】核心温: {temp_str} (目标<={gpu_temp_resume}°C) | "
-                                            f"强制冷却剩余: {int(remain_cool_secs)}秒"
-                                        )
-                                        self.sig_progress_updated.emit(-1.0, status_msg)
-
-                                        if elapsed_cool >= min_cool_secs and (now_temp <= 0 or now_temp <= gpu_temp_resume):
-                                            logger.info(
-                                                f"GPU 温度已降至 {temp_str} 且满足最小冷却时长 {gpu_cooling_minutes} 分钟，"
-                                                f"自动无缝恢复第 {ep_order:02d} 集语音合成！"
-                                            )
-                                            self.sig_status_changed.emit("TTS_GENERATING")
-                                            break
-
-                                    if self._pause_requested:
-                                        break
-                    finally:
-                        tts_backend.stop_session()
-                        if prompt_thread and prompt_thread.is_alive():
-                            logger.info("语音合成结束，正在等待 CPU 场景意象提炼线程汇合...")
-                            prompt_thread.join(timeout=180.0)
-                        if prompt_thread_err:
-                            logger.error(f"CPU 场景意象预提炼发生异常: {prompt_thread_err}")
-                        # 主动释放 Qwen 进程，释放 ~4GB 物理内存，为下游 SD 绘图腾出充裕空间
-                        if illustration_mgr and hasattr(illustration_mgr, "release_llm_resources"):
-                            illustration_mgr.release_llm_resources()
+                    if prompt_thread and prompt_thread.is_alive():
+                        logger.info("音频切片已就绪，正在等待 CPU 场景意象提炼线程汇合...")
+                        prompt_thread.join(timeout=180.0)
                 else:
-                    for u in ep_units:
-                        if u.audio_duration <= 0:
-                            u.audio_duration = max(1.5, len(u.text) * 0.2)
+                    tts_router = create_tts_router(config.get("tts", {}))
+                    tts_backend = tts_router.get_backend(tts_engine_name, raise_if_missing=False)
+                    if tts_backend:
+                        logger.info(f"正在使用 TTS 引擎 [{tts_engine_name}] (音色: {voice_profile}, 步数: {nfe_step}, CFG: {cfg_strength}) 启动分集合成会话")
+                        tts_backend.start_session()
+                        try:
+                            for idx, u in enumerate(ep_units):
+                                u_wav = (ep_units_dir / f"unit_{idx:04d}.wav").resolve()
+                                if not u_wav.exists() or u_wav.stat().st_size <= 1000:
+                                    clean_text = u.text.strip().replace('\n', ' ')
+                                    tot_chars = len(clean_text)
+                                    # 【为什么这样设计】
+                                    # 响应问题二：移除 22 字的源头硬编码腰斩截断，
+                                    # 后端对外发射完整的正文文本（仅保留 200 字极端超长兜底保护），
+                                    # 状态栏在右侧拥有 800~1100px 广阔空间，由前端通过 QFontMetrics 动态测量与自适应展开。
+                                    if tot_chars > 200:
+                                        preview_fmt = f"{clean_text[:90]}...{clean_text[-90:]}(共{tot_chars}字)"
+                                    else:
+                                        preview_fmt = f"{clean_text}(共{tot_chars}字)"
+
+                                    cur_tts_text = f"【4/12 语音合成 (GPU)】第 {ep_order:02d} 集 · 朗读 {idx+1}/{total_u} 句 | 原文: \"{preview_fmt}\""
+                                    self.sig_progress_updated.emit(
+                                        20.0 + ((idx + 1) / max(1, total_u)) * 45.0,
+                                        cur_tts_text
+                                    )
+                                    if storybook_enabled:
+                                        self.sig_dual_progress_updated.emit(cur_tts_text, cur_prompt_text)
+
+                                    # 【核心设计：读显分离】
+                                    # u.text 严格保持阿拉伯数字格式，确保 SRT 字幕与画面保持原书排版；
+                                    # 送入 F5 大模型推理时使用 normalize_for_tts 转换为标准中文口语词，彻底杜绝英文读音
+                                    from ..text.normalizer import normalize_for_tts
+                                    spoken_text = normalize_for_tts(u.text)
+
+                                    res = tts_backend.synthesize(
+                                        text=spoken_text,
+                                        output_path=u_wav,
+                                        voice=voice_profile,
+                                        speed=speech_speed,
+                                        options={
+                                            "nfe_step": nfe_step,
+                                            "cfg_strength": cfg_strength
+                                        }
+                                    )
+                                    from ..audio.ffmpeg_utils import get_audio_info
+                                    if u_wav.exists() and u_wav.stat().st_size > 100:
+                                        phys_info = get_audio_info(u_wav)
+                                        if phys_info.get("duration", 0) > 0:
+                                            u.audio_duration = phys_info["duration"]
+                                        elif res.success and res.duration > 0:
+                                            u.audio_duration = res.duration
+                                        else:
+                                            u.audio_duration = max(1.5, len(u.text) * 0.2)
+                                    else:
+                                        if res.success and res.duration > 0:
+                                            u.audio_duration = res.duration
+                                        else:
+                                            u.audio_duration = max(1.5, len(u.text) * 0.2)
+                                else:
+                                    from ..audio.ffmpeg_utils import get_audio_info
+                                    info = get_audio_info(u_wav)
+                                    u.audio_duration = info.get("duration", max(1.5, len(u.text) * 0.2))
+                                unit_wavs.append(u_wav)
+
+                                unit_finished(idx, u)
+                        finally:
+                            tts_backend.stop_session()
+                            if prompt_thread and prompt_thread.is_alive():
+                                logger.info("语音合成结束，正在等待 CPU 场景意象提炼线程汇合...")
+                                prompt_thread.join(timeout=180.0)
+                            if prompt_thread_err:
+                                logger.error(f"CPU 场景意象预提炼发生异常: {prompt_thread_err}")
+                            # 主动释放 Qwen 进程，释放 ~4GB 物理内存，为下游 SD 绘图腾出充裕空间
+                            if illustration_mgr and hasattr(illustration_mgr, "release_llm_resources"):
+                                illustration_mgr.release_llm_resources()
+                    else:
+                        for u in ep_units:
+                            if u.audio_duration <= 0:
+                                u.audio_duration = max(1.5, len(u.text) * 0.2)
+
+            finally:
+                if prompt_thread and prompt_thread.is_alive():
+                    prompt_thread.join(timeout=180.0)
+                    if prompt_thread.is_alive():
+                        raise RuntimeError("意象预提炼尚未结束，不能释放资源并启动下一阶段")
+                if illustration_mgr and hasattr(illustration_mgr, "release_llm_resources"):
+                    illustration_mgr.release_llm_resources()
 
             # 恢复单行状态并进入时序与字幕节点
             self.sig_dual_progress_updated.emit("", "")
-            self.sig_status_changed.emit("SUBTITLE_SYNC")
+            self._status("SUBTITLE_SYNC")
             self.sig_progress_updated.emit(70.0, f"【6/12 时序与字幕】正在对齐生成第 {ep_order:02d} 集双语字幕并绑定分镜真实时间轴...")
             sub_items = subtitle_engine.align(ep_units)
 
             # Step B: 毫秒级绑定真实音频起止时间戳
             if storybook_enabled and storybook_scenes and scene_splitter:
-                storybook_scenes = scene_splitter.bind_timestamps(storybook_scenes, sub_items)
+                cursor = 0.0
+                unit_times = []
+                for unit in ep_units:
+                    unit_times.append(SimpleNamespace(start_time=cursor, end_time=cursor+unit.audio_duration))
+                    cursor += unit.audio_duration
+                storybook_scenes = scene_splitter.bind_timestamps(storybook_scenes, unit_times)
 
-            # 计算单集物理时长（秒）并换算为分钟（不足 1 分钟四舍五入保底 1m）
-            duration_secs = sub_items[-1].end_time if sub_items else 0.0
-            dur_mins = max(1, int(round(duration_secs / 60.0)))
+            self._boundary()
+            chapter_units, chapter_wavs, chapter_scenes = ep_units, unit_wavs, storybook_scenes
+            render_inputs = {key: cfg.get(key) for key in ("video_layout", "cover_mode", "cover_path", "bgm_path", "main_title", "voice_volume_percent", "bgm_volume_percent", "storybook_enabled", "paragraphs_per_scene", "storybook_style", "storybook_image_ratio", "storybook_llm_model", "use_lcm", "enable_upscale", "context_scenes")}
+            for key in ("cover_path", "bgm_path"):
+                path = Path(str(cfg.get(key) or ""))
+                if path.is_file():
+                    stat = path.stat()
+                    render_inputs[key] = [str(path.resolve()), stat.st_size, stat.st_mtime_ns]
+            render_key = hashlib.sha256(json.dumps(render_inputs, sort_keys=True).encode()).hexdigest()[:10]
+            limit_enabled = split_mode == "by_chapter" and bool(cfg.get("chapter_max_duration_enabled", False))
+            max_seconds = float(cfg.get("chapter_max_duration_minutes", 60)) * 60
+            ranges = unit_ranges(chapter_units, max_seconds) if limit_enabled else [(0, len(chapter_units))]
+            manifest_mgr._atomic_write(book_dir / f"episode_{ep_order:02d}_segments.json", {
+                "synthesis_key": synth_key, "limited": limit_enabled, "max_seconds": max_seconds if limit_enabled else None,
+                "ranges": [{"start": lo, "end": hi, "unit_ids": [u.unit_id for u in chapter_units[lo:hi]]} for lo, hi in ranges]})
+            for part_number, (lo, hi) in enumerate(ranges, 1):
+                self._boundary()
+                ep_units, unit_wavs = chapter_units[lo:hi], chapter_wavs[lo:hi]
+                storybook_scenes = segment_scenes(chapter_scenes, lo, hi, chapter_units) if limit_enabled else chapter_scenes
+                suffix = ("上" if part_number == 1 else "下") if len(ranges) == 2 else f"第{part_number}段"
+                part_tag = f"_限长{max_seconds/60:g}m_{synth_key[:8]}_{render_key}_{suffix}" if limit_enabled else ""
+                chapter_name = sanitize_filename(ep.chapter_titles[0])[:60] if limit_enabled and ep.chapter_titles else ""
+                clean_ch = f"第{ep_order:02d}集" + ("_"+chapter_name if chapter_name else "") + part_tag
+                part_id = f"episode_{ep_order:02d}" + part_tag
+                part_subtitle = ep.subtitle + (f" · {suffix}" if limit_enabled and len(ranges)>1 else "")
+                work_dir = book_dir / "render_work" / (part_id + "_" + synth_key + "_" + render_key)
+                work_dir.mkdir(parents=True, exist_ok=True)
+                expected_duration = sum(unit.audio_duration for unit in ep_units)
+                expect_video = bool(storybook_enabled or (cover_path and Path(cover_path).is_file()))
+                if limit_enabled and any(
+                    old.episode_id == part_id and self._completed_part_valid(old, expected_duration, expect_video)
+                    for old in episodes_manifests
+                ):
+                    logger.info("复用已完成的限长分段：%s", part_id)
+                    continue
+                ep_audio_path, ep_ass_path = work_dir / "mixed.m4a", work_dir / "subtitles.ass"
+                ep_mp4_path = ""
+                sub_items = subtitle_engine.align(ep_units)
+                # 计算单集物理时长（秒）并换算为分钟（不足 1 分钟四舍五入保底 1m）
+                duration_secs = sub_items[-1].end_time if sub_items else 0.0
+                dur_mins = max(1, int(round(duration_secs / 60.0)))
 
-            # 【为什么这样设计】
-            # 响应用户需求 1：
-            # 1. 取消自建 subtitles 子目录，直接在用户指定的 output_base 根目录平铺输出；
-            # 2. 字幕命名规范：书名_章节_字幕_[commit号].srt（其中书名去除书名号）；
-            # 3. 响应用户技术疑问：彻底删除重复导出的 transcript.srt，仅保留 1 份标准时间轴字幕。
-            ep_srt_path = output_base / f"{clean_book}_{clean_ch}_字幕_[{commit_hash}].srt"
-            subtitle_engine.export_srt(sub_items, str(ep_srt_path))
+                # 【为什么这样设计】
+                # 响应用户需求 1：
+                # 1. 取消自建 subtitles 子目录，直接在用户指定的 output_base 根目录平铺输出；
+                # 2. 字幕命名规范：书名_章节_字幕_[commit号].srt（其中书名去除书名号）；
+                # 3. 响应用户技术疑问：彻底删除重复导出的 transcript.srt，仅保留 1 份标准时间轴字幕。
+                ep_srt_path = output_base / f"{clean_book}_{clean_ch}_字幕_[{commit_hash}].srt"
+                subtitle_engine.export_srt(sub_items, str(ep_srt_path))
 
-            # 内部渲染用的 ass 字幕存入内部工程目录 book_dir，不污染用户指定的交付根目录
-            subtitle_engine.export_ass(sub_items, str(ep_ass_path), layout=layout_name)
+                # 内部渲染用的 ass 字幕存入内部工程目录 book_dir，不污染用户指定的交付根目录
+                subtitle_engine.export_ass(sub_items, str(ep_ass_path), layout=layout_name)
 
-            # 音频拼接与质检
-            # 【为什么这样设计】
-            # 坚决贯彻“零假冒、零静默兜底”的安全原则。若任何语音片段未能成功生成，
-            # 或拼接后质检发现全静音/时长异常，严禁伪造静音糊弄下游混音与视频，必须立即报错熔断。
-            ep_voice_tmp = book_dir / f"episode_{ep_order:02d}_voice.wav"
-            # 【零缺失强校验】切片总数必须 100% 严格匹配本集句数，绝不允许漏单句拼出残损音频
-            if len(unit_wavs) != len(ep_units):
-                missing_cnt = len(ep_units) - len(unit_wavs)
-                err_msg = f"第 {ep_order:02d} 集语音切片严重缺失：期望 {len(ep_units)} 句，实际仅收集到 {len(unit_wavs)} 句！"
-                logger.error(err_msg)
-                self.sig_status_changed.emit("ERROR")
-                self.sig_error.emit("TTS_SYNTHESIS_FAILED", err_msg)
-                return
-
-            if unit_wavs and all(w.exists() for w in unit_wavs):
-                concat_wavs(unit_wavs, ep_voice_tmp)
-                qc = AudioQC()
-                qc_res = qc.check_wav(ep_voice_tmp)
-                logger.info(f"第 {ep_order} 集音频质检报告: 有效性={qc_res.get('valid')}, 时长={qc_res.get('duration')}s")
-                if not qc_res.get("valid", False) or qc_res.get("duration", 0.0) <= 0.1:
-                    err_msg = f"第 {ep_order:02d} 集音频拼接质检未通过：生成音频全静音或损坏！"
+                # 音频拼接与质检
+                # 【为什么这样设计】
+                # 坚决贯彻“零假冒、零静默兜底”的安全原则。若任何语音片段未能成功生成，
+                # 或拼接后质检发现全静音/时长异常，严禁伪造静音糊弄下游混音与视频，必须立即报错熔断。
+                ep_voice_tmp = work_dir / "voice.wav"
+                # 【零缺失强校验】切片总数必须 100% 严格匹配本集句数，绝不允许漏单句拼出残损音频
+                if len(unit_wavs) != len(ep_units):
+                    missing_cnt = len(ep_units) - len(unit_wavs)
+                    err_msg = f"第 {ep_order:02d} 集语音切片严重缺失：期望 {len(ep_units)} 句，实际仅收集到 {len(unit_wavs)} 句！"
                     logger.error(err_msg)
-                    self.sig_status_changed.emit("ERROR")
-                    self.sig_error.emit("AUDIO_QC_FAILED", err_msg)
+                    self._status("ERROR")
+                    self.sig_error.emit("TTS_SYNTHESIS_FAILED", err_msg)
                     return
-            else:
-                missing_cnt = sum(1 for w in unit_wavs if not w.exists())
-                err_msg = f"第 {ep_order:02d} 集语音合成失败：共有 {missing_cnt}/{len(unit_wavs)} 个音频切片未能生成！"
-                logger.error(err_msg)
-                self.sig_status_changed.emit("ERROR")
-                self.sig_error.emit("TTS_SYNTHESIS_FAILED", err_msg)
-                return
 
-            # 无论是否渲染视频，均将高品质单集音频交付至最终产物目录
-            # 命名结构：书名_章节_时长_[commit号].wav（其中书名去除书名号，时长按分钟计算）
-            ep_final_wav = output_base / f"{clean_book}_{clean_ch}_{dur_mins}m_[{commit_hash}].wav"
-            if ep_voice_tmp.exists():
-                import shutil
-                shutil.copy2(ep_voice_tmp, ep_final_wav)
-
-            # 音频混音与视频合成（按严格物理时间线执行）
-            should_render_video = storybook_enabled or (cover_path and Path(cover_path).exists())
-
-            if should_render_video:
-                if storybook_enabled:
-                    # ====== 模式 A: 小人书分镜沉浸式流水线 (严格物理时间线) ======
-                    # 【为什么这样设计】
-                    # 1. 严格落实真实物理时间线：Prompt 已由 Step A 在 TTS 期间预先提炼完毕；
-                    #    此处直接调度 SD 1.5 进行批量绘图与超分辨率放大，节省 1~2 分钟纯等待时间；
-                    # 2. 严格落实质量红线：若大模型不可用坚决报错阻断，绝不自欺欺人生产毫无价值的文字框废片；
-                    # 3. 严格落实命名规范：带插画的小人书 MP4 注入 '_P_' 标记，不带插画的文件保持原版命名不变。
-
-                    # 节点 7: 大模型绘图 (ILLUSTRATING)
-                    self.sig_status_changed.emit("ILLUSTRATING")
-                    self.sig_progress_updated.emit(80.0, f"【7/12 大模型绘图】正在调度 SD 1.5 批量绘制场景插画...")
-
-                    # 确保 scenes 与 illustration_mgr 就绪
-                    if not storybook_scenes:
-                        fallback_splitter = SceneSplitter(paragraphs_per_scene=paragraphs_per_scene)
-                        storybook_scenes = fallback_splitter.split(ep_units)
-                    if not illustration_mgr:
-                        illustration_mgr = IllustrationManager(
-                            cache_dir=output_base / "illustrations_cache",
-                            default_style=storybook_style,
-                            llm_model=storybook_llm_model,
-                            use_lcm=use_lcm,
-                            upscale_enabled=enable_upscale,
-                            aspect_ratio="landscape" if "landscape" in layout_name else "portrait",
-                            context_scenes=context_scenes
-                        )
-                    book_illus_dir = book_dir / f"ep_{ep_order:02d}_illustrations"
-
-                    def _on_illus_progress(cur, tot, msg):
-                        pct = 80.0 + (cur / max(1, tot)) * 6.0
-                        self.sig_progress_updated.emit(pct, msg)
-
-                    def _on_status_msg(msg):
-                        logger.info(msg)
-                        self.sig_progress_updated.emit(80.0, msg)
-
-                    try:
-                        scenes = illustration_mgr.prepare_scene_illustrations(
-                            scenes=storybook_scenes,
-                            book_illustrations_dir=book_illus_dir,
-                            style=storybook_style,
-                            progress_callback=_on_illus_progress,
-                            status_callback=_on_status_msg
-                        )
-                    except RuntimeError as re:
-                        logger.error(f"小人书插画生成阻断: {re}")
-                        self.sig_status_changed.emit("ERROR")
-                        self.sig_error.emit("STORYBOOK_ILLUSTRATION_FAILED", str(re))
+                if unit_wavs and all(w.exists() for w in unit_wavs):
+                    concat_wavs(unit_wavs, ep_voice_tmp)
+                    qc = AudioQC()
+                    qc_res = qc.check_wav(ep_voice_tmp)
+                    logger.info(f"第 {ep_order} 集音频质检报告: 有效性={qc_res.get('valid')}, 时长={qc_res.get('duration')}s")
+                    if not qc_res.get("valid", False) or qc_res.get("duration", 0.0) <= 0.1:
+                        err_msg = f"第 {ep_order:02d} 集音频拼接质检未通过：生成音频全静音或损坏！"
+                        logger.error(err_msg)
+                        self._status("ERROR")
+                        self.sig_error.emit("AUDIO_QC_FAILED", err_msg)
                         return
+                else:
+                    missing_cnt = sum(1 for w in unit_wavs if not w.exists())
+                    err_msg = f"第 {ep_order:02d} 集语音合成失败：共有 {missing_cnt}/{len(unit_wavs)} 个音频切片未能生成！"
+                    logger.error(err_msg)
+                    self._status("ERROR")
+                    self.sig_error.emit("TTS_SYNTHESIS_FAILED", err_msg)
+                    return
 
-                    # 节点 8: 分辨率增强 (UPSCALING)
-                    self.sig_status_changed.emit("UPSCALING")
-                    self.sig_progress_updated.emit(86.0, f"【8/12 分辨率增强】已完成场景原画 1024x1536 智能超分辨率增强...")
+                # 无论是否渲染视频，均将高品质单集音频交付至最终产物目录
+                # 命名结构：书名_章节_时长_[commit号].wav（其中书名去除书名号，时长按分钟计算）
+                ep_final_wav = output_base / f"{clean_book}_{clean_ch}_{dur_mins}m_[{commit_hash}].wav"
+                if ep_voice_tmp.exists():
+                    import shutil
+                    shutil.copy2(ep_voice_tmp, ep_final_wav)
 
-                    # 节点 9: 智能混音 (AUDIO_MIXING)
-                    from ..audio.ffmpeg_utils import get_audio_info
-                    is_mix_valid = False
-                    if ep_audio_path.exists() and ep_audio_path.stat().st_size > 10240:
-                        mixed_info = get_audio_info(ep_audio_path)
-                        mixed_dur = mixed_info.get("duration", 0.0)
-                        if abs(mixed_dur - duration_secs) <= 5.0:
-                            is_mix_valid = True
+                self._boundary()
+                # 音频混音与视频合成（按严格物理时间线执行）
+                should_render_video = storybook_enabled or (cover_path and Path(cover_path).exists())
 
-                    if is_mix_valid:
-                        logger.info(f"第 {ep_order:02d} 集混音音频已就绪且完整 ({ep_audio_path.name})，秒级复用！")
-                        self.sig_progress_updated.emit(88.0, f"【9/12 智能混音】混音音频已就绪，秒级跳过！")
+                if should_render_video:
+                    if storybook_enabled:
+                        # ====== 模式 A: 小人书分镜沉浸式流水线 (严格物理时间线) ======
+                        # 【为什么这样设计】
+                        # 1. 严格落实真实物理时间线：Prompt 已由 Step A 在 TTS 期间预先提炼完毕；
+                        #    此处直接调度 SD 1.5 进行批量绘图与超分辨率放大，节省 1~2 分钟纯等待时间；
+                        # 2. 严格落实质量红线：若大模型不可用坚决报错阻断，绝不自欺欺人生产毫无价值的文字框废片；
+                        # 3. 严格落实命名规范：带插画的小人书 MP4 注入 '_P_' 标记，不带插画的文件保持原版命名不变。
+
+                        # 节点 7: 大模型绘图 (ILLUSTRATING)
+                        self._status("ILLUSTRATING")
+                        self.sig_progress_updated.emit(80.0, f"【7/12 大模型绘图】正在调度 SD 1.5 批量绘制场景插画...")
+
+                        # 确保 scenes 与 illustration_mgr 就绪
+                        if not storybook_scenes:
+                            fallback_splitter = SceneSplitter(paragraphs_per_scene=paragraphs_per_scene)
+                            storybook_scenes = fallback_splitter.split(ep_units)
+                        if not illustration_mgr:
+                            illustration_mgr = IllustrationManager(
+                                cache_dir=output_base / "illustrations_cache",
+                                default_style=storybook_style,
+                                llm_model=storybook_llm_model,
+                                use_lcm=use_lcm,
+                                upscale_enabled=enable_upscale,
+                                aspect_ratio="landscape" if "landscape" in layout_name else "portrait",
+                                context_scenes=context_scenes
+                            )
+                        book_illus_dir = book_dir / f"illustrations_{synth_key}"
+
+                        def _on_illus_progress(cur, tot, msg):
+                            self._boundary()
+                            pct = 80.0 + (cur / max(1, tot)) * 6.0
+                            self.sig_progress_updated.emit(pct, msg)
+
+                        def _on_status_msg(msg):
+                            logger.info(msg)
+                            self.sig_progress_updated.emit(80.0, msg)
+
+                        try:
+                            scenes = illustration_mgr.prepare_scene_illustrations(
+                                scenes=storybook_scenes,
+                                book_illustrations_dir=book_illus_dir,
+                                style=storybook_style,
+                                progress_callback=_on_illus_progress,
+                            status_callback=_on_status_msg,
+                            safe_checkpoint=self._boundary
+                            )
+                        except RuntimeError as re:
+                            logger.error(f"小人书插画生成阻断: {re}")
+                            self._status("ERROR")
+                            self.sig_error.emit("STORYBOOK_ILLUSTRATION_FAILED", str(re))
+                            return
+
+                        # 节点 8: 分辨率增强 (UPSCALING)
+                        self._status("UPSCALING")
+                        self.sig_progress_updated.emit(86.0, f"【8/12 分辨率增强】已完成场景原画 1024x1536 智能超分辨率增强...")
+
+                        # 节点 9: 智能混音 (AUDIO_MIXING)
+                        from ..audio.ffmpeg_utils import get_audio_info
+                        is_mix_valid = False
+                        if ep_audio_path.exists() and ep_audio_path.stat().st_size > 10240:
+                            mixed_info = get_audio_info(ep_audio_path)
+                            mixed_dur = mixed_info.get("duration", 0.0)
+                            if abs(mixed_dur - duration_secs) <= 5.0:
+                                is_mix_valid = True
+
+                        if is_mix_valid:
+                            logger.info(f"第 {ep_order:02d} 集混音音频已就绪且完整 ({ep_audio_path.name})，秒级复用！")
+                            self.sig_progress_updated.emit(88.0, f"【9/12 智能混音】混音音频已就绪，秒级跳过！")
+                        else:
+                            self._status("AUDIO_MIXING")
+                            self.sig_progress_updated.emit(88.0, f"【9/12 智能混音】正在执行人声与背景音乐智能侧链避让混音...")
+                            audio_mixer.mix_episode(
+                                voice_path=ep_voice_tmp,
+                                bgm_path=bgm_path,
+                                output_path=ep_audio_path
+                            )
+
+                        # 导出适配小人书底部容器的专属 ASS 样式字幕 (外挂独立函数，绝不侵入老模块)
+                        storybook_ass_path = work_dir / "storybook.ass"
+                        export_storybook_ass(
+                            sub_items,
+                            str(storybook_ass_path),
+                            layout_name=layout_name,
+                            image_ratio=storybook_image_ratio
+                        )
+
+                        self._boundary()
+                        # 节点 10: 视频合成压制 (VIDEO_RENDERING)
+                        # 小人书带插画视频命名格式严格遵循：{书名}_{章节名}_P_{时长}m_[{commit_hash}].mp4
+                        ep_mp4_path = output_base / f"{clean_book}_{clean_ch}_P_{dur_mins}m_[{commit_hash}].mp4"
+                        self._status("VIDEO_RENDERING")
+                        self.sig_progress_updated.emit(90.0, f"【10/12 视频合成】正在通过 NVENC 硬件加速压制小人书 MP4 视频...")
+                        storybook_composer = StorybookComposer(
+                            layout_name=layout_name,
+                            image_ratio=storybook_image_ratio
+                        )
+                        storybook_composer.render_storybook_video(
+                            scenes=scenes,
+                            audio_path=ep_audio_path,
+                            output_mp4_path=ep_mp4_path,
+                            ass_subtitles_path=storybook_ass_path,
+                            temp_work_dir=work_dir / "storybook_tmp",
+                            layout_name=layout_name,
+                            image_ratio=storybook_image_ratio
+                        )
                     else:
-                        self.sig_status_changed.emit("AUDIO_MIXING")
-                        self.sig_progress_updated.emit(88.0, f"【9/12 智能混音】正在执行人声与背景音乐智能侧链避让混音...")
+                        # ====== 模式 B: 标准单封面/双层毛玻璃视频模式 (100% 保持 4bbfb8c 原版逻辑) ======
+                        # 节点 9: 智能混音
+                        self._status("AUDIO_MIXING")
+                        self.sig_progress_updated.emit(85.0, f"【9/12 智能混音】正在执行人声与背景音乐智能侧链混音...")
                         audio_mixer.mix_episode(
                             voice_path=ep_voice_tmp,
                             bgm_path=bgm_path,
                             output_path=ep_audio_path
                         )
 
-                    # 导出适配小人书底部容器的专属 ASS 样式字幕 (外挂独立函数，绝不侵入老模块)
-                    storybook_ass_path = book_dir / f"episode_{ep_order:02d}_storybook.ass"
-                    export_storybook_ass(
-                        sub_items,
-                        str(storybook_ass_path),
-                        layout_name=layout_name,
-                        image_ratio=storybook_image_ratio
-                    )
+                        self._boundary()
+                        # 节点 10: 视频合成压制 (不带插画的普通封面视频，命名保持原版不变)
+                        ep_mp4_path = output_base / f"{clean_book}_{clean_ch}_{dur_mins}m_[{commit_hash}].mp4"
+                        self._status("VIDEO_RENDERING")
+                        self.sig_progress_updated.emit(90.0, f"【10/12 视频合成】正在调用 GPU 硬件加速压制标准封面 MP4 视频...")
+                        video_composer.render_episode_video(
+                            cover_path=cover_path,
+                            audio_path=ep_audio_path,
+                            main_title=main_title,
+                            subtitle=part_subtitle,
+                            output_mp4_path=ep_mp4_path,
+                            ass_subtitles_path=ep_ass_path,
+                            layout_name=layout_name,
+                            cover_mode=cover_mode
+                        )
 
-                    # 节点 10: 视频合成压制 (VIDEO_RENDERING)
-                    # 小人书带插画视频命名格式严格遵循：{书名}_{章节名}_P_{时长}m_[{commit_hash}].mp4
-                    ep_mp4_path = output_base / f"{clean_book}_{clean_ch}_P_{dur_mins}m_[{commit_hash}].mp4"
-                    self.sig_status_changed.emit("VIDEO_RENDERING")
-                    self.sig_progress_updated.emit(90.0, f"【10/12 视频合成】正在通过 NVENC 硬件加速压制小人书 MP4 视频...")
-                    storybook_composer = StorybookComposer(
-                        layout_name=layout_name,
-                        image_ratio=storybook_image_ratio
-                    )
-                    storybook_composer.render_storybook_video(
-                        scenes=scenes,
-                        audio_path=ep_audio_path,
-                        output_mp4_path=ep_mp4_path,
-                        ass_subtitles_path=storybook_ass_path,
-                        temp_work_dir=book_dir / f"ep_{ep_order:02d}_storybook_tmp",
-                        layout_name=layout_name,
-                        image_ratio=storybook_image_ratio
-                    )
-                else:
-                    # ====== 模式 B: 标准单封面/双层毛玻璃视频模式 (100% 保持 4bbfb8c 原版逻辑) ======
-                    # 节点 9: 智能混音
-                    self.sig_status_changed.emit("AUDIO_MIXING")
-                    self.sig_progress_updated.emit(85.0, f"【9/12 智能混音】正在执行人声与背景音乐智能侧链混音...")
-                    audio_mixer.mix_episode(
-                        voice_path=ep_voice_tmp,
-                        bgm_path=bgm_path,
-                        output_path=ep_audio_path
-                    )
+                    # 节点 11: 成品质检校验 (QUALITY_CHECK)
+                    self._status("QUALITY_CHECK")
+                    self.sig_progress_updated.emit(96.0, f"【11/12 成品质检】正在校验最终成片完整性与音画同步...")
+                    if not ep_mp4_path.exists() or ep_mp4_path.stat().st_size < 10240:
+                        err_msg = f"第 {ep_order:02d} 集最终视频成品质检未通过：文件未生成或损坏！"
+                        logger.error(err_msg)
+                        self._status("ERROR")
+                        self.sig_error.emit("VIDEO_QC_FAILED", err_msg)
+                        return
+                    if limit_enabled:
+                        from ..audio.ffmpeg_utils import get_audio_info
+                        actual_duration = get_audio_info(ep_mp4_path).get("duration", 0)
+                        if actual_duration <= 0 or actual_duration > max_seconds + 0.1:
+                            raise ValueError("成片时长未满足分集最大时长，保留文件供排查，不标记完成")
+                    logger.info(f"第 {ep_order:02d} 集最终视频成品质检合格: {ep_mp4_path.name} ({ep_mp4_path.stat().st_size / 1024 / 1024:.2f} MB)")
 
-                    # 节点 10: 视频合成压制 (不带插画的普通封面视频，命名保持原版不变)
-                    ep_mp4_path = output_base / f"{clean_book}_{clean_ch}_{dur_mins}m_[{commit_hash}].mp4"
-                    self.sig_status_changed.emit("VIDEO_RENDERING")
-                    self.sig_progress_updated.emit(90.0, f"【10/12 视频合成】正在调用 GPU 硬件加速压制标准封面 MP4 视频...")
-                    video_composer.render_episode_video(
-                        cover_path=cover_path,
-                        audio_path=ep_audio_path,
-                        main_title=main_title,
-                        subtitle=ep.subtitle,
-                        output_mp4_path=ep_mp4_path,
-                        ass_subtitles_path=ep_ass_path,
-                        layout_name=layout_name,
-                        cover_mode=cover_mode
-                    )
+                episodes_manifests = [old for old in episodes_manifests if old.episode_id != part_id]
+                episodes_manifests.append(EpisodeManifest(
+                    episode_id=part_id,
+                    order=ep_order,
+                    title=ep.title,
+                    subtitle=part_subtitle,
+                    chapters=ep.chapter_ids,
+                    duration=sub_items[-1].end_time if sub_items else 0.0,
+                    video_file=str(ep_mp4_path),
+                    subtitle_file=str(ep_srt_path),
+                    audio_file=str(ep_final_wav)
+                ))
 
-                # 节点 11: 成品质检校验 (QUALITY_CHECK)
-                self.sig_status_changed.emit("QUALITY_CHECK")
-                self.sig_progress_updated.emit(96.0, f"【11/12 成品质检】正在校验最终成片完整性与音画同步...")
-                if not ep_mp4_path.exists() or ep_mp4_path.stat().st_size < 10240:
-                    err_msg = f"第 {ep_order:02d} 集最终视频成品质检未通过：文件未生成或损坏！"
-                    logger.error(err_msg)
-                    self.sig_status_changed.emit("ERROR")
-                    self.sig_error.emit("VIDEO_QC_FAILED", err_msg)
-                    return
-                logger.info(f"第 {ep_order:02d} 集最终视频成品质检合格: {ep_mp4_path.name} ({ep_mp4_path.stat().st_size / 1024 / 1024:.2f} MB)")
-
-            episodes_manifests.append(EpisodeManifest(
-                episode_id=f"episode_{ep_order:02d}",
-                order=ep_order,
-                title=ep.title,
-                subtitle=ep.subtitle,
-                chapters=ep.chapter_ids,
-                duration=sub_items[-1].end_time if sub_items else 0.0,
-                video_file=str(ep_mp4_path),
-                subtitle_file=str(ep_srt_path)
-            ))
-
+                manifest_mgr.save_episode_manifest(episodes_manifests)
+                self._checkpoint["completed_part"] = part_id
+                self._save_control_checkpoint("RUNNING")
+                self._boundary()
         manifest_mgr.save_episode_manifest(episodes_manifests)
-        self.sig_status_changed.emit("COMPLETED")
+        self._save_control_checkpoint("COMPLETED")
+        self._status("COMPLETED")
         self.sig_progress_updated.emit(100.0, "【8/8 生产完成 (COMPLETED)】分集视频与有声书已全部就绪！")
         self.sig_task_completed.emit(str(output_base.absolute()))
 

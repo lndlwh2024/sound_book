@@ -33,7 +33,8 @@ def scan_token(root, targets, archive_targets, history_targets=None):
         listing.append((target.key,str(folder),tuple(sorted(allowed)),tuple(sorted(files))))
     ledger=Path(root)/'target_ledger.json'
     stamp=(ledger.stat().st_size,ledger.stat().st_mtime_ns) if ledger.exists() else None
-    group=tuple(sorted((t.key,t.account.auto_archive) for t in archive_targets))
+    import json
+    group=tuple(sorted((t.key,t.account.auto_archive,json.dumps(getattr(t.account,'drive_binding',{}),sort_keys=True)) for t in archive_targets))
     historical=[]
     history_targets=history_targets if history_targets is not None else archive_targets
     accounts={t.key:t for t in [*history_targets,*targets] if t.platform=='douyin'}
@@ -184,7 +185,9 @@ class ScanCleanupWorker(QThread):
                             continue
                         if restored.get('status')=='SUCCESS' and before_state!='SUCCESS':
                             self.log.emit(f'[历史成功迁移] {path.name} → {target.key}：同账号及文件摘要匹配，未重新上传')
-                    plan=ledger.register_plan(digest,list(group.values()),fixed=True)
+                    from .drive_ingest import cloud_archive_scope
+                    scoped=cloud_archive_scope(self.root,path,digest,list(group.values()))
+                    plan=ledger.register_plan(digest,scoped,fixed=True)
                     results={}
                     for key in history:
                         previous=ledger.result(digest,key)
@@ -198,7 +201,13 @@ class ScanCleanupWorker(QThread):
                     if plan['required'] and all(results[key]['status'] in ('SUCCESS','IGNORED') for key in plan['required']):
                         self.check_stop()
                         try:
-                            item['archived_path']=str(archive_completed_file(path,signature,self.log.emit))
+                            if (self.root/'drive_ingest.sqlite3').exists():
+                                from .drive_ingest import DriveJournal
+                                journal=DriveJournal(self.root)
+                                for key in plan['required']:
+                                    if results[key]['status']=='SUCCESS':
+                                        journal.mark_duplicate(key,path,digest)
+                            item['archived_path']=str(archive_completed_file(path,signature,self.log.emit,cloud_root=self.root))
                             archived+=1
                             self.log.emit(f'[清理归档] {path.name}：本次清理的{len(plan["required"])}个目标全部完成，各账号原状态保留')
                         except (OSError,ValueError) as error:

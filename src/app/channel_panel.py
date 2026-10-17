@@ -8,11 +8,12 @@ import threading
 from dataclasses import replace
 from pathlib import Path
 
-from PySide6.QtCore import QThread, Qt, Signal, QTimer, QRect
+from PySide6.QtCore import QThread, Qt, Signal, QTimer, QRect, QUrl
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QCheckBox, QComboBox,
     QStackedWidget, QListWidget, QListWidgetItem, QPushButton,
     QMessageBox, QInputDialog, QDialog, QPlainTextEdit, QSplitter,
-    QTableWidgetItem, QHeaderView, QDialogButtonBox, QToolButton, QMenu)
+    QTableWidgetItem, QHeaderView, QDialogButtonBox, QToolButton, QMenu, QFileDialog)
 from playwright.sync_api import sync_playwright
 from playwright._impl._errors import TargetClosedError
 
@@ -304,9 +305,21 @@ class MultiPlatformPublisherPanel(QWidget):
     def __init__(self, parent=None, store=None):
         super().__init__(parent)
         self.store = store or ChannelAccountStore()
+        from ..publisher.google_drive import DriveCredentials
+        self.drive_credentials = DriveCredentials(self.store.root)
+        self.drive_auth_worker = None
+        self.drive_watch_worker = None
+        self.drive_auth_dialog = None
+        self.drive_folder_dialog = None
+        self.drive_states = {}
+        self._shutting_down = False
         self.setObjectName('multiPlatformPublisher')
         self.setAttribute(Qt.WA_StyledBackground, True)
-        self.setStyleSheet('QWidget#multiPlatformPublisher {background:#1E1E24;}')
+        icon = (Path(__file__).resolve().parents[2]/'resources/icons/checkbox_checked.svg').as_posix()
+        self.setStyleSheet('QWidget#multiPlatformPublisher {background:#1E1E24;} '
+            'QCheckBox::indicator {width:16px;height:16px;border:2px solid white;border-radius:3px;background:#202028;} '
+            'QCheckBox::indicator:checked {background:#247F91;image:url("'+icon+'");} '
+            'QCheckBox::indicator:disabled {border-color:#C8C8D0;background:#35353F;}')
         self.worker = None
         self.preflight_worker = None
         self.cleanup_worker = None
@@ -362,6 +375,174 @@ class MultiPlatformPublisherPanel(QWidget):
         self.timer.timeout.connect(self.refresh_queues)
         self.timer.start(5000)
 
+    def update_drive_connection(self):
+        connected = self.drive_credentials.connected()
+        for panel in self.panels:
+            panel.drive.cloud_enabled = self.store.cloud_ingest_enabled
+            panel.drive.update_connection(connected, bool(self.drive_auth_worker))
+            panel.shared_drive.update_connection(connected, bool(self.drive_auth_worker),self.store.cloud_ingest_enabled)
+            panel.refresh_cloud_badges()
+            if not connected:
+                panel.drive.today.setText('云盘已断开；目录配置保留')
+                panel.drive.today.setToolTip('云盘已断开；目录配置保留')
+            elif panel.drive.today.text() == '云盘已断开；目录配置保留':
+                panel.drive.today.setText('今日目录：等待检查')
+                panel.drive.today.setToolTip('今日目录：等待检查')
+
+    def set_cloud_ingest_enabled(self, enabled):
+        previous = self.store.cloud_ingest_enabled
+        self.store.cloud_ingest_enabled = bool(enabled)
+        try:
+            self.store.save()
+        except (OSError,ValueError) as error:
+            self.store.cloud_ingest_enabled = previous
+            QMessageBox.warning(self,'云盘接入配置',str(error))
+        self.update_drive_connection()
+        self.sync_drive_watch()
+
+    def confirm_disconnect_drive(self):
+        answer = QMessageBox.question(self,'断开共享云盘',
+            '这将停止所有平台账号的云盘检查和下载。\n各账号目录、已下载文件和历史记录保留，本地发布继续。是否断开？',
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if answer == QMessageBox.Yes:
+            self.disconnect_drive()
+
+    def connect_drive(self, panel):
+        from .drive_widgets import DriveAuthWorker
+        from ..publisher.google_drive import DriveError
+        if self.drive_auth_worker or not self.store.cloud_ingest_enabled:
+            return
+        try:
+            self.drive_credentials.client()
+        except DriveError:
+            QMessageBox.information(self,'首次连接Google云盘',
+                '请导入Google Cloud中“桌面应用”类型的OAuth客户端JSON，并启用Google Drive API。\n'
+                '客户端配置保存在本机；无需填写Google密码或把凭据发送给他人。')
+            path, _ = QFileDialog.getOpenFileName(self,'导入Google桌面应用OAuth客户端','','JSON (*.json)')
+            if not path:
+                self.update_drive_connection()
+                return
+            try:
+                self.drive_credentials.import_client(path)
+            except (OSError,ValueError,DriveError) as error:
+                QMessageBox.warning(self,'导入失败',str(error))
+                self.update_drive_connection()
+                return
+        dialog = QDialog(self)
+        dialog.setWindowTitle('连接Google云盘')
+        dialog.resize(520, 240)
+        layout = QVBoxLayout(dialog)
+        message = QLabel('将在系统浏览器打开Google登录授权。\n'
+            '书声申请只读Drive权限，用于浏览目录和下载媒体；不会修改云端文件。\n'
+            '该权限允许读取您账号可访问的Drive文件，书声仅轮询已绑定的系列目录。\n'
+            '请在浏览器完成授权，成功后这里会显示“已连接”。取消后保留原连接。')
+        message.setWordWrap(True)
+        layout.addWidget(message)
+        buttons = QDialogButtonBox(QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Cancel).setText('取消授权')
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        worker = DriveAuthWorker(self.drive_credentials, self)
+        self.drive_auth_worker, self.drive_auth_dialog = worker, dialog
+        worker.open_url.connect(lambda url:QDesktopServices.openUrl(QUrl(url)))
+        worker.error.connect(lambda error:self.log_message('[云盘连接] '+error))
+        worker.error.connect(lambda error:QMessageBox.warning(self,'Google云盘连接',error))
+        worker.success.connect(lambda:self.log_message('[云盘连接] 授权成功；只读连接已保存'))
+        dialog.finished.connect(lambda _:worker.stop())
+        def finished():
+            dialog.accept()
+            dialog.deleteLater()
+            self.drive_auth_worker = self.drive_auth_dialog = None
+            worker.deleteLater()
+            self.update_drive_connection()
+            self.sync_drive_watch()
+        worker.finished.connect(finished)
+        self.update_drive_connection()
+        dialog.show()
+        worker.start()
+
+    def disconnect_drive(self):
+        if self.drive_auth_worker:
+            self.drive_auth_worker.stop()
+        self.drive_credentials.disconnect()
+        self.log_message('[云盘连接] 已断开，停止云盘检查和下载；绑定与本地文件保留，本地部署继续')
+        self.update_drive_connection()
+        self.sync_drive_watch()
+
+    def choose_drive_folder(self, panel):
+        from .drive_widgets import DriveFolderDialog
+        if not panel.current() or not self.drive_credentials.connected() or self.drive_folder_dialog:
+            return
+        identity = panel.current().account_id
+        dialog = DriveFolderDialog(self.drive_credentials, self)
+        self.drive_folder_dialog = dialog
+        def finished(result):
+            self.drive_folder_dialog = None
+            if result == QDialog.Accepted and panel.current() and panel.current().account_id == identity:
+                folder = dialog.selected_folder
+                panel.drive.folder_id = folder['id']
+                panel.drive.folder.setText(folder.get('display_path') or folder['name'])
+                panel.drive.folder.setToolTip(folder['id'])
+            dialog.deleteLater()
+        dialog.finished.connect(finished)
+        dialog.show()
+
+    def sync_drive_watch(self):
+        from ..publisher.drive_config import DriveBinding
+        from ..publisher.drive_ingest import DriveWatchWorker
+        if self._shutting_down or not hasattr(self,'panels'):
+            return
+        deploying = bool(self.worker and self.worker.isRunning() and not self.worker.stopping.is_set()
+            and self.worker.file_paths is None)
+        chosen = {t.key for t in self.worker.targets} if deploying else None
+        targets = [t for t in self.all_targets() if DriveBinding.read(t.account.drive_binding).enabled
+            and self.store.cloud_ingest_enabled
+            and (chosen is None or t.key in chosen)]
+        if targets and self.drive_watch_worker is None:
+            worker = DriveWatchWorker(self.store.root, self.drive_credentials, self)
+            self.drive_watch_worker = worker
+            worker.log.connect(self.log_message)
+            worker.binding_status.connect(self.receive_drive_status)
+            worker.file_ready.connect(self.drive_file_ready)
+            worker.authorization_error.connect(self.drive_authorization_error)
+            worker.start()
+        if self.drive_watch_worker:
+            self.drive_watch_worker.configure(targets, paused=not deploying or self.worker.pause_requested.is_set())
+        for panel in self.panels:
+            panel.refresh_cloud_badges()
+
+    def drive_authorization_error(self, error, generation):
+        if generation != self.drive_credentials.generation:
+            return  # An old in-flight request must not disconnect a newly authorized login.
+        self.log_message('[云盘授权] '+error)
+        self.drive_credentials.disconnect()
+        self.update_drive_connection()
+
+    def receive_drive_status(self, key, text):
+        self.drive_states[key] = text
+        for panel in self.panels:
+            current = panel.current()
+            if current and panel.platform+':'+current.account_id == key:
+                panel.drive.today.setText(text)
+                panel.drive.today.setToolTip(text)
+                panel.source_state.setText('Google云盘：'+text)
+
+    def drive_file_ready(self, path):
+        self.cleanup_cache.clear()
+        self.refresh_queues()
+        if self.worker and self.worker.isRunning():
+            self.worker.wake_requested.set()
+
+    def check_drive_now(self, panel):
+        if self.cleanup_worker or self.preflight_worker:
+            self.log_message('[云盘检查] 请等待扫描清理或部署前检查完成')
+            return
+        if not self.store.cloud_ingest_enabled or not self.drive_credentials.connected() or not panel.save_current():
+            return
+        self.sync_drive_watch()
+        if self.drive_watch_worker:
+            self.drive_watch_worker.check_now(panel.platform+':'+panel.current().account_id)
+
     def switch_platform(self, index):
         old = self.channel_controls.parentWidget()
         if old and old.layout():
@@ -411,7 +592,14 @@ class MultiPlatformPublisherPanel(QWidget):
         return True
 
     def prepare_shutdown(self):
+        self._shutting_down = True
         self.timer.stop()
+        if self.drive_auth_worker:
+            self.drive_auth_worker.stop()
+        if self.drive_watch_worker:
+            self.drive_watch_worker.stop()
+        if self.drive_folder_dialog:
+            self.drive_folder_dialog.reject()
         if self.cleanup_worker:
             self.cleanup_worker.stop()
         if self.snapshot_worker and self.snapshot_worker.isRunning():
@@ -421,7 +609,8 @@ class MultiPlatformPublisherPanel(QWidget):
         if self.worker and self.worker.isRunning():
             self.worker.stop()
         results = [panel.prepare_shutdown() for panel in self.panels]
-        return all(results) and not self.busy() and not (self.snapshot_worker and self.snapshot_worker.isRunning())
+        cloud_busy = any(w and w.isRunning() for w in (self.drive_auth_worker,self.drive_watch_worker)) or self.drive_folder_dialog is not None
+        return all(results) and not cloud_busy and not self.busy() and not (self.snapshot_worker and self.snapshot_worker.isRunning())
 
     def upload_douyin_selected(self):
         self.douyin.upload_selected()
@@ -493,6 +682,7 @@ class MultiPlatformPublisherPanel(QWidget):
         if self.worker and self.worker.isRunning():
             self.worker.stop()
             self.sync_deployment_buttons()
+            self.sync_drive_watch()
             return
         if not self.can_deploy():
             return
@@ -645,6 +835,7 @@ class MultiPlatformPublisherPanel(QWidget):
         self.worker.queue_changed.connect(self.refresh_queues)
         self.worker.finished.connect(self.deployment_finished)
         self.worker.start()
+        self.sync_drive_watch()
         for panel in self.panels:
             panel.deploy_button.setText('停止部署')
             panel.pause_button.setEnabled(True)
@@ -657,6 +848,7 @@ class MultiPlatformPublisherPanel(QWidget):
             else:
                 self.worker.pause_all()
             self.sync_deployment_buttons()
+            self.sync_drive_watch()
 
     def sync_deployment_buttons(self):
         running = self.busy()
@@ -665,6 +857,13 @@ class MultiPlatformPublisherPanel(QWidget):
         paused = deploying and self.worker.pause_requested.is_set()
         stopping = deploying and self.worker.stopping.is_set()
         for panel in self.panels:
+            panel.directory.setReadOnly(running)
+            panel.browse_button.setEnabled(not running)
+            panel.drive.binding_locked = running
+            panel.drive.choose.setToolTip('部署任务运行期间请先停止任务再更换目录' if running else '选择系列目录')
+            panel.drive.update_controls()
+            for check in panel.media_checks.values():
+                check.setEnabled(not running)
             panel.scan_button.setEnabled(not running)
             panel.deploy_button.setText('取消启动检查' if checking else '停止部署' if running else '启动部署')
             panel.pause_button.setText('继续全部平台' if paused else '暂停全部平台')
@@ -684,6 +883,7 @@ class MultiPlatformPublisherPanel(QWidget):
         self.worker = None
         if worker:
             worker.deleteLater()
+        self.sync_drive_watch()
         for panel in self.panels:
             panel.deploy_button.setText('启动部署')
             panel.pause_button.setEnabled(False)

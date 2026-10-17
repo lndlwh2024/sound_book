@@ -60,3 +60,7 @@ output/
 debug/
 data/
 
+# Local previews, deployment checkouts, downloaded OAuth configuration and build artifacts
+artifacts/
+Googledrive/
+

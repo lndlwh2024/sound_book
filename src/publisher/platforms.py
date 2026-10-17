@@ -51,6 +51,7 @@ class ChannelAccount:
     collection_name: str = ''
     default_tags: list[str] = field(default_factory=lambda: ['#有声书', '#知识分享'])
     daily_upload_limit: int = 10
+    drive_binding: dict = field(default_factory=dict)
 
 
 class ChannelAccountStore:
@@ -61,6 +62,7 @@ class ChannelAccountStore:
         self.accounts = []
         self.selected_channels = ['douyin']
         self.archive_targets = []
+        self.cloud_ingest_enabled = True
         self.load_error = ''
         if self.path.exists():
             try:
@@ -70,6 +72,9 @@ class ChannelAccountStore:
                     self._validate(account)
                 self.selected_channels = [key for key in data.get('selected_channels', ['douyin']) if key in CHANNELS]
                 self.archive_targets = data.get('archive_targets', [])
+                self.cloud_ingest_enabled = data.get('cloud_ingest_enabled', True)
+                if type(self.cloud_ingest_enabled) is not bool:
+                    raise ValueError('云盘接入开关必须为布尔值')
             except Exception as error:
                 self.accounts = []
                 self.load_error = f'新渠道配置读取失败：{error}；原文件保留，抖音仍可使用。'
@@ -82,6 +87,8 @@ class ChannelAccountStore:
             raise ValueError('账号ID无效')
         if type(account.daily_upload_limit) is not int or account.daily_upload_limit < 0:
             raise ValueError('每日上传上限必须为非负整数')
+        from .drive_config import DriveBinding
+        DriveBinding.read(account.drive_binding)
 
     def profile_path(self, account):
         self._validate(account)
@@ -97,6 +104,7 @@ class ChannelAccountStore:
         temporary = self.path.with_suffix('.tmp')
         temporary.write_text(json.dumps({'schema_version': 1, 'selected_channels': self.selected_channels,
                                         'archive_targets': self.archive_targets,
+                                        'cloud_ingest_enabled': self.cloud_ingest_enabled,
                                         'accounts': [asdict(a) for a in self.accounts]},
                                         ensure_ascii=False, indent=2), encoding='utf-8')
         temporary.replace(self.path)

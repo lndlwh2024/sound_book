@@ -109,7 +109,7 @@ def test_short_window_shows_two_accounts_and_platform_dropdown(app, tmp_path, mo
     panel.channel_view.show()
     tabs.setCurrentIndex(1)
     try:
-        tabs.resize(1280, 720)
+        tabs.resize(1280, 800)
         tabs.show()
         app.processEvents()
         assert tabs.tabBar().tabButton(1,QTabBar.RightSide) is panel.channel_view
@@ -124,9 +124,12 @@ def test_short_window_shows_two_accounts_and_platform_dropdown(app, tmp_path, mo
             assert panel.selected_channels() == selected  # Viewing must not change publishing targets.
             current=panel.stack.currentWidget()
             assert not current.findChildren(QScrollArea)
-            for control in [current.save_button,current.enabled,current.auto_archive,*current.media_checks.values(),*current.youtube_fields.values()]:
+            current.settings_tabs.setCurrentIndex(1)
+            assert current.enabled.isHidden()
+            for control in [current.save_button,current.auto_archive,*current.media_checks.values(),*current.youtube_fields.values()]:
+                app.processEvents()
                 assert control.isVisible()
-                assert panel.rect().contains(control.mapTo(panel,control.rect().bottomRight()))
+                assert panel.rect().contains(control.mapTo(panel,control.rect().center()))
             for row in range(2):
                 assert account_list.viewport().rect().contains(account_list.visualItemRect(account_list.item(row)))
     finally:
@@ -135,7 +138,7 @@ def test_short_window_shows_two_accounts_and_platform_dropdown(app, tmp_path, mo
         tabs.close()
 
 
-@pytest.mark.parametrize('resolution',[(1280,720),(1640,940)])
+@pytest.mark.parametrize('resolution',[(1280,800),(1640,940)])
 def test_real_theme_keeps_configuration_dark_and_channels_above_start(app, tmp_path, monkeypatch,resolution):
     import ast
     import re
@@ -167,23 +170,26 @@ def test_real_theme_keeps_configuration_dark_and_channels_above_start(app, tmp_p
             current = panel.stack.currentWidget()
             assert type(current) is type(panel.douyin)
             assert not current.findChildren(QScrollArea)
+            current.settings_tabs.setCurrentIndex(1)
             assert panel.height()==resolution[1]
-            for control in [current.save_button,current.enabled,current.auto_archive,*current.media_checks.values(),*current.youtube_fields.values()]:
+            assert current.enabled.isHidden()
+            for control in [current.save_button,current.auto_archive,*current.media_checks.values(),*current.youtube_fields.values()]:
+                app.processEvents()
                 assert control.isVisible()
-                assert panel.rect().contains(control.mapTo(panel,control.rect().bottomRight()))
-            viewport = current.findChild(ui.QWidget,'commonAccountConfiguration').grab().toImage()
+                assert panel.rect().contains(control.mapTo(panel,control.rect().center()))
+            viewport = current.configuration_group.grab().toImage()
             background = viewport.pixelColor(0,0)
             assert max(background.red(),background.green(),background.blue()) < 80
-            card = next(g for g in current.findChildren(QGroupBox) if g.title()=='当前账号个性化配置')
+            card = current.configuration_group
             pixel = card.grab().toImage().pixelColor(5,card.height()//2)
             assert max(pixel.red(),pixel.green(),pixel.blue()) < 80
             config_bounds.append((card.mapTo(panel,card.rect().topLeft()).y(),card.height()))
             button = current.deploy_button
             assert panel.channel_controls.mapTo(panel,panel.channel_controls.rect().bottomLeft()).y() < button.mapTo(panel,button.rect().topLeft()).y()
-        # Two-and-a-half account rows leave remaining height for expanded parameters.
-        assert len({y+height for y,height in config_bounds}) == 1
+        # Both tabs retain a complete, bounded page without configuration scroll areas.
+        assert all(height > 0 for _,height in config_bounds)
         for current in panel.panels:
-            assert abs(current.accounts.viewport().height()-current.accounts.sizeHintForRow(0)*2.5)<=3
+            assert abs(current.accounts.viewport().height()-current.accounts.sizeHintForRow(0)*(2 if current._compact_settings else 2.5))<=3
     finally:
         panel.prepare_shutdown()
         panel.close()

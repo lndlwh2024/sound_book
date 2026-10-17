@@ -425,7 +425,8 @@ class IllustrationManager:
         book_illustrations_dir: Path,
         style: Optional[str] = None,
         progress_callback: Optional[Callable[[int, int, str], None]] = None,
-        status_callback: Optional[Callable[[str], None]] = None
+        status_callback: Optional[Callable[[str], None]] = None,
+        safe_checkpoint: Optional[Callable[[], None]] = None
     ) -> List[ScenePlan]:
         """
         批量为分集的所有场景绘制真实插画。
@@ -485,6 +486,8 @@ class IllustrationManager:
 
         try:
             for idx, scene in enumerate(scenes, start=1):
+                if safe_checkpoint:
+                    safe_checkpoint()
                 i = idx - 1
 
                 # 1. 确保正面与负面提示词安全就绪

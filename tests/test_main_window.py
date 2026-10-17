@@ -25,8 +25,11 @@ def test_main_window_initial_state(qapp):
 
     # 1. 标题与尺寸
     assert "书声" in window.windowTitle()
-    assert window.width() >= 1024
-    assert window.height() >= 720
+    available = qapp.primaryScreen().availableGeometry()
+    assert window.width() >= min(1024, available.width())
+    assert window.height() >= min(720, available.height())
+    assert window.width() <= available.width()
+    assert window.height() <= available.height()
 
     # 2. 默认音量与滑块（右上角两翼工作台）
     assert window.sld_narr_preview.value() == 100

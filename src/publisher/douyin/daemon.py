@@ -34,6 +34,8 @@ def is_file_fully_written(file_path: Path, min_age_secs: float = 3.0) -> bool:
     3. 能够独占只读打开，非外部程序占用中。
     """
     try:
+        if file_path.with_name('.' + file_path.name + '.shusheng-pending').exists():
+            return False
         if not file_path.exists():
             return False
         stat = file_path.stat()

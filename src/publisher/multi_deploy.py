@@ -49,14 +49,23 @@ def atomic_json(path, data):
             time.sleep(.05*(attempt+1))
 
 
-def archive_completed_file(source,signature,log=lambda message:None):
+def archive_completed_file(source,signature,log=lambda message:None,cloud_root=None):
     """Archive without overwriting previous media or subtitles."""
     source=Path(source)
     if not is_file_fully_written(source) or (source.stat().st_size,source.stat().st_mtime_ns)!=signature:
         raise ValueError('目标已完成，但原文件已变化或被占用；保留文件')
-    destination=source.parent/'published'/source.name
+    folder, name = 'published', source.name
+    if cloud_root and (Path(cloud_root)/'drive_ingest.sqlite3').exists():
+        from .drive_ingest import DriveJournal, file_hashes
+        digest, _ = file_hashes(source)
+        origins = DriveJournal(cloud_root).origins(source, digest)
+        if origins:
+            folder = 'publiced'
+            if any(entry['duplicate'] for entry in origins):
+                name = source.stem + '_重复' + source.suffix
+    destination=source.parent/folder/name
     if destination.exists() or destination.with_suffix('.srt').exists():
-        destination=destination.with_name(source.stem+'_'+uuid.uuid4().hex[:12]+source.suffix)
+        destination=destination.with_name(destination.stem+'_'+uuid.uuid4().hex[:12]+source.suffix)
     destination.parent.mkdir(exist_ok=True)
     shutil.move(str(source),str(destination))
     subtitle=source.with_suffix('.srt')
@@ -207,6 +216,7 @@ class MultiDeployWorker(QThread):
         self.pause_requested = threading.Event()
         self.wake_requested = threading.Event()
         self.blocked = {}
+        self.target_enabled = {t.key: t.account.enabled for t in self.targets}
         self.processed = set()
         self.file_paths = None if file_paths is None else {str(Path(p).resolve()) for p in file_paths}
         self.report = {'task_id': uuid.uuid4().hex, 'started_at': now(), 'status': 'RUNNING',
@@ -272,7 +282,8 @@ class MultiDeployWorker(QThread):
 
     def save_report(self):
         required={t.key for t in self.targets}
-        entries = [r for f in self.report['files'] for key,r in f['results'].items() if key in required]
+        keys_for = lambda item:set(item.get('task_targets',required))
+        entries = [r for f in self.report['files'] for key,r in f['results'].items() if key in keys_for(f)]
         self.report['source_file_count'] = len(self.report['files'])
         self.report['target_count'] = len(entries)
         self.report['success_count'] = sum(r['status'] == SUCCESS for r in entries)
@@ -280,17 +291,17 @@ class MultiDeployWorker(QThread):
         self.report['unconfirmed_count'] = 0  # Kept for old report readers.
         self.report['ignored_count'] = sum(r['status']=='IGNORED' for r in entries)
         self.report['cancelled_count'] = sum(r['status'] == 'CANCELLED' for r in entries)
-        failed = lambda item:any(r['status'] in {'FAILED','FAILED1','FAILED2'} for key,r in item['results'].items() if key in required)
+        failed = lambda item:any(r['status'] in {'FAILED','FAILED1','FAILED2'} for key,r in item['results'].items() if key in keys_for(item))
         summary = lambda item:{key:item[key] for key in ('file_name','file_path','size_bytes','modified_at','results','archived_path')}
         self.report['success_files'] = [summary(f) for f in self.report['files']
-            if all(f['results'].get(key,{}).get('status') in (SUCCESS,'IGNORED') for key in required)]
+            if all(f['results'].get(key,{}).get('status') in (SUCCESS,'IGNORED') for key in keys_for(f))]
         self.report['failure_files'] = [summary(f) for f in self.report['files'] if failed(f)]
         self.report['source_success_count'] = len(self.report['success_files'])
         self.report['source_failure_count'] = len(self.report['failure_files'])
         self.report['platform_counts'] = {}
         for file in self.report['files']:
             for key, result in file['results'].items():
-                if key not in required:
+                if key not in keys_for(file):
                     continue
                 counts = self.report['platform_counts'].setdefault(key.split(':')[0], {'success': 0, 'failure': 0, 'unconfirmed': 0, 'cancelled': 0, 'ignored': 0, 'blocked':0, 'waiting':0})
                 state = result['status']
@@ -439,8 +450,16 @@ class MultiDeployWorker(QThread):
                 item.update(status='CANCELLED', message='用户停止，未执行目标')
                 self.save_report()
             return item['status']
+        if not self.target_enabled.get(target.key,True):
+            item.update(status='PENDING',message='账号已关闭；保留文件等待重新启用')
+            self.save_report()
+            return 'PENDING'
         previous = self.restore_legacy_success(job, target, self.ledger.result(job['digest'],target.key))
         if previous.get('status') in (SUCCESS,'IGNORED','PERMANENT_REJECT','DURATION_LIMIT'):
+            if (previous.get('status') == SUCCESS and not self.attempts_by_target.get((job['digest'],target.key))
+                    and (self.root/'drive_ingest.sqlite3').exists()):
+                from .drive_ingest import DriveJournal
+                DriveJournal(self.root).mark_duplicate(target.key,job['path'],job['digest'])
             item.update(previous)
             item.pop('quota_message',None)
             item.pop('blocking_message',None)
@@ -634,7 +653,7 @@ class MultiDeployWorker(QThread):
             return
         source = job['path']
         try:
-            destination=archive_completed_file(source,job['signature'],self.log.emit)
+            destination=archive_completed_file(source,job['signature'],self.log.emit,cloud_root=self.root)
             item['archived_path'] = str(destination)
             self.log.emit(f'[统一归档] {source.name}：本任务所选{len(required)}个账号已成功或不再跟踪；保留各账号原状态')
         except (OSError,ValueError) as error:
@@ -663,10 +682,19 @@ class MultiDeployWorker(QThread):
         for copies in groups.values():
             if not self.checkpoint():
                 break
+            from .drive_ingest import cloud_archive_scope
+            scope = {t.key:t for copy in copies for t in cloud_archive_scope(
+                self.root,copy['path'],copy['digest'],self.archive_targets)}
+            plan = self.ledger.register_plan(copies[0]['digest'],list(scope.values()),fixed=True)
+            for copy in copies:
+                copy['plan'] = plan
+                copy['item']['task_targets'] = list(scope)
             retries=[]
             self.log.emit(f'[文件开始] {copies[0]["path"].name}；平台顺序：'+
                 ' → '.join(CHANNELS[t.platform].name+'/'+t.account.account_name for t in self.targets))
             for target in self.targets:
+                if target.key not in scope:
+                    continue  # A different cloud series is an independent resource binding.
                 job=next((copy for copy in copies if target.key in {t.key for t in copy['targets']}),None)
                 if job is None:
                     if self.ledger.result(copies[0]['digest'],target.key).get('status') not in (SUCCESS,'IGNORED'):

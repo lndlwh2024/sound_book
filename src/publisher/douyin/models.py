@@ -32,6 +32,7 @@ class DouyinAccountConfig:
     platform_uid: str = ""
     identity_note: str = ""
     daily_upload_limit: int = 10
+    drive_binding: dict = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -54,7 +55,8 @@ class DouyinAccountConfig:
             platform_nickname=data.get("platform_nickname", ""),
             platform_uid=data.get("platform_uid", ""),
             identity_note=data.get("identity_note", ""),
-            daily_upload_limit=data.get("daily_upload_limit", 10)
+            daily_upload_limit=data.get("daily_upload_limit", 10),
+            drive_binding=data.get('drive_binding', {})
         )
 
 

@@ -31,11 +31,15 @@ def panel(tmp_path,monkeypatch):
     monkeypatch.setattr(ui.QMessageBox,'warning',MagicMock())
     yield widget
     widget.prepare_shutdown()
-    for worker in (widget.cleanup_worker,widget.snapshot_worker):
+    for worker in (widget.cleanup_worker,widget.snapshot_worker,widget.drive_watch_worker,widget.drive_auth_worker):
         if worker:
             worker.wait(3000)
     QApplication.processEvents()
     widget.close()
+    # Release Qt-owned signal/child cycles before the next theme/layout test.
+    from PySide6.QtCore import QCoreApplication, QEvent
+    widget.deleteLater()
+    QCoreApplication.sendPostedEvents(None,QEvent.DeferredDelete)
 
 
 def finish_cleanup(panel):
@@ -143,7 +147,7 @@ def test_same_form_saves_and_reloads_common_fields(panel,index):
     original_id,original_profile=account.account_id,panel.repository.profile(account)
     current.name.setText('新备注')
     current.identity.setText('核对备注')
-    current.enabled.setChecked(False)
+    current.enable_buttons[account.account_id][0][1].click()
     current.auto_archive.setChecked(False)
     for key,check in current.media_checks.items():
         check.setChecked(key in ('audio','image'))
@@ -152,7 +156,8 @@ def test_same_form_saves_and_reloads_common_fields(panel,index):
         DouyinAccountManager(panel.repository.douyin_manager.config_file,panel.repository.douyin_manager.profiles_base_dir))
     restored=loaded.accounts(current.platform)[0]
     assert isinstance(restored,ChannelAccount)
-    assert restored.account_name=='新备注' and restored.identity_note=='核对备注'
+    assert restored.account_name==account.account_name and restored.identity_note=='核对备注'
+    assert current.name.isHidden()  # Editable nickname was explicitly removed.
     assert restored.media_types==['audio','image'] and not restored.enabled and not restored.auto_archive
     assert restored.account_id==original_id and loaded.profile(restored)==original_profile
 
@@ -198,9 +203,9 @@ def test_youtube_wrong_channel_does_not_override_binding(panel):
 
 
 def test_capture_button_is_beside_login_and_all_platforms_share_pause_controls(panel):
-    from PySide6.QtWidgets import QHBoxLayout, QPushButton
+    from PySide6.QtWidgets import QGridLayout, QPushButton
     for current in panel.panels:
-        rows=current.findChildren(QHBoxLayout)
+        rows=current.findChildren(QGridLayout)
         assert any(any(row.itemAt(i).widget() is current.login_button for i in range(row.count()))
                    and any(row.itemAt(i).widget() is current.capture_button for i in range(row.count()))
                    for row in rows)
@@ -295,14 +300,16 @@ def test_creator_title_rule_and_description_save_in_shared_account_model(panel,i
     assert current.description.toPlainText()=='用户配置的正文'
 
 
-def test_youtube_channel_id_is_directly_available_outside_collapsed_parameters(panel):
+def test_youtube_channel_id_is_available_in_expanded_platform_parameters(panel):
     current=panel.panels[3]
     panel.channel_view.setCurrentIndex(3)
     panel.resize(1640,940)
     panel.show()
+    current.settings_tabs.setCurrentIndex(1)
     QApplication.processEvents()
     assert current.special.isVisible()
-    assert current.channel_id.isVisible() and not current.special.isAncestorOf(current.channel_id)
+    assert current.channel_id.isVisible() and current.special.isAncestorOf(current.channel_id)
+    assert not current.special.isCheckable()
     current.channel_id.setText('UC'+'a'*22)
     assert current.save_current()
     reloaded=ChannelAccountStore(panel.store.root).for_channel('youtube')[0]
@@ -312,15 +319,21 @@ def test_youtube_channel_id_is_directly_available_outside_collapsed_parameters(p
 @pytest.mark.parametrize('index',range(4))
 def test_common_account_switches_stay_visible_with_expanded_options(panel,index):
     from PySide6.QtWidgets import QScrollArea
-    panel.resize(1280,720)
+    panel.resize(1280,800)
     panel.channel_view.setCurrentIndex(index)
     panel.show()
     current=panel.panels[index]
     QApplication.processEvents()
     assert current.findChild(QScrollArea) is None
-    for control in (current.enabled,current.auto_archive):
+    assert current.settings_tabs.currentIndex()==0
+    current.settings_tabs.setCurrentIndex(1)
+    assert current.enabled.isHidden()
+    for control in (current.auto_archive,current.save_button):
+        QApplication.processEvents()
         assert control.isVisible()
-        assert control.parentWidget().rect().contains(control.geometry())
+        assert panel.rect().contains(control.mapTo(panel,control.rect().center()))
+    assert current.deploy_button.isVisible()
+    assert not current.configuration_group.isAncestorOf(current.save_button)
     assert set(current.media_checks)=={'video','audio','image'}
 
 
