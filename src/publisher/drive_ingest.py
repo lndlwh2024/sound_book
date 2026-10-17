@@ -19,6 +19,15 @@ from .media import selected_extensions
 CHINA_TIME = timezone(timedelta(hours=8))
 
 
+def canonical_local_path(path):
+    """Windows receiving-directory identity; preserve actual file names on disk."""
+    return os.path.normcase(os.path.normpath(str(Path(path).resolve())))
+
+
+def journal_identity(target_key, binding, cloud_id, version):
+    return hashlib.sha256(json.dumps([target_key, binding, cloud_id, version]).encode()).hexdigest()
+
+
 def version_of(file):
     # A renamed/replaced cloud copy has a new identity/version; content dedup is later.
     return hashlib.sha256(json.dumps([file.get(k) for k in
@@ -45,16 +54,60 @@ class DriveJournal:
             db.execute('''CREATE TABLE IF NOT EXISTS scan_cursor (
                 target TEXT NOT NULL, binding TEXT NOT NULL, day TEXT NOT NULL,
                 PRIMARY KEY(target,binding))''')
+            db.execute('CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)')
 
-    def resume_day(self, target, today):
-        binding = self.identity(target, {'id': ''})[1]
+    def pin_legacy_account(self, cloud_account):
+        """Freeze the verified pre-upgrade owner before any future reconnection."""
+        if not cloud_account:
+            raise DriveError('无法确认原云盘账号')
+        with self.connect() as db:
+            db.execute("INSERT OR IGNORE INTO metadata VALUES ('legacy_cloud_account',?)",(cloud_account,))
+
+    def prepare_account(self, cloud_account):
+        """Attribute pre-upgrade history once, then keep that owner across switches."""
+        if not cloud_account:
+            raise DriveError('无法确认云盘账号，未使用下载历史')
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            if db.execute("SELECT 1 FROM metadata WHERE key='account_scope_v2'").fetchone():
+                return
+            # Prefer the owner pinned at upgrade; otherwise the first verified
+            # connection establishes it. A later account can never claim it.
+            db.execute("INSERT OR IGNORE INTO metadata VALUES ('legacy_cloud_account',?)", (cloud_account,))
+            legacy_owner = db.execute("SELECT value FROM metadata WHERE key='legacy_cloud_account'").fetchone()[0]
+            db.row_factory = sqlite3.Row
+            for row in db.execute('SELECT * FROM files').fetchall():
+                parts = row['binding'].split('|')
+                if len(parts) != 2:
+                    continue
+                binding = '|'.join((canonical_local_path(parts[0]), legacy_owner, parts[1]))
+                identity = journal_identity(row['target'],binding,row['cloud_id'],row['version'])
+                db.execute('''INSERT INTO files VALUES (?,?,?,?,?,?,?,?,?)
+                    ON CONFLICT(identity) DO UPDATE SET path=excluded.path,state=excluded.state,
+                    sha256=excluded.sha256,duplicate=excluded.duplicate
+                    WHERE files.state!='DOWNLOADED' AND excluded.state='DOWNLOADED' ''',
+                    (identity,row['target'],binding,row['cloud_id'],row['version'],row['path'],
+                     row['state'],row['sha256'],row['duplicate']))
+                db.execute('DELETE FROM files WHERE identity=?',(row['identity'],))
+            for row in db.execute('SELECT * FROM scan_cursor').fetchall():
+                parts = row['binding'].split('|')
+                if len(parts) != 2:
+                    continue
+                binding = '|'.join((canonical_local_path(parts[0]), legacy_owner, parts[1]))
+                db.execute('''INSERT INTO scan_cursor VALUES (?,?,?) ON CONFLICT(target,binding)
+                    DO UPDATE SET day=min(day,excluded.day)''',(row['target'],binding,row['day']))
+                db.execute('DELETE FROM scan_cursor WHERE target=? AND binding=?',(row['target'],row['binding']))
+            db.execute("INSERT INTO metadata VALUES ('account_scope_v2','1')")
+
+    def resume_day(self, target, today, cloud_account=''):
+        binding = self.identity(target, {'id': ''}, cloud_account)[1]
         with self.connect() as db:
             row = db.execute('SELECT day FROM scan_cursor WHERE target=? AND binding=?',
                 (target.key,binding)).fetchone()
         return min(date.fromisoformat(row[0]), today) if row else today
 
-    def save_scan_day(self, target, day):
-        binding = self.identity(target, {'id': ''})[1]
+    def save_scan_day(self, target, day, cloud_account=''):
+        binding = self.identity(target, {'id': ''}, cloud_account)[1]
         with self.connect() as db:
             db.execute('INSERT INTO scan_cursor VALUES (?,?,?) ON CONFLICT(target,binding) DO UPDATE SET day=excluded.day',
                 (target.key,binding,day.isoformat()))
@@ -69,9 +122,13 @@ class DriveJournal:
             db.close()
 
     @staticmethod
-    def identity(target, file):
-        binding = str(Path(target.account.target_dir).resolve()) + '|' + DriveBinding.read(target.account.drive_binding).folder_id
-        return hashlib.sha256(json.dumps([target.key, binding, file['id'], version_of(file)]).encode()).hexdigest(), binding
+    def identity(target, file, cloud_account=''):
+        parts = [canonical_local_path(target.account.target_dir)]
+        if cloud_account:
+            parts.append(cloud_account)
+        parts.append(DriveBinding.read(target.account.drive_binding).folder_id)
+        binding = '|'.join(parts)
+        return journal_identity(target.key,binding,file['id'],version_of(file)), binding
 
     def entry(self, identity):
         with self.connect() as db:
@@ -79,15 +136,37 @@ class DriveJournal:
             row = db.execute('SELECT * FROM files WHERE identity=?', (identity,)).fetchone()
             return dict(row) if row else None
 
-    def reserve(self, target, file):
-        identity, binding = self.identity(target, file)
+    def shared_source(self, binding, file, *, exclude=None, include_missing=False):
+        """Share bytes only for the exact cloud version and receiving directory/series."""
+        with self.connect() as db:
+            db.row_factory = sqlite3.Row
+            rows = db.execute("SELECT * FROM files WHERE binding=? AND cloud_id=? AND version=? AND state='DOWNLOADED' ORDER BY rowid",
+                (binding,file['id'],version_of(file))).fetchall()
+        return next((dict(row) for row in rows if row['identity'] != exclude and
+            (include_missing or Path(row['path']).is_file())),None)
+
+    def reserve(self, target, file, cloud_account=''):
+        identity, binding = self.identity(target, file, cloud_account)
         existing = self.entry(identity)
         if existing:
+            if existing['state'] == 'FETCHING' and not Path(existing['path']).exists():
+                shared = self.shared_source(binding,file,exclude=identity)
+                if shared:
+                    with self.connect() as db:
+                        db.execute('UPDATE files SET path=? WHERE identity=?',(shared['path'],identity))
+                    return self.entry(identity)
             return existing
         directory = Path(target.account.target_dir).resolve()
         path = directory / safe_name(file['name'])
-        if path.exists():
-            path = path.with_name(path.stem + '_' + identity[:12] + path.suffix)
+        shared = self.shared_source(binding,file)
+        if shared:
+            path = Path(shared['path'])
+        else:
+            with self.connect() as db:
+                claimed = any(canonical_local_path(p) == canonical_local_path(path)
+                    for (p,) in db.execute('SELECT path FROM files WHERE binding!=?',(binding,)))
+            if path.exists() or claimed:
+                path = path.with_name(path.stem + '_' + identity[:12] + path.suffix)
         # Persist intended final name BEFORE any bytes are written, for crash recovery.
         with self.connect() as db:
             db.execute('INSERT INTO files VALUES (?,?,?,?,?,?,?,NULL,0)',
@@ -102,13 +181,16 @@ class DriveJournal:
     def origins(self, path, digest):
         with self.connect() as db:
             db.row_factory = sqlite3.Row
-            return [dict(r) for r in db.execute("SELECT * FROM files WHERE path=? AND sha256=? AND state='DOWNLOADED'",
-                (str(Path(path).resolve()), digest))]
+            return [dict(r) for r in db.execute("SELECT * FROM files WHERE sha256=? AND state='DOWNLOADED'",
+                (digest,)) if canonical_local_path(r['path']) == canonical_local_path(path)]
 
     def mark_duplicate(self, target, path, digest):
         with self.connect() as db:
-            db.execute("UPDATE files SET duplicate=1 WHERE target=? AND path=? AND sha256=? AND state='DOWNLOADED'",
-                (target,str(Path(path).resolve()),digest))
+            db.row_factory = sqlite3.Row
+            rows = db.execute("SELECT identity,path FROM files WHERE target=? AND sha256=? AND state='DOWNLOADED'",
+                (target,digest)).fetchall()
+            db.executemany('UPDATE files SET duplicate=1 WHERE identity=?',
+                [(r['identity'],) for r in rows if canonical_local_path(r['path']) == canonical_local_path(path)])
 
 
 def file_hashes(path, stopped=lambda: False):
@@ -142,6 +224,7 @@ class DriveIngestor:
         self.journal = DriveJournal(root)
         self.stopped, self.log, self.status, self.ready = stopped, log, status, ready
         self.clock = clock or (lambda: datetime.now(CHINA_TIME))
+        self.cloud_account = ''
 
     def validate(self, path, file):
         if path.stat().st_size != int(file['size']):
@@ -162,9 +245,15 @@ class DriveIngestor:
         if not directory.is_dir():
             self.status(target.key, '本地目录不可访问，未下载')
             return
+        if self.stopped():
+            raise InterruptedError()
+        self.cloud_account = self.client.account_identity()
+        if self.stopped():
+            raise InterruptedError()
+        self.journal.prepare_account(self.cloud_account)
         today = self.clock().astimezone(CHINA_TIME).date()
-        day = self.journal.resume_day(target, today)
-        self.journal.save_scan_day(target, day)
+        day = self.journal.resume_day(target, today, self.cloud_account)
+        self.journal.save_scan_day(target, day, self.cloud_account)
         advance = True
         while day <= today:
             if self.stopped():
@@ -175,10 +264,10 @@ class DriveIngestor:
             advance = advance and completed
             # Do not pass an unfinished day, even if later dates can be processed.
             if advance:
-                self.journal.save_scan_day(target, min(day + timedelta(days=1), today))
+                self.journal.save_scan_day(target, min(day + timedelta(days=1), today), self.cloud_account)
             day += timedelta(days=1)
         if not advance:
-            pending_day = self.journal.resume_day(target,today).isoformat()
+            pending_day = self.journal.resume_day(target,today,self.cloud_account).isoformat()
             self.status(target.key,f'补扫待重试：{pending_day} 起有未完成文件；已检查至 {today.isoformat()}')
 
     def poll_day(self, target, binding, directory, day, is_today):
@@ -203,7 +292,7 @@ class DriveIngestor:
                 complete = False
                 self.log(f'[云盘不可下载] {target.key} / {file["name"]}')
                 continue
-            entry = self.journal.reserve(target, file)
+            entry = self.journal.reserve(target, file, self.cloud_account)
             path = Path(entry['path'])
             marker = path.with_name('.' + path.name + '.shusheng-pending')
             if entry['state'] == 'DOWNLOADED':
@@ -212,6 +301,31 @@ class DriveIngestor:
                     if path.exists():
                         self.ready(str(path))
                 continue  # Same version remains consumed across polls/restarts/archives.
+            identity, scope = self.journal.identity(target,file,self.cloud_account)
+            completed_source = self.journal.shared_source(scope,file,exclude=identity,include_missing=True)
+            if completed_source and not Path(completed_source['path']).exists():
+                from .multi_deploy import MultiTargetLedger
+                digest = completed_source['sha256']
+                if MultiTargetLedger(self.root).result(digest,target.key).get('status') == 'SUCCESS':
+                    # The shared file can be published/archived before this
+                    # account's next poll. Preserve consumption without fetching it again.
+                    self.journal.complete(entry['identity'],digest,False)
+                    continue
+            shared = self.journal.shared_source(entry['binding'],file,exclude=entry['identity'])
+            if shared and Path(shared['path']) == path:
+                try:
+                    digest = self.validate(path,file)
+                    from .multi_deploy import MultiTargetLedger
+                    duplicate = MultiTargetLedger(self.root).result(digest,target.key).get('status') == 'SUCCESS'
+                    self.journal.complete(entry['identity'],digest,duplicate)
+                    # Other accounts may already be uploading this path. Do not
+                    # change its mtime or add a pending marker when sharing it.
+                    self.log(f'[云盘共用文件] {target.key} / {path.name}；同目录同版本无需重复下载')
+                    self.ready(str(path))
+                except (DriveError,OSError) as error:
+                    complete = False
+                    self.log(f'[云盘共用文件未就绪] {target.key} / {path.name}：{error}；下轮重试')
+                continue
             partial = directory / ('.shusheng-' + entry['identity'] + '.part')
             owns_final = marker.exists()
             try:
@@ -326,11 +440,12 @@ class DriveWatchWorker(QThread):
                         continue
                     if target.key not in immediate and time.monotonic() < self.next_poll.get(signature, 0):
                         continue
+                    generation = self.credentials.generation
                     def cancelled():
                         with self.lock:
-                            return self.stopping.is_set() or revision != self.revision or not self.credentials.connected()
+                            return (self.stopping.is_set() or revision != self.revision
+                                or generation != self.credentials.generation or not self.credentials.connected())
                     ingestor.stopped = cancelled
-                    generation = self.credentials.generation
                     try:
                         ingestor.poll(target)
                     except InterruptedError:

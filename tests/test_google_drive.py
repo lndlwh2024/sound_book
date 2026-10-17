@@ -38,6 +38,9 @@ class FakeDrive:
         self.dates = []
         self.content = {f['id']:b'video'*1000 for f in self.files}
 
+    def account_identity(self):
+        return 'fake-google-account'
+
     def today_files(self, parent, day):
         self.dates.append((parent, day))
         return {'id':'date'}, self.files
@@ -148,7 +151,7 @@ def test_crash_after_rename_recovers_without_redownload(tmp_path):
     assert not is_file_fully_written(path)
     ingest(root,api).poll(t)
     assert api.downloads==[] and is_file_fully_written(path) and not marker.exists()
-    assert journal.entry(entry['identity'])['state']=='DOWNLOADED'
+    assert journal.entry(journal.identity(t,api.files[0],api.account_identity())[0])['state']=='DOWNLOADED'
 
 
 def test_bad_checksum_does_not_block_next_file_or_mark_processed(tmp_path):
@@ -158,7 +161,7 @@ def test_bad_checksum_does_not_block_next_file_or_mark_processed(tmp_path):
     logs=[];ingest(root,api,log=logs.append).poll(t)
     assert not (Path(t.account.target_dir)/'bad.mp4').exists()
     assert (Path(t.account.target_dir)/'good.mp4').exists()
-    entry=DriveJournal(root).entry(DriveJournal.identity(t,api.files[0])[0])
+    entry=DriveJournal(root).entry(DriveJournal.identity(t,api.files[0],api.account_identity())[0])
     assert entry['state']=='FETCHING' and any('校验' in text for text in logs)
 
 

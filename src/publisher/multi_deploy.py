@@ -673,6 +673,28 @@ class MultiDeployWorker(QThread):
             entries.append(text)
         return '；'.join(entries)
 
+    def cleanup_completed_copies(self):
+        if self.stopping.is_set():
+            return
+        from .scan_cleanup import cleanup_completed_cloud_copies
+        self.log.emit('[部署后检查] 核对运行期间新增的云盘副本；仅归档本轮所选账号均已成功的文件')
+        try:
+            items = cleanup_completed_cloud_copies(self.targets,self.root,
+                history_targets=self.history_targets,
+                exclude_paths=[item['file_path'] for item in self.report['files']],
+                stopped=self.stopping.is_set,log=self.log.emit)
+            records = {item['file_path']:item for item in self.report.get('completion_cleanup',[])}
+            for item in items:
+                records[item['file_path']] = item
+                self.result_changed.emit(item)
+            self.report['completion_cleanup'] = list(records.values())
+            self.save_report()
+            if items:
+                self.queue_changed.emit()
+        except Exception as error:
+            self.report['completion_cleanup_error'] = str(error)
+            self.log.emit(f'[部署后检查未完成] {error}；发布结果保留，未重新上传')
+
     def run_batch(self, jobs):
         # Copies in different bound directories share a content job. Finish all
         # selected accounts and their one retry before advancing to next content.
@@ -729,6 +751,7 @@ class MultiDeployWorker(QThread):
                 if not self.checkpoint():
                     break
                 self.run_batch(self.plan_batch())
+                self.cleanup_completed_copies()
                 selected={t.key for t in self.targets}
                 quota_wait=any(r.get('quota_message') and r.get('status') not in (SUCCESS,'IGNORED','PERMANENT_REJECT','DURATION_LIMIT')
                     for f in self.report['files'] for key,r in f['results'].items() if key in selected)

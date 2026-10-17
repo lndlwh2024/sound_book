@@ -151,9 +151,11 @@ def test_shared_cloud_controls_stay_above_account_tabs(panel,index):
         view.settings_tabs.setCurrentIndex(tab)
         QApplication.processEvents()
         assert view.shared_drive.isVisible()
+        assert view.shared_drive.geometry().bottom() < view.account_group.geometry().top()
+        assert view.account_group.geometry().bottom() < view.settings_tabs.geometry().top()
         assert not view.settings_tabs.isAncestorOf(view.shared_drive)
-        assert view.shared_drive.title()=='云盘跨平台绑定'
-        assert view.settings_tabs.tabText(0)=='云盘目录绑定'
+        assert view.shared_drive.title()=='公共配置-跨平台云盘绑定'
+        assert view.settings_tabs.tabText(0)=='目录绑定'
         assert view.settings_tabs.tabText(1)=='部署配置'
         assert not view.shared_drive.connection_state.wordWrap()
         assert view.shared_drive.change_button.y() == view.shared_drive.disconnected_button.y()
@@ -171,6 +173,55 @@ def pump_until(condition, seconds=3):
         QApplication.processEvents()
         time.sleep(.005)
     assert condition()
+
+
+@pytest.mark.parametrize('index',range(4))
+def test_account_identity_and_cloud_badge_fit_separate_lines(panel,index):
+    from PySide6.QtCore import QPoint
+    panel.channel_view.setCurrentIndex(index)
+    panel.resize(1280,800)
+    panel.show()
+    view=panel.panels[index]
+    identity=view.current().account_id
+    badge=view.cloud_badges[identity]
+    badge.setText('云盘监听中')
+    badge.show()
+    QApplication.processEvents()
+    label=view.enable_buttons[identity][1]
+    row=view.accounts.itemWidget(view.accounts.currentItem())
+    top=label.mapTo(row,QPoint(0,0)).y()
+    badge_top=badge.mapTo(row,QPoint(0,0)).y()
+    assert top>=0 and badge_top>=top+label.height()
+    assert badge_top+badge.height()<=row.height()
+
+
+@pytest.mark.parametrize('connected',[False,True])
+def test_authorization_dialog_has_explicit_readable_colors_and_cancel_keeps_connection(panel,monkeypatch,connected):
+    from PySide6.QtCore import QObject, Signal
+    from PySide6.QtGui import QPalette
+    from PySide6.QtWidgets import QLabel
+    from src.app import drive_widgets
+    class FakeAuthWorker(QObject):
+        open_url=Signal(str)
+        error=Signal(str)
+        success=Signal()
+        finished=Signal()
+        def __init__(self,credentials,parent):super().__init__(parent)
+        def start(self):pass
+        def stop(self):pass
+        def isRunning(self):return False
+    monkeypatch.setattr(drive_widgets,'DriveAuthWorker',FakeAuthWorker)
+    monkeypatch.setattr(panel.drive_credentials,'client',lambda:{})
+    monkeypatch.setattr(panel.drive_credentials,'connected',lambda:connected)
+    panel.connect_drive(panel.panels[0])
+    dialog=panel.drive_auth_dialog
+    QApplication.processEvents()
+    assert dialog.palette().color(QPalette.Window).name()=='#222a36'
+    assert dialog.findChild(QLabel).palette().color(QPalette.WindowText).name()=='#e4edf8'
+    assert ('更换' in dialog.windowTitle())==connected
+    dialog.reject()
+    panel.drive_auth_worker.finished.emit()
+    assert panel.drive_credentials.connected()==connected
 
 
 @pytest.mark.parametrize('index',range(4))

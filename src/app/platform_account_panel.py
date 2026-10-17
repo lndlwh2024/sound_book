@@ -14,7 +14,7 @@ from ..publisher.media import MEDIA_TYPES, media_type
 from ..publisher.dom_readiness import account_dom_state
 
 LIST_STYLE = '''QListWidget {background:#1A202C;border:1px solid #2D3748;border-radius:6px;color:#E2E8F0;padding:4px;}
-QListWidget::item {padding:6px;border-bottom:1px solid #2D3748;}
+QListWidget::item {padding:2px;border-bottom:1px solid #2D3748;}
 QListWidget::item:selected {background:#2B6CB0;color:white;border-radius:4px;}'''
 TABLE_STYLE = '''QTableWidget {background:#1A202C;border:1px solid #2D3748;color:#CBD5E0;}
 QHeaderView::section {background:#2D3748;color:#E2E8F0;padding:4px;font-weight:bold;}'''
@@ -101,13 +101,12 @@ class PlatformAccountPanel(QWidget):
         self.shared_drive.connected_button.clicked.connect(lambda:parent.connect_drive(self))
         self.shared_drive.change_button.clicked.connect(lambda:parent.connect_drive(self))
         self.shared_drive.disconnected_button.clicked.connect(parent.confirm_disconnect_drive)
-        left_layout.addWidget(self.shared_drive)
+        left_layout.insertWidget(0,self.shared_drive)
         self.settings_tabs = QTabWidget()
         self.settings_tabs.setObjectName('publisherSettingsTabs')
-        self.settings_tabs.setDocumentMode(True)
+        self.settings_tabs.setDocumentMode(False)
         self.settings_tabs.tabBar().setDrawBase(False)
-        self.settings_tabs.setStyleSheet('QTabWidget::pane {border:1px solid #33333F;background:#1E1E24;} '
-            'QTabBar::tab {padding:6px 20px;} QTabBar::tab:selected {color:#38BDF8;}')
+        self.settings_tabs.setStyleSheet('QTabWidget::pane {border:1px solid #3E4C60;background:#222630;border-radius:7px;top:0;} QTabWidget {margin-top:10px;} QTabBar::tab {background:#191F29;color:#BAC8DA;border:1px solid #3D4D62;border-radius:5px;min-height:22px;padding:8px 24px;margin:0 5px 8px 0;font-weight:600;} QTabBar::tab:selected {background:#305F88;color:#F4FAFF;border-color:#58A9EA;} QTabBar::tab:hover {background:#2A3748;}')
         outer_left.addWidget(self.settings_tabs,1)
         # Compatibility storage widgets stay hidden; display identity comes from the platform.
         self.name, self.identity = QLineEdit(self), QLineEdit(self)
@@ -138,7 +137,7 @@ class PlatformAccountPanel(QWidget):
         browse.clicked.connect(self.browse)
         local_layout.addWidget(browse)
         resource_layout.addWidget(local)
-        self.settings_tabs.addTab(self.resources_group,'云盘目录绑定')
+        self.settings_tabs.addTab(self.resources_group,'目录绑定')
 
         config = QGroupBox('部署配置')
         self.configuration_group = config
@@ -348,7 +347,7 @@ class PlatformAccountPanel(QWidget):
                 'QLineEdit,QComboBox,QSpinBox {font-size:12px;min-height:0;max-height:24px;padding:2px 4px;} '
                 'QPushButton {min-height:0;font-size:12px;padding:3px 5px;} '
                 'QGroupBox {margin-top:8px;}') if compact else '')
-            self.settings_tabs.tabBar().setStyleSheet('QTabBar::tab {padding:3px 16px;}' if compact else '')
+            self.settings_tabs.tabBar().setStyleSheet('')
             for layout in self._configuration_layouts:
                 layout.setContentsMargins(6,4,6,6)
                 layout.setSpacing(2 if compact else 4)
@@ -371,8 +370,8 @@ class PlatformAccountPanel(QWidget):
                     self.platform_fields.addWidget(control,row,col*2+1,1,3 if full else 1)
                     index += 2 if full else 1
             for index in range(self.accounts.count()):
-                self.accounts.item(index).setSizeHint(QSize(200,32 if compact else 36))
-        row_height=self.accounts.sizeHintForRow(0) if self.accounts.count() else 32
+                self.accounts.item(index).setSizeHint(QSize(200,60))
+        row_height=self.accounts.sizeHintForRow(0) if self.accounts.count() else 60
         self.accounts.setMinimumHeight(0)
         self.accounts.setFixedHeight(round(row_height*(2 if compact else 2.5))+10)
         self.account_group.setFixedHeight(self.account_group.sizeHint().height())
@@ -399,20 +398,22 @@ class PlatformAccountPanel(QWidget):
             item = QListWidgetItem()
             item.setData(Qt.AccessibleTextRole,self.account_label(account))
             item.setData(Qt.UserRole,account.account_id)
-            item.setSizeHint(QSize(200,36))
+            item.setSizeHint(QSize(200,60))
             self.accounts.addItem(item)
             row = QWidget()
             row.setStyleSheet('QWidget {background:transparent;}')
             layout = QHBoxLayout(row)
-            layout.setContentsMargins(6,2,6,2)
+            layout.setContentsMargins(6,6,6,6)
             label = QLabel(self.account_label(account))
+            label.setMinimumHeight(label.fontMetrics().height()+2)
             label.setAttribute(Qt.WA_TransparentForMouseEvents)
             label.setToolTip(self.account_label(account))
             identity_layout = QVBoxLayout()
-            identity_layout.setSpacing(0)
+            identity_layout.setSpacing(4)
             identity_layout.addWidget(label)
             badge = QLabel()
-            badge.setStyleSheet('color:#90A4BC;font-size:11px;')
+            badge.setStyleSheet('color:#B9DBEA;font-size:11px;')
+            badge.setMinimumHeight(16)
             badge.setAttribute(Qt.WA_TransparentForMouseEvents)
             self.cloud_badges[account.account_id] = badge
             identity_layout.addWidget(badge)

@@ -51,7 +51,7 @@ def test_network_failure_preserves_unfinished_day_and_missing_dates_are_skipped(
     api.fail_day = '2026-10-17'
     with pytest.raises(DriveError):
         poll(root,api,account,'2026-10-19')
-    assert DriveJournal(root).resume_day(account,datetime(2026,10,19).date()).isoformat() == '2026-10-17'
+    assert DriveJournal(root).resume_day(account,datetime(2026,10,19).date(),api.account_identity()).isoformat() == '2026-10-17'
     api.fail_day = None
     api.dates.clear()
     poll(root,api,account,'2026-10-19')
@@ -68,10 +68,10 @@ def test_unfinished_file_keeps_old_date_without_blocking_later_files(tmp_path):
     poll(root,api,account,'2026-10-16')
     poll(root,api,account,'2026-10-18')
     assert (Path(account.account.target_dir)/'new.mp4').exists()
-    assert DriveJournal(root).resume_day(account,datetime(2026,10,18).date()).isoformat() == '2026-10-16'
+    assert DriveJournal(root).resume_day(account,datetime(2026,10,18).date(),api.account_identity()).isoformat() == '2026-10-16'
     api.content['old'] = b'video'*1000
     poll(root,api,account,'2026-10-18')
-    assert DriveJournal(root).resume_day(account,datetime(2026,10,18).date()).isoformat() == '2026-10-18'
+    assert DriveJournal(root).resume_day(account,datetime(2026,10,18).date(),api.account_identity()).isoformat() == '2026-10-18'
     assert api.downloads.count('new') == 1
 
 
@@ -105,7 +105,7 @@ def test_unready_media_cannot_be_left_behind_at_midnight(tmp_path,field,value):
     api=DateDrive({'2026-10-16':[file]});root=tmp_path/'state'
     poll(root,api,account,'2026-10-16')
     poll(root,api,account,'2026-10-18')
-    assert DriveJournal(root).resume_day(account,datetime(2026,10,18).date()).isoformat()=='2026-10-16'
+    assert DriveJournal(root).resume_day(account,datetime(2026,10,18).date(),api.account_identity()).isoformat()=='2026-10-16'
     assert not api.downloads
 
 

@@ -1,6 +1,7 @@
 """UI acceptance: cleanup is automatic, cancellable and does not block the UI."""
 import os
 import hashlib
+import json
 import threading
 import time
 from unittest.mock import MagicMock
@@ -64,6 +65,19 @@ def local_preflight(panel,monkeypatch):
 def select_channels(panel,*platforms):
     for key,check in panel.channel_checks.items():
         check.setChecked(key in platforms)
+
+
+def test_completion_cleanup_history_is_restored_for_late_copy(panel,tmp_path):
+    path=tmp_path/'late-copy.mp4';path.write_bytes(b'video'*500)
+    target=panel.all_targets()[0]
+    item={'file_path':str(path),'file_name':path.name,'sha256':hashlib.sha256(path.read_bytes()).hexdigest(),
+        'size_bytes':path.stat().st_size,'mtime_ns':path.stat().st_mtime_ns,'archived_path':None,
+        'cleanup_only':True,'results':{target.key:{'status':'SUCCESS','message':'confirmed','attempts':[]}}}
+    folder=panel.store.root/'publish_reports';folder.mkdir(exist_ok=True)
+    (folder/'cleanup.json').write_text(json.dumps({'files':[],'completion_cleanup':[item]}),encoding='utf-8')
+    panel.restore_results()
+    assert panel.results[str(path)]['results'][target.key]['status']=='SUCCESS'
+    assert panel.results[str(path)]['cleanup_only']
 
 
 def test_manual_cleanup_from_unselected_view_archives_only_checked_accounts(panel,tmp_path):

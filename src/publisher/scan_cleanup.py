@@ -12,6 +12,81 @@ from .upload_quota import DailyUploadQuota
 from datetime import datetime
 
 
+def cleanup_completed_cloud_copies(targets, root, *, history_targets=None, exclude_paths=(),
+                                   stopped=lambda: False, log=lambda text: None):
+    """Reconcile late cloud copies without expanding a task's upload selection."""
+    from .drive_ingest import DriveJournal, canonical_local_path, cloud_archive_scope
+    root = Path(root)
+    if stopped() or not (root/'drive_ingest.sqlite3').exists():
+        return []
+    ledger, journal = MultiTargetLedger(root), DriveJournal(root)
+    excluded = {canonical_local_path(p) for p in exclude_paths}
+    with journal.connect() as db:
+        cloud_paths = {canonical_local_path(p) for (p,) in
+            db.execute("SELECT DISTINCT path FROM files WHERE state='DOWNLOADED'")}
+    candidates = {}
+    for target in targets:
+        directory = Path(target.account.target_dir)
+        if not target.account.target_dir or not directory.is_dir():
+            continue
+        for path in directory.iterdir():
+            if stopped():
+                return []
+            if (path.is_file() and path.suffix.lower() in selected_extensions(target.account)
+                    and canonical_local_path(path) in cloud_paths
+                    and canonical_local_path(path) not in excluded):
+                candidates.setdefault(canonical_local_path(path), path)
+    history = {t.key:t for t in (history_targets or targets)}
+    history.update({t.key:t for t in targets})
+    items = []
+    for path in candidates.values():
+        if stopped():
+            break
+        try:
+            before = path.stat()
+            signature = before.st_size, before.st_mtime_ns
+            if not is_file_fully_written(path):
+                continue
+            sha = hashlib.sha256()
+            with path.open('rb') as stream:
+                for chunk in iter(lambda:stream.read(1024*1024),b''):
+                    if stopped():
+                        return items
+                    sha.update(chunk)
+            after = path.stat()
+            if signature != (after.st_size,after.st_mtime_ns) or stopped():
+                continue
+            digest = sha.hexdigest()
+            # Local sources and unverified/incomplete cloud downloads stay untouched.
+            if not journal.origins(path,digest):
+                continue
+            scope = cloud_archive_scope(root,path,digest,targets)
+            if not scope:
+                continue
+            results = {key:dict(ledger.result(digest,key) or
+                {'status':'PENDING','message':'此账号尚无成功记录'}, attempts=[]) for key in history}
+            item = {'file_name':path.name,'file_path':str(path.resolve()),'size_bytes':before.st_size,
+                'mtime_ns':before.st_mtime_ns,'sha256':digest,'results':results,'archived_path':None,
+                'modified_at':datetime.fromtimestamp(before.st_mtime,CHINA_TIME).isoformat(),
+                'task_targets':[t.key for t in scope],'cleanup_only':True}
+            if (all(results[t.key]['status']=='SUCCESS' for t in scope)
+                    and all(t.account.auto_archive for t in scope) and not stopped()):
+                try:
+                    for target in scope:
+                        journal.mark_duplicate(target.key,path,digest)
+                    if stopped():
+                        return items
+                    item['archived_path'] = str(archive_completed_file(path,signature,log,cloud_root=root))
+                    log(f'[部署后重复归档] {path.name}：本轮所选{len(scope)}个账号均已有成功记录，仅归档、未重新上传')
+                except (OSError,ValueError) as error:
+                    item['archive_error'] = str(error)
+                    log(f'[部署后归档未完成] {path.name}：{error}；保留文件与成功记录')
+            items.append(item)
+        except OSError as error:
+            log(f'[部署后文件暂不能处理] {path.name}：{error}；保留文件')
+    return items
+
+
 def scan_token(root, targets, archive_targets, history_targets=None):
     """Cheap metadata validation; only the background worker computes hashes."""
     listing=[]

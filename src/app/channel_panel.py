@@ -317,6 +317,9 @@ class MultiPlatformPublisherPanel(QWidget):
         self.setAttribute(Qt.WA_StyledBackground, True)
         icon = (Path(__file__).resolve().parents[2]/'resources/icons/checkbox_checked.svg').as_posix()
         self.setStyleSheet('QWidget#multiPlatformPublisher {background:#1E1E24;} '
+            'QMessageBox {background:#222A36;color:#F0F4FB;} '
+            'QMessageBox QLabel {color:#E4EDF8;background:transparent;} '
+            'QMessageBox QPushButton {background:#326FA6;color:white;border:1px solid #5C99CE;padding:7px 14px;min-height:22px;} '
             'QCheckBox::indicator {width:16px;height:16px;border:2px solid white;border-radius:3px;background:#202028;} '
             'QCheckBox::indicator:checked {background:#247F91;image:url("'+icon+'");} '
             'QCheckBox::indicator:disabled {border-color:#C8C8D0;background:#35353F;}')
@@ -429,9 +432,15 @@ class MultiPlatformPublisherPanel(QWidget):
                 self.update_drive_connection()
                 return
         dialog = QDialog(self)
-        dialog.setWindowTitle('连接Google云盘')
-        dialog.resize(520, 240)
+        dialog.setObjectName('driveAuthDialog')
+        dialog.setWindowTitle('更换Google云盘连接' if self.drive_credentials.connected() else '连接Google云盘')
+        dialog.setStyleSheet('QDialog#driveAuthDialog {background:#222A36;color:#F0F4FB;} '
+            'QDialog#driveAuthDialog QLabel {color:#E4EDF8;background:transparent;font-size:13px;} '
+            'QDialog#driveAuthDialog QPushButton {background:#303C4D;color:#EDF3FB;border:1px solid #667B94;border-radius:4px;padding:8px 16px;}')
+        dialog.resize(550, 260)
         layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(24,20,24,20)
+        layout.setSpacing(18)
         message = QLabel('将在系统浏览器打开Google登录授权。\n'
             '书声申请只读Drive权限，用于浏览目录和下载媒体；不会修改云端文件。\n'
             '该权限允许读取您账号可访问的Drive文件，书声仅轮询已绑定的系列目录。\n'
@@ -901,7 +910,7 @@ class MultiPlatformPublisherPanel(QWidget):
         for path in sorted(folder.glob('*.json'), key=lambda p:p.stat().st_mtime):
             try:
                 data = json.loads(path.read_text(encoding='utf-8'))
-                for item in data.get('files', []):
+                for item in [*data.get('files', []),*data.get('completion_cleanup', [])]:
                     self.results[item['file_path']] = item
             except (OSError, ValueError, KeyError):
                 continue

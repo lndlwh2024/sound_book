@@ -248,6 +248,27 @@ def query_literal(value):
 class DriveClient:
     def __init__(self, credentials):
         self.credentials = credentials
+        self._identity_lock = threading.Lock()
+        self._identity_generation = None
+        self._account_identity = None
+
+    def account_identity(self):
+        """Identify the actual Drive user, never the OAuth client or access token."""
+        with self._identity_lock:
+            generation = self.credentials.generation
+            if self._identity_generation == generation:
+                return self._account_identity
+            user = self.get('about', fields='user(permissionId)').get('user', {})
+            permission_id = user.get('permissionId')
+            if not isinstance(permission_id, str) or not permission_id.strip():
+                raise DriveError('无法确认Google云盘账号，暂不扫描或下载，请稍后重试')
+            identity = 'google:' + hashlib.sha256(permission_id.encode()).hexdigest()
+            with self.credentials.lock:
+                if generation != self.credentials.generation:
+                    raise InterruptedError('云盘连接已变更，取消本轮扫描')
+                self._account_identity = identity
+                self._identity_generation = generation
+            return identity
 
     def get(self, route, **params):
         return request(API_URL + route + '?' + urlencode(params), token=self.credentials.access_token())

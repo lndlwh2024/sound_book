@@ -49,7 +49,7 @@ class DriveAuthWorker(QThread):
 class SharedDriveWidget(QGroupBox):
     """One shared cloud authorization, visible above per-account tabs."""
     def __init__(self, parent=None):
-        super().__init__('云盘跨平台绑定', parent)
+        super().__init__('公共配置-跨平台云盘绑定', parent)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8,4,8,7)
         layout.setSpacing(4)
