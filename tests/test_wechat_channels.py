@@ -174,12 +174,15 @@ def test_real_shared_workflow_fills_waits_publishes_or_retains_failure(tmp_path,
             assert info['confirmation'] is None
 
 
-def test_configured_short_title_over_limit_never_clicks_publish(browser_page, tmp_path):
+def test_configured_short_title_over_limit_is_shortened_before_filling(browser_page, tmp_path):
     account = owner()
     account.wechat_short_title = '过长'*20
     instance = adapter(account, tmp_path)
-    with pytest.raises(creator_studio.PlatformRejected, match='短标题超过'):
-        instance.fill_details(browser_page, Path('test.mp4'))
+    instance.fill_details(browser_page, Path('test.mp4'))
+    assert len(instance.title)<=16 and '…' in instance.title
+    assert browser_page.locator('input[placeholder*=短标题]').input_value()==instance.title
+    assert account.wechat_short_title=='过长'*20
+    assert browser_page.evaluate('window.wrong') is None
 
 
 def test_collection_missing_never_creates_collection_or_publishes(browser_page, tmp_path):

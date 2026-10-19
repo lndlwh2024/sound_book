@@ -10,6 +10,7 @@ from .channel_probe import CREATOR_NOTICES_JS, safe_url
 from .creator_studio import CreatorStudioUploader, rejection
 from .youtube import PlatformRejected
 from .titles import resolve_title
+from .wechat_title import SHORT_TITLE_LIMIT, shorten_title, title_length
 
 
 PUBLISH_PATH = '/cgi-bin/mmfinderassistant-bin/post/post_create'
@@ -92,7 +93,7 @@ class WeChatChannelsUploader(CreatorStudioUploader):
 
     def fill_details(self, page, video):
         try:
-            self.title = resolve_title(self.account,video.name)
+            original_title = resolve_title(self.account,video.name)
         except ValueError as error:
             raise PlatformRejected('CONFIG_REQUIRED',str(error)) from error
         editor = self.wait(page, '等待微信视频号描述编辑区',
@@ -100,15 +101,23 @@ class WeChatChannelsUploader(CreatorStudioUploader):
         # This platform deliberately has no description/title-rule setting.
         # Clear a restored form value as well, instead of posting stale content.
         self.fill_and_verify(page, editor, '', '视频描述')
-        short = self.title
         control = self.wait(page, '等待微信视频号短标题', lambda: self.one_visible(
             page.locator('input[placeholder*="短标题"]')), self.control_seconds)
+        page_limit=control.get_attribute('maxlength')
+        limit=min(SHORT_TITLE_LIMIT,int(page_limit)) if page_limit and page_limit.isdigit() else SHORT_TITLE_LIMIT
+        if limit < 1 and original_title:
+            raise PlatformRejected('CONFIG_REQUIRED','当前微信视频号短标题控件不允许输入；未发表')
+        short=shorten_title(original_title,limit) if original_title else ''
+        self.title=short
+        if short != original_title:
+            self.log(f'[微信视频号标题缩写] 原题（{title_length(original_title)}字符）：{original_title}'
+                     f' → 短标题（{title_length(short)}字符）：{short}；标点计入长度')
         self.fill_and_verify(page, control, short, '短标题')
         self.log('[内容填写] 视频描述留空；短标题='+ (short or '留空，不自动补入文件名'))
 
     def fill_and_verify(self, page, control, value, label):
         limit = control.get_attribute('maxlength')
-        if limit and limit.isdigit() and len(value) > int(limit):
+        if limit and limit.isdigit() and title_length(value) > int(limit):
             raise PlatformRejected('CONFIG_REQUIRED', f'{label}超过当前页面的 {limit} 字限制；未截断内容、未发表')
         self.stop_check()
         control.fill(value, timeout=1500)
