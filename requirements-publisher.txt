@@ -1,0 +1,2 @@
+# Windows 10 candidate; target-machine qualification is required before release.
+-r requirements-publisher-lock.txt

@@ -12,6 +12,14 @@ class BrowserPublishWorkflow:
     _publish_armed = False
     stage_interruptions = ()
 
+    def _capture_failure_page(self, page, reason='', role='last'):
+        callback = getattr(self, 'failure_capture', None)
+        if callable(callback):
+            try:
+                callback(page, getattr(self, 'stage', '浏览器检查'), str(reason), role=role)
+            except Exception as error:
+                self._progress('[失败诊断保存异常] '+str(error))
+
     def _close_publish_context(self, context, page, submitted=False):
         """Keep a submitted page alive while its final browser events settle."""
         if submitted and page and not page.is_closed():

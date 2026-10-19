@@ -64,7 +64,8 @@ def test_extract_nickname_robustness():
     """测试从创作者中心提取昵称的过滤与容错"""
     mock_page = MagicMock()
     # 模拟返回合法昵称
-    mock_page.evaluate.return_value = "书声官方主播"
+    mock_page.url = "https://creator.douyin.com/creator-micro/content/upload"
+    mock_page.evaluate.return_value = {"nickname": "书声官方主播", "source": "#header-avatar"}
     nick = DouyinBrowserManager.extract_nickname(mock_page)
     assert nick == "书声官方主播"
 

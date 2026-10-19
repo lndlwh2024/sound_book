@@ -12,7 +12,7 @@ STATUS_TEXT = {'SUCCESS':'已成功', 'FAILED':'失败', 'FAILED1':'失败1', 'F
                'DURATION_LIMIT':'超长跳过', 'PERMANENT_REJECT':'永久跳过', 'CONFIG_REQUIRED':'配置未完成',
                'AUTH_REQUIRED':'需要登录', 'ACCOUNT_RESTRICTED':'账号受限',
                'VERIFICATION_REQUIRED':'需要验证', 'PLATFORM_BUSY':'平台繁忙',
-               'IDENTITY_MISMATCH':'账号不符', 'FILE_CHANGED':'文件变化'}
+               'IDENTITY_MISMATCH':'账号不符', 'FILE_CHANGED':'文件变化', 'RECOVERY_REQUIRED':'中断待核验'}
 BLOCKING = {'ACCOUNT_LIMIT', 'AUTH_REQUIRED', 'ACCOUNT_RESTRICTED', 'IDENTITY_MISMATCH',
             'CONFIG_REQUIRED', 'VERIFICATION_REQUIRED', 'PLATFORM_BUSY'}
 RETRYABLE = {'FAILED', 'FAILED1'}
@@ -29,9 +29,14 @@ def result_status_text(result):
 
 
 def fresh_result(previous):
-    """A new task keeps proven completion/skips, but gets a fresh retry budget."""
+    """Restart preserves completion and the content/account retry ceiling."""
     previous = dict(previous)
     if previous.get('status') not in ('SUCCESS','IGNORED','PERMANENT_REJECT','DURATION_LIMIT'):
-        previous.update(status='PENDING', attempt_count=0)
+        if previous.get('requires_review'):
+            previous['status']='RECOVERY_REQUIRED'
+        elif previous.get('status')=='FAILED2' or int(previous.get('attempt_count') or 0)>=2:
+            previous['status']='FAILED2'
+        else:
+            previous.update(status='PENDING')
     previous['attempts'] = []
     return previous

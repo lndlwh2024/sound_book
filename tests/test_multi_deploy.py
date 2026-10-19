@@ -552,8 +552,8 @@ def test_exception_after_submit_boundary_never_retries_unknown_outcome(tmp_path)
     first.run_batch(first.plan_batch())
     second=worker(tmp_path,targets[:1],lambda *args:BrokenUploader())
     second.run_batch(second.plan_batch())
-    assert len(calls)==4
-    assert second.report['files'][0]['results'][targets[0].key]['status']=='FAILED2'
+    assert len(calls)==1
+    assert second.report['files'][0]['results'][targets[0].key]['status']=='RECOVERY_REQUIRED'
     assert (directory/'a.mp4').exists()
 
 

@@ -5,6 +5,8 @@ import hashlib
 import json
 import os
 import secrets
+import socket
+import ssl
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -51,8 +53,25 @@ def request(url, *, data=None, token=None, stream=False):
         if error.code == 400 and url == TOKEN_URL:
             raise DriveAuthRequired('Google授权不可用或已撤销，请重新连接') from None
         raise DriveError(f'Google请求失败（HTTP {error.code}），请检查权限、网络与Drive API设置') from None
-    except (URLError, TimeoutError, OSError):
-        raise DriveError('无法连接Google，请检查网络后重试') from None
+    except (URLError, TimeoutError, OSError) as error:
+        reason = error.reason if isinstance(error,URLError) else error
+        if isinstance(reason,ssl.SSLCertVerificationError):
+            detail = 'TLS证书验证失败'
+        elif isinstance(reason,ssl.SSLError):
+            detail = 'TLS连接失败'
+        elif isinstance(reason,socket.gaierror):
+            detail = 'DNS域名解析失败'
+        elif isinstance(reason,TimeoutError):
+            detail = '连接或读取超时'
+        elif isinstance(reason,ConnectionRefusedError):
+            detail = '连接被拒绝，请检查代理或网络服务'
+        else:
+            detail = type(reason).__name__
+        code = getattr(reason,'winerror',None) or getattr(reason,'errno',None)
+        if isinstance(code,int):
+            detail += f'，错误码{code}'
+        # Do not include arbitrary transport text containing proxy credentials or URLs.
+        raise DriveError('无法连接Google（'+detail+'），请检查网络后重试；未据此判定授权失效') from None
 
 
 def _protect(data, decrypt=False):
@@ -297,11 +316,16 @@ class DriveClient:
 
     def today_files(self, parent, day):
         folders = [f for f in self.children(parent, True) if f['name'] == day]
-        if len(folders) > 1:
-            raise DriveError(f'云盘存在多个同名日期目录{day}，请整理后重试')
         if not folders:
             return None, []
-        return folders[0], self.children(folders[0]['id'])
+        # Drive allows equal folder names. Read every existing match, keeping
+        # stable IDs; never create, rename, merge or delete remote folders.
+        files = {}
+        for folder in folders:
+            for item in self.children(folder['id']):
+                files.setdefault(item['id'], item)
+        selected = dict(folders[0], existing_folder_ids=[f['id'] for f in folders])
+        return selected, sorted(files.values(), key=lambda item: (item['name'].casefold(), item['id']))
 
     def download(self, identity, destination, stopped, progress):
         if stopped():

@@ -5,6 +5,7 @@ capture is structural evidence; only a fresh page can prove current access.
 """
 import re
 import threading
+import uuid
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
@@ -16,12 +17,13 @@ from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeo
 from .browser_workflow import BrowserPublishWorkflow
 from .channel_probe import CREATOR_NOTICES_JS
 from .creator_studio import CreatorStudioUploader, rejection
-from .dom_readiness import account_dom_state
+from .dom_readiness import publishing_dom_state as account_dom_state, structure_ready
 from .douyin.browser import DouyinBrowserManager
-from .identity import extract_platform_identity
+from .identity import extract_platform_identity, refresh_platform_identity, read_homepage_identity
 from .platforms import CHANNELS
 from .status import STATUS_TEXT
 from .youtube import PlatformRejected, UploadStopped, YouTubeUploader
+from .youtube_browser import launch_youtube_context, google_login_rejected, GOOGLE_LOGIN_HELP, youtube_runtime_summary
 
 
 LOGIN_PAGE_JS = r'''() => {
@@ -69,8 +71,8 @@ def prerequisite_results(targets, report_root):
     for target in targets:
         problems = []
         state = account_dom_state(report_root, target.platform, target.account.account_id)
-        if not state.publish_reports:
-            problems.append(state.message + '。请点击该账号的“采集 DOM”，在视频编辑页采集。')
+        if not structure_ready(state):
+            problems.append(state.message + '。缺少平台适配，请采集异常页面用于补充适配。')
         profile = Path(target.profile) if target.profile else None
         try:
             available = bool(profile and profile.is_dir() and any(profile.iterdir()))
@@ -109,6 +111,8 @@ class AccountPreflight(BrowserPublishWorkflow):
 
     def _check_duration_notice(self, page):
         address = urlsplit(page.url)
+        if self.target.platform == 'youtube' and google_login_rejected(page.url):
+            raise PlatformRejected('AUTH_REQUIRED', GOOGLE_LOGIN_HELP)
         if address.hostname != self.channel.host or re.search(r'/(login|signin)(?:/|$)', address.path, re.I):
             raise PlatformRejected('AUTH_REQUIRED', '登录已失效或进入登录页，请先完成“登录 / 获取平台昵称”。')
         # Same rejection evidence as the actual publisher, including a banned
@@ -124,14 +128,24 @@ class AccountPreflight(BrowserPublishWorkflow):
 
     def verify_page(self, page):
         self._check_stop()
+        self._check_duration_notice(page)
         if self.target.platform == 'youtube':
             # Channel ID is the stable identity; remarks/nicknames may differ.
             YouTubeUploader.verify_channel(self, page, self.seconds)
         elif self.target.platform in ('xiaohongshu', 'kuaishou'):
             CreatorStudioUploader.verify_identity(self, page)
         else:
+            # The current Douyin header hides its name in the avatar menu.
+            # Once a nickname is bound, reveal that same own-account area for
+            # the preflight check as well; never accept an unrelated post author.
+            if self.account.platform_nickname:
+                bound_identity = refresh_platform_identity(page, 'douyin', self.stop_requested, seconds=min(5, self.seconds))
+                if not bound_identity:
+                    bound_identity = read_homepage_identity(page, 'douyin', self.stop_requested, seconds=min(5,self.seconds))
+            else:
+                bound_identity = None
             def ready():
-                identity = extract_platform_identity(page, 'douyin')
+                identity = bound_identity or extract_platform_identity(page, 'douyin')
                 wanted = (self.account.platform_nickname or '').strip()
                 if not identity:
                     # Existing Douyin accounts may predate nickname binding.
@@ -152,15 +166,24 @@ class AccountPreflight(BrowserPublishWorkflow):
         self._check_duration_notice(page)
 
     def check(self, playwright, headless=False):
-        context = None
+        context, page, passed = None, None, False
         try:
             self._check_stop()
             kwargs = dict(headless=headless, viewport={'width': 1440, 'height': 900}, timeout=10000)
             if self.target.platform == 'douyin':
                 context = DouyinBrowserManager.create_persistent_context(playwright, Path(self.target.profile), **kwargs)
+            elif self.target.platform == 'youtube':
+                context = launch_youtube_context(playwright, self.target.profile, **kwargs)
+                self.log(youtube_runtime_summary(context, self.target.profile))
             else:
-                context = playwright.chromium.launch_persistent_context(self.target.profile, **kwargs)
+                from .media_browser import launch_media_context
+                context = launch_media_context(playwright,self.target.profile, **kwargs)
             page = context.pages[0] if context.pages else context.new_page()
+            from .media_browser import media_capabilities
+            capabilities = media_capabilities(page)
+            if not capabilities or not capabilities.get('h264') or not capabilities.get('aac'):
+                raise PlatformRejected('CONFIG_REQUIRED','浏览器缺少 H.264/AAC 视频解码支持，请完整更新发行包；尚未上传文件，不消耗上传重试次数')
+            self.log('[浏览器媒体检查] H.264/AAC 支持通过；浏览器版本 '+str(context.browser.version))
             page.set_default_timeout(1000)
             self._check_stop()
             try:
@@ -169,6 +192,7 @@ class AccountPreflight(BrowserPublishWorkflow):
                 self.log('页面加载较慢，继续检查当前登录页；尚未开始上传')
             self.verify_page(page)
             self._check_stop()
+            passed = True
             return PreflightResult(self.target.key, target_name(self.target), 'SUCCESS', '当前登录与发布页访问检查通过')
         except PlatformRejected as error:
             return PreflightResult(self.target.key, target_name(self.target), error.status, str(error))
@@ -176,11 +200,14 @@ class AccountPreflight(BrowserPublishWorkflow):
             raise
         except RuntimeError as error:
             return PreflightResult(self.target.key, target_name(self.target), 'FAILED',
-                str(error) + '。请检查网络并重新登录；昵称未能识别时请采集本人账号区域 DOM。')
+                str(error) + '。请检查网络和页面状态；昵称未识别时查看本人账号区域诊断，不据此判断登录失效。')
         except Exception as error:
+            self.log(f'[登录检查异常] {type(error).__name__}：{error}')
             return PreflightResult(self.target.key, target_name(self.target), 'FAILED',
                 f'未能确认当前登录状态：{type(error).__name__}。请检查网络、关闭该账号其他浏览器，再登录或采集 DOM 后重试。')
         finally:
+            if not passed:
+                self._capture_failure_page(page, '部署前检查未通过')
             if context:
                 try:
                     context.close()
@@ -190,13 +217,31 @@ class AccountPreflight(BrowserPublishWorkflow):
 
 class DeploymentPreflightWorker(QThread):
     log = Signal(str)
+    event_logged = Signal(dict)
     status = Signal(str)
 
-    def __init__(self, targets, root, parent=None):
+    def __init__(self, targets, root, parent=None, task_id=None):
         super().__init__(parent)
         self.targets, self.root = deepcopy(targets), Path(root)
+        from .event_log import event_log
+        self.events=event_log(self.root)
+        self.task_id = task_id or uuid.uuid4().hex
+        from .failure_diagnostics import TaskFailureDiagnostics
+        self.diagnostics = TaskFailureDiagnostics(self.root, self.task_id, self.events.task_events(self.task_id))
         self.stopping = threading.Event()
         self.results = []
+
+    def emit_log(self,message):
+        self.log.emit(message)
+        target=getattr(self,'current_target',None)
+        context=({'platform':target.platform,'account_id':target.account.account_id,
+            'account_name':target.account.account_name} if target else {})
+        event = self.events.write(message, task_id=self.task_id, **context)
+        try:
+            self.diagnostics.record_event(event)
+        except OSError as error:
+            self.log.emit('[失败诊断日志保存异常] '+str(error))
+        self.event_logged.emit(event)
 
     def stop(self):
         self.stopping.set()
@@ -206,20 +251,45 @@ class DeploymentPreflightWorker(QThread):
             failures = prerequisite_results(self.targets, self.root / 'dom_reports')
             if failures:
                 self.results = failures
+                for result in failures:
+                    target = next(t for t in self.targets if t.key == result.key)
+                    self.current_target = target
+                    self.emit_log('[部署前配置检查失败] '+result.message)
+                    self.diagnostics.operation(target.platform, target.account.account_id).complete(result.status, result.message)
                 return
             with sync_playwright() as playwright:
                 for index, target in enumerate(self.targets, 1):
+                    self.current_target=target
                     if self.stopping.is_set():
                         return
                     prefix = f'[部署前检查 {index}/{len(self.targets)}] {target_name(target)}'
                     self.status.emit(prefix + '；尚未开始上传')
-                    self.log.emit(prefix + '：检查当前登录及发布页权限')
-                    result = AccountPreflight(target, self.stopping.is_set,
-                        lambda message: self.log.emit(prefix + '：' + message)).check(playwright)
+                    self.emit_log(prefix + '：检查当前登录及发布页权限')
+                    operation = self.diagnostics.operation(target.platform, target.account.account_id)
+                    check = AccountPreflight(target, self.stopping.is_set,
+                        lambda message: self.emit_log(prefix + '：' + message))
+                    check.failure_capture = operation.capture
+                    try:
+                        result = check.check(playwright)
+                    except UploadStopped:
+                        operation.complete('CANCELLED', '部署前检查被停止')
+                        raise
                     self.results.append(result)
-                    self.log.emit(prefix + '：' + STATUS_TEXT.get(result.status, result.status) + '；' + result.message)
+                    self.emit_log(prefix + '：' + STATUS_TEXT.get(result.status, result.status) + '；' + result.message)
+                    operation.complete(result.status, result.message)
         except UploadStopped:
             self.stopping.set()
         except Exception as error:
+            self.emit_log(f'[部署前检查异常] {type(error).__name__}：{error}')
+            if 'operation' in locals():
+                operation.complete('FAILED', str(error))
+            else:
+                for target in self.targets:
+                    self.diagnostics.operation(target.platform, target.account.account_id).complete('FAILED', str(error))
             self.results.append(PreflightResult('', '部署前检查', 'FAILED',
                 f'检查未完成（{type(error).__name__}）。请关闭登录/采集浏览器并检查网络后重试。'))
+        finally:
+            try:
+                self.diagnostics.finish()
+            except OSError as error:
+                self.log.emit('[失败诊断整理异常] '+str(error))

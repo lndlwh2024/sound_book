@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-书声 (ShuSheng) v2.0 主入口
+书声 (ShuSheng) 完整版主入口
 默认启动：PySide6 桌面图形客户端
 诊断/批处理模式：使用 --cli 参数启动命令行界面
 """
@@ -24,6 +24,7 @@ def run_gui():
     from PySide6.QtWidgets import QApplication
     from PySide6.QtCore import Qt
     from src.app.main_window import MainWindow
+    from src.publisher import __version__ as publisher_version
 
     # 针对 Windows 平台注册专属 AppUserModelID，使任务栏独立呈现书声专属图标，避免显示 Python 默认图标
     if sys.platform == "win32":
@@ -44,7 +45,7 @@ def run_gui():
 
     window = MainWindow()
     window.show()
-    print("[书声 ShuSheng v2.0] 桌面客户端已成功加载并就绪运行！")
+    print(f"[书声 ShuSheng 完整版] 桌面客户端已就绪；发布组件 {publisher_version}", flush=True)
     sys.exit(app.exec())
 
 

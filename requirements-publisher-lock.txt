@@ -1,0 +1,9 @@
+# Runtime lock for the Windows 10 candidate; Python 3.12.11 x64.
+PySide6==6.8.3
+PySide6_Addons==6.8.3
+PySide6_Essentials==6.8.3
+shiboken6==6.8.3
+playwright==1.56.0
+greenlet==3.5.6
+pyee==13.0.1
+typing_extensions==4.16.0

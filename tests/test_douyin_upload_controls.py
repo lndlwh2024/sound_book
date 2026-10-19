@@ -329,6 +329,7 @@ def test_quota_rejection_finishes_without_waiting_sixty_seconds_or_archiving(tmp
     monkeypatch.setattr(module, 'sync_playwright', MagicMock())
     monkeypatch.setattr(module.DouyinBrowserManager, 'create_persistent_context', lambda *a, **k: context)
     uploader._pause = MagicMock()
+    uploader._navigate_upload_page = MagicMock()  # Navigation readiness has dedicated regressions.
     uploader._prepare_title = MagicMock()
     uploader._wait_for_upload_ready = MagicMock()
     uploader._select_video_cover = MagicMock()
@@ -397,6 +398,23 @@ def test_horizontal_cover_prompt_chooses_foreground_button_and_completes_video_c
             assert not page.locator('#editor').is_visible()
         finally:
             browser.close()
+
+
+def test_cover_confirm_ignores_hidden_duplicate_buttons(tmp_path):
+    uploader=make_uploader(tmp_path)
+    with sync_playwright() as p:
+        browser=p.chromium.launch(headless=True)
+        try:
+            page=browser.new_page()
+            page.set_content('''<button onclick="document.querySelector('#editor').style.display='block'">选择封面</button>
+                <div id="editor" role="dialog" style="display:none"><canvas></canvas>
+                <button style="display:none" onclick="window.wrong=true">保存</button>
+                <button disabled onclick="window.wrong=true">确定</button>
+                <button onclick="window.confirmed=true;this.parentElement.style.display='none'">完成</button></div>''')
+            uploader._select_video_cover(page)
+            assert page.evaluate('window.confirmed===true && window.wrong!==true')
+            assert not uploader._publish_armed
+        finally:browser.close()
 
 
 def test_horizontal_cover_repeated_prompt_does_not_click_twice(tmp_path):

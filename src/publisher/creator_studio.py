@@ -7,7 +7,8 @@ from urllib.parse import urlsplit
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 from .browser_workflow import BrowserPublishWorkflow
 from .channel_probe import ChannelDOMProbe, safe_url, CREATOR_NOTICES_JS
-from .dom_readiness import account_dom_state
+from .dom_readiness import publishing_dom_state as account_dom_state, structure_ready
+from .page_structure import file_input_selector
 from .douyin.uploader import resolve_publish_series
 from .identity import extract_platform_identity
 from .media import media_type
@@ -326,7 +327,7 @@ class CreatorStudioUploader(BrowserPublishWorkflow):
         switched=False
         def find():
             nonlocal switched
-            candidates=page.locator('input[type=file]')
+            candidates=page.locator(file_input_selector(self.account.platform))
             matches=[candidates.nth(i) for i in range(candidates.count())
                      if re.search(r'video|\.mp4|\.mov',candidates.nth(i).get_attribute('accept') or '',re.I)]
             if len(matches)>1:
@@ -475,13 +476,14 @@ class CreatorStudioUploader(BrowserPublishWorkflow):
             if media_type(video)!='video':
                 raise PlatformRejected('PERMANENT_REJECT','当前自动发布器仅支持视频；独立音频/图片不上传、不重试')
             state=account_dom_state(self.report_root,self.account.platform,self.account.account_id)
-            if not state.publish_reports:
+            if not structure_ready(state):
                 raise PlatformRejected('CONFIG_REQUIRED',state.message+'；请先采集该账号的视频发布编辑页')
             self.profile.mkdir(parents=True,exist_ok=True)
             with sync_playwright() as p:
                 try:
                     self.log('[启动浏览器] '+self.channel.name)
-                    context=p.chromium.launch_persistent_context(str(self.profile),headless=self.headless,
+                    from .media_browser import launch_media_context
+                    context=launch_media_context(p,str(self.profile),headless=self.headless,
                         viewport={'width':1440,'height':900},timeout=10000)
                     context.set_default_timeout(1000)
                     page=context.pages[0] if context.pages else context.new_page()
@@ -517,6 +519,8 @@ class CreatorStudioUploader(BrowserPublishWorkflow):
                     self.log('[发布确认] 平台已明确确认本次投稿成功')
                     return True,'平台已确认发布成功，等待统一归档',self.result_hint()
                 except Exception as failure:
+                    if not self.confirmation:
+                        self._capture_failure_page(page, failure)
                     if not isinstance(failure,UploadStopped) and page and not page.is_closed():
                         try:
                             report,_=ChannelDOMProbe(self.account,self.report_root).capture(page,'异常提示')
@@ -541,6 +545,7 @@ class CreatorStudioUploader(BrowserPublishWorkflow):
                 self.last_outcome='SUCCESS'
                 return True,'平台已确认发布成功；保留有效发布回执',self.result_hint()
             certain=error.status in ('ACCOUNT_LIMIT','DURATION_LIMIT','PERMANENT_REJECT','CONFIG_REQUIRED') or self.business_rejected or bool(re.search(r'发布失败|提交失败',str(error)))
+            self.business_rejected = bool(certain)
             self.last_outcome='FAILED' if self.submitted and not certain else error.status
             return False,str(error),self.result_hint()
         except Exception as error:

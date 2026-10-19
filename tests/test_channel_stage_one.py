@@ -223,6 +223,7 @@ def test_douyin_only_always_uses_shared_worker_without_history(app, tmp_path, mo
         assert panel.selected_channels()==['douyin']
         assert not (panel.store.root/'target_ledger.json').exists()
         if manual:
+            (tmp_path/'test.mp4').write_bytes(b'offline test video')
             panel.douyin.table_queue.setRowCount(1)
             panel.douyin.table_queue.setItem(0,1,ui.QTableWidgetItem('test.mp4'))
             panel.douyin.table_queue.setCurrentCell(0,1)
@@ -420,7 +421,7 @@ def test_wrapper_checks_chosen_account_dom_but_preserves_douyin_start_and_stop(a
         panel.start_deployment()
         finish_cleanup(panel)
         factory.assert_not_called()
-        assert '当前账号尚未采集' in ui.QMessageBox.warning.call_args.args[-1]
+        assert '浏览器登录目录' in ui.QMessageBox.warning.call_args.args[-1]
         panel.choose_targets = MagicMock(return_value=[])
         panel.start_deployment()
         panel.choose_targets.assert_called_once()
@@ -464,6 +465,7 @@ def test_preflight_is_an_atomic_gate_before_any_deployment_worker(app,tmp_path,m
     factory = MagicMock(return_value=upload)
     monkeypatch.setattr(ui,'MultiDeployWorker',factory)
     try:
+        (tmp_path/'chosen.mp4').write_bytes(b'offline test video')
         panel.start_deployment(file_paths=[tmp_path/'chosen.mp4'])
         finish_cleanup(panel)
         assert panel.busy()

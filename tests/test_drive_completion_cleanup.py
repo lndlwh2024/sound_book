@@ -31,7 +31,8 @@ def test_fixed_task_archives_copy_downloaded_during_upload_without_expanding_upl
             self.before_upload()
             calls.append((self.target.key,selected.name))
             if len(calls)==1:
-                api.files=[cloud_file(version='2')]
+                api.files=[cloud_file('late-copy',version='2')]
+                api.content['late-copy']=b'video'*1000
                 ingest(root,api).poll(a);ingest(root,api).poll(b)
             return True,'confirmed',None
     worker=MultiDeployWorker([a,b],root=root,interval_seconds=0,file_paths=[path],

@@ -5,13 +5,14 @@ import time
 import sqlite3
 from pathlib import Path
 from PySide6.QtCore import Qt, QTimer
+from PySide6.QtGui import QColor,QPalette
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QCheckBox, QComboBox,
     QLineEdit, QPushButton, QFileDialog, QMessageBox,
     QPlainTextEdit, QGroupBox, QSplitter, QTableWidget, QTableWidgetItem,
-    QGridLayout, QSpinBox, QTabWidget, QButtonGroup)
+    QGridLayout, QSpinBox, QTabWidget, QButtonGroup,QStyledItemDelegate)
 from ..publisher.platforms import CHANNELS
 from ..publisher.media import MEDIA_TYPES, media_type
-from ..publisher.dom_readiness import account_dom_state
+from ..publisher.dom_readiness import publishing_dom_state as account_dom_state
 
 TABLE_STYLE = '''QTableWidget {background:#1A202C;border:1px solid #2D3748;color:#CBD5E0;}
 QHeaderView::section {background:#2D3748;color:#E2E8F0;padding:4px;font-weight:bold;}'''
@@ -19,7 +20,20 @@ LOG_STYLE = '''QPlainTextEdit {background:#0F172A;color:#38BDF8;font-family:Cons
 font-size:12px;border:1px solid #1E293B;border-radius:6px;}'''
 
 
+class MediaQueueDelegate(QStyledItemDelegate):
+    def initStyleOption(self,option,index):
+        super().initStyleOption(option,index)
+        if index.data(Qt.UserRole+2):
+            color=QColor('#9BD3AF')
+            option.palette.setColor(QPalette.Text,color)
+            option.palette.setColor(QPalette.HighlightedText,color)
+
+
 class MediaQueueTable(QTableWidget):
+    def __init__(self,*args,**kwargs):
+        super().__init__(*args,**kwargs)
+        self.setItemDelegate(MediaQueueDelegate(self))
+
     def resizeEvent(self,event):
         super().resizeEvent(event)
         if self.columnCount()==9:
@@ -345,12 +359,10 @@ class PlatformAccountPanel(QWidget):
         queue_buttons.addWidget(upload)
         queue_layout.addLayout(queue_buttons)
         right_layout.addWidget(queue_group,3)
-        log_group = QGroupBox('Playwright 自动部署实时控制台')
+        log_group = QGroupBox('发布全流程日志 · 时间 / 账号 / 文件 / 阶段 / 结果')
         log_layout = QVBoxLayout(log_group)
-        self.logs = QPlainTextEdit()
-        self.logs.setStyleSheet(LOG_STYLE)
-        self.logs.setReadOnly(True)
-        self.logs.setMaximumBlockCount(1000)
+        from .publish_log_view import PublishLogView
+        self.logs = PublishLogView(parent, self.platform, self)
         log_layout.addWidget(self.logs)
         right_layout.addWidget(log_group,2)
         # Compatibility names refer to the same shared controls, never a second UI.
@@ -370,6 +382,9 @@ class PlatformAccountPanel(QWidget):
 
     def allocate_configuration_height(self):
         if not hasattr(self,'deployment_controls'):
+            return
+        if getattr(self,'_publisher_layout',False):
+            self.account_group.setFixedHeight(self.account_group.sizeHint().height())
             return
         compact = self.width() < 1450
         if getattr(self,'_compact_settings',None) != compact:
@@ -411,8 +426,11 @@ class PlatformAccountPanel(QWidget):
         return next((a for a in self._accounts if a.account_id==identity),None)
 
     def account_label(self, account):
-        state = '已登录' if account.login_status=='AUTHORIZED' else '已手工确认' if account.login_status=='USER_CONFIRMED' else '未核对'
-        return f'{account.platform_nickname or account.account_name} [{state}]'+(' · 已关闭' if not account.enabled else '')
+        state = '已登录' if account.login_status=='AUTHORIZED' else '登录已确认' if account.login_status=='USER_CONFIRMED' else '未核对'
+        name = account.platform_nickname or account.account_name
+        if not account.platform_nickname and name in ('新账号（待登录）','新账号(待登录)','新账号'):
+            name = '新账号 · 昵称待读取' if account.login_status in ('AUTHORIZED','USER_CONFIRMED') else '新账号'
+        return f'{name} [{state}]'+(' · 已关闭' if not account.enabled else '')
 
     def reload(self):
         previous = self.current().account_id if self.current() else None
@@ -430,6 +448,8 @@ class PlatformAccountPanel(QWidget):
         self.accounts.blockSignals(blocked)
         self.accounts.setEnabled(bool(self._accounts))
         self.account_selector_group.setTitle(f'账号选择-{len(self._accounts)}个账号')
+        if hasattr(self,'account_count_label'):
+            self.account_count_label.setText(f'账号选择-{len(self._accounts)}个账号')
         self.load_current()
         self.allocate_configuration_height()
 
@@ -484,6 +504,11 @@ class PlatformAccountPanel(QWidget):
 
     def load_current(self,*_):
         account = self.current()
+        if account:
+            index=self.accounts.findData(account.account_id)
+            if index>=0:
+                self.accounts.setItemText(index,self.account_label(account))
+                self.accounts.setItemData(index,self.account_label(account),Qt.ToolTipRole)
         self.accounts.setToolTip(self.account_label(account) if account else '请先添加账号')
         self.name.setText(account.account_name if account else '')
         blocked = self.directory.blockSignals(True)
@@ -491,7 +516,7 @@ class PlatformAccountPanel(QWidget):
         self.directory.blockSignals(blocked)
         self.identity.setText(account.identity_note or account.platform_uid if account else '')
         self.nickname.setText('平台昵称：'+(account.platform_nickname or '尚未获取') if account else '平台昵称：尚未获取')
-        self.state.setText('状态：'+({'AUTHORIZED':'已登录','USER_CONFIRMED':'已手工确认登录'}.get(account.login_status,'尚未核对') if account else '尚未登录'))
+        self.state.setText('登录状态：'+({'AUTHORIZED':'已登录','USER_CONFIRMED':'登录已确认'}.get(account.login_status,'尚未核对') if account else '尚未登录'))
         self.state.setStyleSheet('color:#38A169;' if account and account.login_status in ('AUTHORIZED','USER_CONFIRMED') else 'color:#E53E3E;')
         self.enabled.setChecked(account.enabled if account else True)
         self.drive.load(account.drive_binding if account else {})
@@ -526,6 +551,8 @@ class PlatformAccountPanel(QWidget):
             self.collection.setText(account.collection_name if account else '')
         for control in (self.settings_tabs,self.save_button,self.login_button,self.capture_button,self.delete_account_button):
             control.setEnabled(account is not None)
+        if hasattr(self,'nickname_button'):
+            self.nickname_button.setEnabled(account is not None)
         self.refresh_cloud_badges()
         self.scan_queue()
         self.refresh_dom_state()
@@ -537,8 +564,11 @@ class PlatformAccountPanel(QWidget):
             self.dom_state.setToolTip('')
             return
         state = account_dom_state(self.store.root/'dom_reports',self.platform,account.account_id)
-        self.dom_state.setText(state.message)
-        self.dom_state.setToolTip(str(state.reports[-1]) if state.reports else '')
+        self.dom_state.setText('页面结构：内置适配 · 发布前实时校验' if getattr(self,'_publisher_layout',False) and state.template_revision else state.message)
+        if state.reports and not getattr(self,'_publisher_layout',False):
+            self.dom_state.setToolTip(str(state.reports[-1]))
+        else:
+            self.dom_state.setToolTip(state.message+'\n内置规则版本：'+state.template_revision if state.template_revision else '')
 
     def suggest_channel_id(self, account):
         identities = set()
@@ -725,6 +755,9 @@ class PlatformAccountPanel(QWidget):
 
     def apply_identity(self, account, identity):
         uid = identity.get('channel_id') or identity.get('platform_uid','')
+        if self.platform=='youtube' and not re.fullmatch(r'UC[\w-]{22}',uid):
+            self.logs.appendPlainText('尚未读到实际 YouTube 频道ID；未保存为已登录，请先进入正确频道再读取昵称')
+            return
         if self.platform=='youtube' and account.channel_id and uid and account.channel_id!=uid:
             self.logs.appendPlainText('实际频道与已绑定ID不同，未覆盖账号身份，请手工核对')
             return
@@ -756,6 +789,11 @@ class PlatformAccountPanel(QWidget):
             self.dialog.show()
             self.dialog.raise_()
             return
+        if getattr(self.controller, 'single_browser', False) and any(
+                panel is not self and panel.dialog and panel.dialog.worker.isRunning()
+                for panel in self.controller.panels):
+            QMessageBox.information(self, '浏览器会话', '发布版一次只运行一个登录/采集浏览器，请先关闭其他账号的浏览器')
+            return
         if not self.save_current():
             return
         account = self.current()
@@ -771,6 +809,11 @@ class PlatformAccountPanel(QWidget):
                 self.load_current()
         self.dialog.login_confirmed.connect(confirmed)
         self.dialog.show()
+
+    def request_nickname(self):
+        self.open_probe()
+        if self.dialog and self.dialog.worker.isRunning():
+            self.dialog.read_identity_when_ready()
 
     def prepare_shutdown(self):
         if self.dialog and self.dialog.worker.isRunning():

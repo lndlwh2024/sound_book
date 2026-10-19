@@ -157,6 +157,27 @@ class DouyinUploader(BrowserPublishWorkflow):
         page.on('response', on_response)
         page.on('requestfailed', on_failed)
 
+    def _navigate_upload_page(self, page):
+        self._progress('正在打开上传页：主文档响应最多45秒，实际上传控件最多90秒')
+        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+        try:
+            page.goto(DOUYIN_UPLOAD_URL, wait_until='commit', timeout=45000)
+        except PlaywrightTimeoutError:
+            self._progress('[页面导航缓慢] 主文档响应超时，检查当前页面是否已进入创作者中心')
+        from urllib.parse import urlsplit
+        if urlsplit(page.url).hostname != 'creator.douyin.com':
+            raise RuntimeError('45秒内未进入抖音创作者中心，未选择文件；请检查网络或重新登录')
+        def upload_ready():
+            if 'login' in page.url.lower():
+                self.account.status='EXPIRED'
+                self.last_outcome='AUTH_REQUIRED'
+                raise RuntimeError('抖音登录已失效，未选择文件，请重新登录')
+            from ..page_structure import file_input_selector
+            inputs=page.locator(file_input_selector('douyin'))
+            return any('image' not in (inputs.nth(i).get_attribute('accept') or '').lower()
+                       for i in range(inputs.count()))
+        self._wait_until(page, '等待抖音视频上传控件就绪', upload_ready, seconds=90)
+
     def _check_stop(self):
         if self._stop_requested():
             raise PublishCancelled()
@@ -263,87 +284,92 @@ class DouyinUploader(BrowserPublishWorkflow):
                 self._progress('[时长检查] 本地时长读取失败，将检查平台提示')
             self._progress("正在启动浏览器（启动调用最长等待 10 秒）")
             with sync_playwright() as p:
-                context: BrowserContext = DouyinBrowserManager.create_persistent_context(
-                    p, self.profile_path, headless=self.headless, viewport={"width": 1440, "height": 900},
-                    timeout=10000
-                )
-                self._check_stop()
-                context.set_default_timeout(2000)
-                page = context.new_page() if not context.pages else context.pages[0]
-                DouyinBrowserManager.inject_stealth(page)
-                self._attach_publish_diagnostics(page)
+                context, page = None, None
+                try:
+                    context: BrowserContext = DouyinBrowserManager.create_persistent_context(
+                        p, self.profile_path, headless=self.headless, viewport={"width": 1440, "height": 900},
+                        timeout=10000
+                    )
+                    self._check_stop()
+                    context.set_default_timeout(2000)
+                    page = context.new_page() if not context.pages else context.pages[0]
+                    DouyinBrowserManager.inject_stealth(page)
+                    self._attach_publish_diagnostics(page)
 
-                logger.info(f"导航至抖音创作者中心上传页: {DOUYIN_UPLOAD_URL}")
-                self._progress("正在打开上传页（导航调用最长等待 10 秒）")
-                page.goto(DOUYIN_UPLOAD_URL, wait_until="domcontentloaded", timeout=10000)
-                # 设计说明：使用 page.wait_for_timeout() 替代 time.sleep()
-                # Playwright 同步模式依赖调用驱动底层 Node.js 管道。
-                # 严禁在持有 page 时调用 time.sleep，否则会导致上传 Web Worker 挂起死锁。
-                self._pause(page, 3000)
+                    logger.info(f"导航至抖音创作者中心上传页: {DOUYIN_UPLOAD_URL}")
+                    self._navigate_upload_page(page)
+                    # 设计说明：使用 page.wait_for_timeout() 替代 time.sleep()
+                    # Playwright 同步模式依赖调用驱动底层 Node.js 管道。
+                    # 严禁在持有 page 时调用 time.sleep，否则会导致上传 Web Worker 挂起死锁。
+                    self._pause(page, 3000)
 
-                # 检查是否处于登录状态
-                if "login" in page.url.lower():
-                    context.close()
-                    self.account.status = "EXPIRED"
-                    return False, "账号登录态已失效，请重新扫码登录", None
+                    # 检查是否处于登录状态
+                    if "login" in page.url.lower():
+                        self.account.status = "EXPIRED"
+                        return False, "账号登录态已失效，请重新扫码登录", None
 
-                # 步骤 1: 注入视频文件
-                logger.info("【步骤 1/5】正在注入视频文件...")
-                self._check_stop()
-                file_input = page.locator('input[type="file"][accept*="video"], input[type="file"][accept*=".mp4"]').first
-                if file_input.count() == 0:
-                    context.close()
-                    return False, "未找到文件上传 Input 元素，请先使用 DOM 探针校准页面", None
+                    # 步骤 1: 注入视频文件
+                    logger.info("【步骤 1/5】正在注入视频文件...")
+                    self._check_stop()
+                    file_input = page.locator('input[type="file"][accept*="video"], input[type="file"][accept*=".mp4"]').first
+                    if file_input.count() == 0:
+                        return False, "未找到文件上传 Input 元素，请先使用 DOM 探针校准页面", None
 
-                self.before_upload()
-                file_input.set_input_files(str(video_path.resolve()))
-                self._video_selected = True
-                self._progress("视频文件已选择，正在等待作品标题表单")
-                logger.info("视频文件注入成功，正在等待页面加载与转码处理...")
+                    self.before_upload()
+                    file_input.set_input_files(str(video_path.resolve()))
+                    self._video_selected = True
+                    self._progress("视频文件已选择，正在等待作品标题表单")
+                    logger.info("视频文件注入成功，正在等待页面加载与转码处理...")
 
-                # 步骤 2: 等待视频上传并进入编辑页
-                self._pause(page, 3000)
-                # 等待标题输入框出现（标志着上传成功进入作品发布表单）
-                collection_name = self.account.collection_name or book_name
-                publish_btn = self.prepare_publish_form(page,
-                    details=("等待并填写作品标题", lambda: self._prepare_title(page, title)),
-                    cover=("选择当前视频画面作为封面", lambda: self._select_video_cover(page)),
-                    collection=(f"选择合集：{collection_name}",
-                                lambda: self._handle_collection_assignment(page, collection_name, episode_num)),
-                    upload=('等待视频上传与处理完成（最多30分钟）', lambda: self._wait_for_upload_ready(page)),
-                    submit=("校验发布按钮", lambda: self._get_publish_button(page)),
-                    details_pause_ms=2000, options_pause_ms=1000)
+                    # 步骤 2: 等待视频上传并进入编辑页
+                    self._pause(page, 3000)
+                    # 等待标题输入框出现（标志着上传成功进入作品发布表单）
+                    collection_name = self.account.collection_name or book_name
+                    publish_btn = self.prepare_publish_form(page,
+                        details=("等待并填写作品标题", lambda: self._prepare_title(page, title)),
+                        cover=("选择当前视频画面作为封面", lambda: self._select_video_cover(page)),
+                        collection=(f"选择合集：{collection_name}",
+                                    lambda: self._handle_collection_assignment(page, collection_name, episode_num)),
+                        upload=('等待视频上传与处理完成（最多30分钟）', lambda: self._wait_for_upload_ready(page)),
+                        submit=("校验发布按钮", lambda: self._get_publish_button(page)),
+                        details_pause_ms=2000, options_pause_ms=1000)
 
-                self._check_stop()
-                # 点击超时也可能已提交，先记下边界，避免误报取消成功。
-                publish_submitted = True
-                self._publish_armed = True
-                publish_btn.click()
-                self._progress("已点击发布，等待实际投稿接口确认（最长10分钟）；此时停止且未确认成功将记为失败，保留文件")
+                    self._check_stop()
+                    # 点击超时也可能已提交，先记下边界，避免误报取消成功。
+                    publish_submitted = True
+                    self._publish_armed = True
+                    publish_btn.click()
+                    self._progress("已点击发布，等待实际投稿接口确认（最长10分钟）；此时停止且未确认成功将记为失败，保留文件")
 
-                # Only this attempt's actual create API acknowledgement confirms submission.
-                wait_start = time.time()
-                result = self._wait_for_confirmation(page, lambda: self._publish_confirmation(page))
-                success, err_detail = result if result else (False, None)
+                    # Only this attempt's actual create API acknowledgement confirms submission.
+                    wait_start = time.time()
+                    result = self._wait_for_confirmation(page, lambda: self._publish_confirmation(page))
+                    success, err_detail = result if result else (False, None)
 
-                if not success:
-                    self.last_outcome = ('ACCOUNT_LIMIT' if self.account_limit_reason else
-                                         'FAILED')
-                    reason = f"平台返回错误: {err_detail}" if err_detail else "点击发布后未能在规定时间内捕获成功提示或页面跳转"
-                    self._progress(f"[发布核对] 等待 {time.time() - wait_start:.1f} 秒；页面：{urlsplit(page.url).path}；结果未确认")
-                    self._save_diagnostics(page, "发布未确认", reason)
+                    if not success:
+                        self.last_outcome = ('ACCOUNT_LIMIT' if self.account_limit_reason else
+                                             'FAILED')
+                        reason = f"平台返回错误: {err_detail}" if err_detail else "点击发布后未能在规定时间内捕获成功提示或页面跳转"
+                        self._progress(f"[发布核对] 等待 {time.time() - wait_start:.1f} 秒；页面：{urlsplit(page.url).path}；结果未确认")
+                        self._save_diagnostics(page, "发布未确认", reason)
+                        return False, reason, None
+
                     self._close_publish_context(context,page,publish_submitted)
-                    return False, reason, None
 
-                self._close_publish_context(context,page,publish_submitted)
+                    logger.info(f"作品 [{title}] 在抖音平台发布成功！")
 
-                logger.info(f"作品 [{title}] 在抖音平台发布成功！")
-
-                # 步骤 7: 物理归档与日账本生成
-                record = self._finalize_publish_archive_and_ledger(video_path, collection_name, episode_num)
-                self.last_outcome = "SUCCESS"
-                return True, "发布成功并已归档", record
-
+                    # 步骤 7: 物理归档与日账本生成
+                    record = self._finalize_publish_archive_and_ledger(video_path, collection_name, episode_num)
+                    self.last_outcome = "SUCCESS"
+                    return True, "发布成功并已归档", record
+                finally:
+                    if context and (page is None or not page.is_closed()):
+                        if not (self._publish_result and str(self._publish_result.get('code')) == '0'):
+                            self._capture_failure_page(page, '抖音上传退出前未确认成功')
+                        try:
+                            self._close_publish_context(context, page, publish_submitted)
+                        except Exception:
+                            pass
         except VideoDurationRejected as error:
             self.last_outcome = 'DURATION_LIMIT'
             self._progress(f'[不可重试] {error}；保留原文件，继续下一个视频')
@@ -453,8 +479,10 @@ class DouyinUploader(BrowserPublishWorkflow):
         deadline = time.monotonic() + 20
         while time.monotonic() < deadline:
             self._check_stop()
-            if confirm.count() == 1 and confirm.is_enabled():
-                confirm.click()
+            available = [confirm.nth(i) for i in range(confirm.count())
+                         if confirm.nth(i).is_visible() and confirm.nth(i).is_enabled()]
+            if len(available) == 1:
+                available[0].click(timeout=5000)
                 self._progress("封面已确认，等待封面处理完成和弹窗关闭（最长 30 秒）")
                 self._wait_cover_closed(page, original_dialog)
                 self._progress("已确认当前视频封面画面")

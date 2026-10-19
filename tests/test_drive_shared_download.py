@@ -76,6 +76,98 @@ def test_account_success_does_not_leak_to_other_account_on_shared_file(tmp_path)
     assert len(api.downloads)==1
 
 
+def test_four_platforms_reuse_one_file_when_cloud_metadata_changes_between_polls(tmp_path):
+    from dataclasses import replace
+    targets=[]
+    for platform in ('douyin','xiaohongshu','kuaishou','youtube'):
+        item=target(tmp_path,platform)
+        account=replace(item.account,platform=platform,target_dir=str(tmp_path/'media'))
+        targets.append(type(item)(platform,account,item.profile))
+    Path(targets[0].account.target_dir).mkdir()
+    api=FakeDrive();root=tmp_path/'state';paths=[]
+    for index,item in enumerate(targets,1):
+        api.files=[{**api.files[0],'version':str(index),'modifiedTime':f'2026-10-16T00:00:0{index}Z'}]
+        ingest(root,api).poll(item)
+        paths.append(next(Path(item.account.target_dir).glob('*.mp4')))
+        if index==1:mtime=paths[0].stat().st_mtime_ns
+        assert paths[0].stat().st_mtime_ns==mtime
+    assert api.downloads==['f1'] and len(set(paths))==1
+    assert len(list(paths[0].parent.glob('*.mp4')))==1
+    journal=DriveJournal(root)
+    with journal.connect() as db:
+        assert db.execute('SELECT count(DISTINCT target) FROM files').fetchone()[0]==4
+        assert db.execute('SELECT count(DISTINCT path) FROM files').fetchone()[0]==1
+    api.files=[{**api.files[0],'version':'5'}]
+    ingest(root,api).poll(targets[0])  # Same account and a later poll also reuse bytes.
+    assert api.downloads==['f1'] and paths[0].stat().st_mtime_ns==mtime
+
+
+def test_metadata_changes_during_download_do_not_discard_verified_bytes(tmp_path):
+    a,b=shared_targets(tmp_path);api=FakeDrive();root=tmp_path/'state'
+    api.metadata=lambda identity:{**api.files[0],'version':'2','modifiedTime':'2026-10-16T04:00:00Z'}
+    ingest(root,api).poll(a)
+    assert len(list(Path(a.account.target_dir).glob('*.mp4')))==1
+    api.files=[api.metadata('f1')]
+    ingest(root,api).poll(b)
+    assert api.downloads==['f1']
+
+
+def test_changed_bytes_with_same_cloud_id_still_download_separately(tmp_path):
+    a,b=shared_targets(tmp_path);api=FakeDrive();root=tmp_path/'state'
+    ingest(root,api).poll(a)
+    api.files=[cloud_file(content=b'other'*1000,version='2')]
+    api.content['f1']=b'other'*1000
+    ingest(root,api).poll(b)
+    assert api.downloads==['f1','f1']
+    assert len(list(Path(a.account.target_dir).glob('*.mp4')))==2
+
+
+def test_metadata_change_recovers_owned_final_file_left_before_journal_commit(tmp_path):
+    a,b=shared_targets(tmp_path);api=FakeDrive();root=tmp_path/'state'
+    journal=DriveJournal(root);journal.prepare_account(api.account_identity())
+    reserved=journal.reserve(a,api.files[0],api.account_identity())
+    path=Path(reserved['path']);path.write_bytes(api.content['f1'])
+    marker=path.with_name('.'+path.name+'.shusheng-pending');marker.touch()
+    api.files=[{**api.files[0],'version':'2'}]
+    ingest(root,api).poll(b)
+    assert not api.downloads and not marker.exists()
+    assert len(list(path.parent.glob('*.mp4')))==1
+
+
+def test_untracked_same_name_is_not_adopted_even_when_its_bytes_match(tmp_path):
+    a,b=shared_targets(tmp_path);api=FakeDrive();root=tmp_path/'state'
+    untracked=Path(a.account.target_dir)/api.files[0]['name'];untracked.write_bytes(api.content['f1'])
+    ingest(root,api).poll(a)
+    assert api.downloads==['f1']
+    assert len(list(untracked.parent.glob('*.mp4')))==2
+
+
+def test_changed_or_corrupt_owned_source_is_not_shared_with_other_account(tmp_path):
+    a,b=shared_targets(tmp_path);api=FakeDrive();root=tmp_path/'state'
+    ingest(root,api).poll(a)
+    original=next(Path(a.account.target_dir).glob('*.mp4'));original.write_bytes(b'wrong'*1000)
+    api.files=[{**api.files[0],'version':'2'}]
+    ingest(root,api).poll(b)
+    assert len(api.downloads)==2 and original.read_bytes()==b'wrong'*1000
+    assert len(list(original.parent.glob('*.mp4')))==2
+
+
+def test_reuse_hash_check_observes_updated_cancellation_callback(tmp_path,monkeypatch):
+    import src.publisher.drive_ingest as module
+    a,b=shared_targets(tmp_path);api=FakeDrive();root=tmp_path/'state'
+    ingest(root,api).poll(a)
+    api.files=[{**api.files[0],'version':'2'}]
+    worker=ingest(root,api)
+    cancelled=[False];worker.stopped=lambda:cancelled[0]
+    original=module.file_hashes
+    def cancel(path,stopped=lambda:False):
+        cancelled[0]=True
+        return original(path,stopped)
+    monkeypatch.setattr(module,'file_hashes',cancel)
+    with pytest.raises(InterruptedError):worker.poll(b)
+    assert api.downloads==['f1']
+
+
 def test_other_series_and_new_cloud_copy_are_not_silently_consumed(tmp_path):
     a,b=shared_targets(tmp_path);api=FakeDrive();root=tmp_path/'state'
     ingest(root,api).poll(a)

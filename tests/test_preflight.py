@@ -45,7 +45,9 @@ def page():
 
 
 @pytest.mark.parametrize('platform',list(CHANNELS))
-def test_dom_gate_covers_every_platform_and_only_the_selected_account(tmp_path,platform):
+def test_without_builtin_adapter_dom_gate_accepts_only_selected_account(tmp_path,platform,monkeypatch):
+    from src.publisher import page_structure
+    monkeypatch.setattr(page_structure,'STRUCTURES',{})
     chosen = target(tmp_path,platform)
     capture(tmp_path,target(tmp_path,platform,'b'*32))
     failures = preflight.prerequisite_results([chosen],tmp_path/'dom_reports')
@@ -167,10 +169,28 @@ def test_preflight_closes_each_profile_before_producing_a_result(tmp_path,monkey
     context.pages[0].locator.assert_not_called()
 
 
+def test_missing_media_codecs_blocks_before_navigation_or_upload(tmp_path,monkeypatch):
+    checker=preflight.AccountPreflight(target(tmp_path))
+    playwright=MagicMock()
+    context=playwright.chromium.launch_persistent_context.return_value
+    page=MagicMock();page.evaluate.return_value=dict(h264=False,aac=False)
+    context.pages=[page]
+    verify=MagicMock();monkeypatch.setattr(checker,'verify_page',verify)
+    result=checker.check(playwright)
+    assert result.status=='CONFIG_REQUIRED' and 'H.264/AAC' in result.message
+    verify.assert_not_called()
+    page.goto.assert_not_called()
+    page.locator.assert_not_called()
+    context.close.assert_called_once()
+    assert not (tmp_path/'target_ledger.json').exists()
+
+
 def test_missing_prerequisites_never_launches_browser_or_creates_task_state(tmp_path,monkeypatch):
     factory = MagicMock()
     monkeypatch.setattr(preflight,'sync_playwright',factory)
-    worker = preflight.DeploymentPreflightWorker([target(tmp_path)],tmp_path)
+    chosen=target(tmp_path)
+    chosen.account.platform_nickname=''
+    worker = preflight.DeploymentPreflightWorker([chosen],tmp_path)
     worker.run()
     factory.assert_not_called()
     assert preflight.failure_message(worker.results)

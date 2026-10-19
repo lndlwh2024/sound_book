@@ -1,6 +1,6 @@
-"""Read account-bound DOM evidence; capture status is independent of adapter support."""
+"""Keep account diagnostics distinct from reusable publishing adapter rules."""
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -13,12 +13,20 @@ class DOMCaptureState:
     publish_reports: tuple[Path, ...] = ()
     invalid_count: int = 0
     legacy_reports: tuple[Path, ...] = ()
+    template_revision: str = ''
+
+    @property
+    def ready(self):
+        return bool(self.publish_reports or self.template_revision)
 
     @property
     def message(self):
         if self.publish_reports:
             suffix = '；兼容旧版抖音结构报告' if self.legacy_reports else ''
             return f'DOM：已采集发布页（{len(self.publish_reports)} 份）；采集总数 {len(self.reports)} 份'+suffix
+        if self.template_revision:
+            diagnostic = f'；本账号另有{len(self.reports)}份诊断' if self.reports else ''
+            return '页面结构：内置适配可复用；发布前实时校验'+diagnostic
         if self.reports:
             return f'DOM：已采集（{len(self.reports)} 份），尚缺视频上传及编辑区'
         if self.invalid_count:
@@ -105,16 +113,28 @@ def account_dom_state(report_root, platform, account_id):
     return DOMCaptureState(tuple(reports), tuple(publish_reports), invalid, tuple(legacy_reports))
 
 
+def publishing_dom_state(report_root, platform, account_id):
+    """Keep personal diagnostics separate from reusable adapter structure."""
+    from .page_structure import page_structure
+    state = account_dom_state(report_root, platform, account_id)
+    rule = page_structure(platform)
+    return replace(state, template_revision=rule.revision) if rule else state
+
+
+def structure_ready(state):
+    return bool(state.publish_reports or getattr(state, 'template_revision', ''))
+
+
 def target_dom_block_reason(targets, report_root):
-    """Only the chosen account's evidence can satisfy a pending platform's DOM gate."""
+    """Structure can be reused; it is never evidence of a new account's login."""
     reasons = []
     for target in targets:
         channel = CHANNELS[target.platform]
         if channel.publish_enabled and not channel.requires_dom:
             continue
-        state = account_dom_state(report_root, target.platform, target.account.account_id)
+        state = publishing_dom_state(report_root, target.platform, target.account.account_id)
         name = f'{channel.name} / {target.account.account_name}'
-        if not state.publish_reports:
+        if not structure_ready(state):
             reasons.append(f'{name}：{state.message}。请在视频上传后的编辑页面采集 DOM。')
         elif not channel.publish_enabled:
             reasons.append(f'{name}：已读取当前账号的发布页 DOM；该平台发布执行器尚未实现，暂不能自动投稿。'

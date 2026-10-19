@@ -43,7 +43,8 @@ def safe_name(name):
 
 
 class DriveJournal:
-    def __init__(self, root):
+    def __init__(self, root, stopped=lambda: False):
+        self.stopped = stopped
         self.path = Path(root) / 'drive_ingest.sqlite3'
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.connect() as db:
@@ -137,13 +138,39 @@ class DriveJournal:
             return dict(row) if row else None
 
     def shared_source(self, binding, file, *, exclude=None, include_missing=False):
-        """Share bytes only for the exact cloud version and receiving directory/series."""
+        """Reuse owned bytes in the same scope, even after metadata-only changes.
+
+        A version counter is not a content identity. Existing bytes must match
+        the requested size/MD5 and their recorded SHA-256 before sharing.
+        Missing archived bytes can only be consumed by an exact-version match.
+        """
         with self.connect() as db:
             db.row_factory = sqlite3.Row
-            rows = db.execute("SELECT * FROM files WHERE binding=? AND cloud_id=? AND version=? AND state='DOWNLOADED' ORDER BY rowid",
+            rows = db.execute("""SELECT * FROM files WHERE binding=? AND cloud_id=?
+                AND state IN ('DOWNLOADED','FETCHING') ORDER BY (version=?) DESC,rowid""",
                 (binding,file['id'],version_of(file))).fetchall()
-        return next((dict(row) for row in rows if row['identity'] != exclude and
-            (include_missing or Path(row['path']).is_file())),None)
+        for row in rows:
+            if self.stopped():raise InterruptedError()
+            if row['identity'] == exclude:continue
+            path=Path(row['path'])
+            try:
+                if not path.is_file():
+                    if include_missing and row['state']=='DOWNLOADED' and row['version']==version_of(file):
+                        return dict(row)
+                    continue
+                before=path.stat()
+                if before.st_size != int(file['size']) or not file.get('md5Checksum'):continue
+                digest,md5=file_hashes(path,self.stopped)
+                after=path.stat()
+                if ((before.st_size,before.st_mtime_ns)!=(after.st_size,after.st_mtime_ns)
+                        or md5.lower()!=file['md5Checksum'].lower()
+                        or row['sha256'] and row['sha256']!=digest):continue
+                return dict(row,sha256=digest)
+            except InterruptedError:
+                raise
+            except OSError:
+                continue
+        return None
 
     def reserve(self, target, file, cloud_account=''):
         identity, binding = self.identity(target, file, cloud_account)
@@ -219,12 +246,13 @@ def cloud_archive_scope(root, path, digest, targets):
 
 class DriveIngestor:
     def __init__(self, root, client, stopped=lambda: False, log=lambda text: None,
-                 status=lambda key, text: None, clock=None, ready=lambda path: None):
+                 status=lambda key, text: None, clock=None, ready=lambda path: None, storage_policy=None):
         self.root, self.client = Path(root), client
-        self.journal = DriveJournal(root)
+        self.journal = DriveJournal(root,lambda:self.stopped())
         self.stopped, self.log, self.status, self.ready = stopped, log, status, ready
         self.clock = clock or (lambda: datetime.now(CHINA_TIME))
         self.cloud_account = ''
+        self.storage_policy = storage_policy
 
     def validate(self, path, file):
         if path.stat().st_size != int(file['size']):
@@ -254,6 +282,8 @@ class DriveIngestor:
         today = self.clock().astimezone(CHINA_TIME).date()
         day = self.journal.resume_day(target, today, self.cloud_account)
         self.journal.save_scan_day(target, day, self.cloud_account)
+        self.log(f'[云盘扫描开始] {target.key}；Google云盘目录={binding.folder_path or binding.folder_id}；'
+            f'从北京时间日期断点 {day.isoformat()} 扫描到 {today.isoformat()}')
         advance = True
         while day <= today:
             if self.stopped():
@@ -269,13 +299,18 @@ class DriveIngestor:
         if not advance:
             pending_day = self.journal.resume_day(target,today,self.cloud_account).isoformat()
             self.status(target.key,f'补扫待重试：{pending_day} 起有未完成文件；已检查至 {today.isoformat()}')
+        return advance
 
     def poll_day(self, target, binding, directory, day, is_today):
         prefix = '今日' if is_today else '补扫'
         folder, files = self.client.today_files(binding.folder_id, day)
+        self.log(f'[云盘连接已核验] {target.key} / {day}；目录列表请求成功；读取{len(files)}个条目')
         if not folder:
             self.status(target.key, f'{prefix}：{day} 未找到'+('，等待创建' if is_today else '，跳过'))
             return True
+        if len(folder.get('existing_folder_ids',[]))>1:
+            self.log(f'[日期目录容错] {target.key} / {day}；找到{len(folder["existing_folder_ids"])}个同名目录，'
+                     '遍历全部已有目录，按文件ID合并，不新建或删除云端目录')
         self.status(target.key, f'{prefix}：{day} 已找到')
         complete = True
         for file in files:
@@ -318,9 +353,11 @@ class DriveIngestor:
                     from .multi_deploy import MultiTargetLedger
                     duplicate = MultiTargetLedger(self.root).result(digest,target.key).get('status') == 'SUCCESS'
                     self.journal.complete(entry['identity'],digest,duplicate)
+                    marker.unlink(missing_ok=True)  # A verified final file can survive a prior crash.
                     # Other accounts may already be uploading this path. Do not
                     # change its mtime or add a pending marker when sharing it.
-                    self.log(f'[云盘共用文件] {target.key} / {path.name}；同目录同版本无需重复下载')
+                    self.log(f'[云盘共用文件] {target.key} / {path.name}；同本地目录、云盘账号及云盘路径；'
+                             '云端文件ID、大小和内容摘要一致，版本信息变化也不重复下载')
                     self.ready(str(path))
                 except (DriveError,OSError) as error:
                     complete = False
@@ -337,16 +374,25 @@ class DriveIngestor:
                         # Someone replaced our reserved name; never overwrite it.
                         raise DriveError('下载目标已存在且内容不同，请移开同名文件后重试')
                 else:
+                    if self.storage_policy:
+                        self.storage_policy.check(directory, int(file['size']))
+                    self.log(f'[开始下载] {target.key} / {file["name"]}；云端文件ID={file["id"]}；'
+                        f'大小={file["size"]}字节；保存到={path}')
                     self.status(target.key, '正在下载：' + file['name'])
                     last_progress = [0.0]
                     def progress(size):
+                        if size > int(file['size']):
+                            raise DriveError('下载超过云端声明大小，停止并等待重新校验')
                         if time.monotonic() - last_progress[0] >= 1:
+                            if self.storage_policy:
+                                self.storage_policy.check_progress(directory)
                             last_progress[0] = time.monotonic()
                             self.status(target.key, f'下载 {size * 100 / int(file["size"]):.0f}%：{file["name"]}')
                     self.client.download(file['id'], partial, self.stopped, progress)
                     digest = self.validate(partial, file)
                     latest = self.client.metadata(file['id'])
-                    if version_of(latest) != version_of(file):
+                    if (latest.get('id')!=file['id'] or str(latest.get('size'))!=str(file['size'])
+                            or latest.get('md5Checksum','').lower()!=file['md5Checksum'].lower()):
                         raise DriveError('下载期间云端文件发生变化，下一轮重新下载')
                     if self.stopped():
                         raise InterruptedError()
@@ -381,6 +427,7 @@ class DriveIngestor:
 
 class DriveWatchWorker(QThread):
     log = Signal(str)
+    event_logged = Signal(dict)
     binding_status = Signal(str, str)
     file_ready = Signal(str)
     authorization_error = Signal(str, int)
@@ -388,6 +435,8 @@ class DriveWatchWorker(QThread):
     def __init__(self, root, credentials, parent=None, client=None):
         super().__init__(parent)
         self.root, self.credentials = root, credentials
+        from .event_log import event_log
+        self.events=event_log(root)
         self.client = client or DriveClient(credentials)
         self.stopping, self.wake = threading.Event(), threading.Event()
         self.lock = threading.Lock()
@@ -396,6 +445,16 @@ class DriveWatchWorker(QThread):
         self.immediate = set()
         self.revision = 0
         self.configuration = None
+        self.storage_policy = None
+        self.failures = {}
+
+    def emit_log(self,message):
+        self.log.emit(message)
+        target=getattr(self,'current_target',None)
+        context=({'platform':target.platform,'account_id':target.account.account_id,
+            'account_name':target.account.account_name} if target else {})
+        context['task_id']=getattr(self,'task_id','')
+        self.event_logged.emit(self.events.write(message,**context))
 
     def configure(self, targets, paused=False):
         token = (paused, tuple(sorted((t.key, t.account.target_dir, t.account.enabled,
@@ -422,11 +481,11 @@ class DriveWatchWorker(QThread):
         try:
             self.watch_loop()
         except Exception as error:
-            self.log.emit('[云盘监听停止] '+str(error)+'；本地发布不受影响，请检查存储后重新启动书声')
+            self.emit_log('[云盘监听停止] '+str(error)+'；本地发布不受影响，请检查存储后重新启动书声')
 
     def watch_loop(self):
-        ingestor = DriveIngestor(self.root, self.client, log=self.log.emit,
-            status=self.binding_status.emit, ready=self.file_ready.emit)
+        ingestor = DriveIngestor(self.root, self.client, log=self.emit_log,
+            status=self.binding_status.emit, ready=self.file_ready.emit, storage_policy=self.storage_policy)
         while not self.stopping.is_set():
             with self.lock:
                 targets, paused, revision = list(self.targets), self.paused, self.revision
@@ -434,6 +493,7 @@ class DriveWatchWorker(QThread):
                 self.immediate.clear()
             if self.credentials.connected():
                 for target in targets:
+                    self.current_target=target
                     binding = DriveBinding.read(target.account.drive_binding)
                     signature = (target.key, binding.folder_id, target.account.target_dir, tuple(target.account.media_types),binding.poll_seconds)
                     if not binding.enabled or (paused and target.key not in immediate):
@@ -447,16 +507,23 @@ class DriveWatchWorker(QThread):
                                 or generation != self.credentials.generation or not self.credentials.connected())
                     ingestor.stopped = cancelled
                     try:
-                        ingestor.poll(target)
+                        completed = ingestor.poll(target)
+                        if completed is False:
+                            self.failures[signature] = self.failures.get(signature, 0) + 1
+                        else:
+                            self.failures.pop(signature, None)
                     except InterruptedError:
                         break
                     except DriveAuthRequired as error:
                         self.authorization_error.emit(str(error), generation)
                         self.binding_status.emit(target.key, '授权失效，请重新连接')
-                        self.next_poll[signature] = time.monotonic() + 60
+                        self.failures[signature] = self.failures.get(signature, 0) + 1
                     except Exception as error:
+                        self.failures[signature] = self.failures.get(signature, 0) + 1
                         self.binding_status.emit(target.key, '检查失败：' + str(error))
-                        self.log.emit(f'[云盘检查失败] {target.key}：{error}；其他绑定继续，云端不修改')
-                    self.next_poll[signature] = time.monotonic() + binding.poll_seconds
+                        self.emit_log(f'[云盘检查失败] {target.key}：{error}；其他绑定继续，云端不修改')
+                    failures = self.failures.get(signature, 0)
+                    delay = min(300, 15 * 2 ** min(failures - 1, 5)) if failures else binding.poll_seconds
+                    self.next_poll[signature] = time.monotonic() + delay
             self.wake.wait(.5)
             self.wake.clear()

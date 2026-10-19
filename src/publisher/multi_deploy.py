@@ -18,6 +18,7 @@ from .youtube import YouTubeUploader
 from .creator_studio import XiaohongshuUploader, KuaishouUploader
 from .status import BLOCKING, RETRYABLE, result_status_text, fresh_result
 from .upload_quota import DailyUploadQuota, DailyQuotaReached
+from .event_log import redact
 
 CHINA_TIME = timezone(timedelta(hours=8))
 SUCCESS = 'SUCCESS'
@@ -191,15 +192,23 @@ class DeferredDouyinUploader(DouyinUploader):
 
 class MultiDeployWorker(QThread):
     log = Signal(str)
+    active_file_changed = Signal(str)
+    event_logged = Signal(dict)
     queue_changed = Signal()
     status = Signal(str)
     result_changed = Signal(dict)
 
-    def __init__(self, targets, root=None, parent=None, uploader_factory=None, poll_seconds=300, interval_seconds=30, file_paths=None, archive_targets=None, deferred_preflight=None, history_targets=None):
+    def __init__(self, targets, root=None, parent=None, uploader_factory=None, poll_seconds=300, interval_seconds=30, file_paths=None, archive_targets=None, deferred_preflight=None, history_targets=None, strict_recovery=False, task_id=None):
         super().__init__(parent)
         self.targets = [PublishTarget(t.platform, replace(t.account), t.profile)
             for t in sorted(targets,key=lambda t:(list(CHANNELS).index(t.platform),t.account.account_id))]
         self.root = Path(root) if root else ROOT / 'data' / 'multi_platform'
+        self.strict_recovery = strict_recovery
+        from .event_log import event_log
+        self.events = event_log(self.root)
+        self.log_context = {}
+        self.reconciled = set()
+        self.limit_notices = set()
         # Completion belongs to this task. Older saved archive groups only supply
         # history for the other platform columns; they cannot block this task.
         self.archive_targets = self.targets
@@ -219,10 +228,25 @@ class MultiDeployWorker(QThread):
         self.target_enabled = {t.key: t.account.enabled for t in self.targets}
         self.processed = set()
         self.file_paths = None if file_paths is None else {str(Path(p).resolve()) for p in file_paths}
-        self.report = {'task_id': uuid.uuid4().hex, 'started_at': now(), 'status': 'RUNNING',
+        self.report = {'task_id': task_id or uuid.uuid4().hex, 'started_at': now(), 'status': 'RUNNING',
+                       'task_type':'MANUAL' if self.file_paths is not None else 'CONTINUOUS',
+                       'selected_files':sorted(self.file_paths) if self.file_paths is not None else None,
                        'files': [], 'targets': [{'key': t.key, 'platform': t.platform,
                         'account_name': t.account.account_name, 'directory': t.account.target_dir} for t in self.targets]}
         self.report_path = self.root / 'publish_reports' / ('publish_task_' + datetime.now(CHINA_TIME).strftime('%Y%m%d_%H%M%S') + '_' + self.report['task_id'][:8] + '.json')
+        from .failure_diagnostics import TaskFailureDiagnostics
+        self.diagnostics = TaskFailureDiagnostics(self.root, self.report['task_id'], self.events.task_events(self.report['task_id']))
+        self.diagnostic_states = set()
+
+    def emit_log(self,message,**context):
+        self.log.emit(message)
+        merged={**self.log_context,**context}
+        event=self.events.write(message,task_id=self.report['task_id'],**merged)
+        try:
+            self.diagnostics.record_event(event)
+        except OSError as error:
+            self.log.emit('[失败诊断日志保存异常] '+str(error))
+        self.event_logged.emit(event)
 
     def stop(self):
         self.stopping.set()
@@ -234,12 +258,12 @@ class MultiDeployWorker(QThread):
         if self.stopping.is_set():
             return
         self.pause_requested.set()
-        self.log.emit('[全平台暂停] 已请求暂停；当前文件完成后暂停，不启动后续文件和重试；浏览器上传与发布确认继续')
+        self.emit_log('[全平台暂停] 已请求暂停；当前文件完成后暂停，不启动后续文件和重试；浏览器上传与发布确认继续')
         self.status.emit('已请求暂停全部平台；等待当前文件结束后进入暂停，可点击继续或停止')
 
     def resume(self):
         self.pause_requested.clear()
-        self.log.emit('[全平台继续] 继续同一任务及报告，沿用已有发布结果')
+        self.emit_log('[全平台继续] 继续同一任务及报告，沿用已有发布结果')
         self.status.emit('全部平台已继续部署')
 
     def checkpoint(self):
@@ -250,7 +274,7 @@ class MultiDeployWorker(QThread):
                 self.report['status'] = 'PAUSED'
                 self.save_report()
                 self.status.emit('全部平台已暂停；不会开始后续文件或重试，可继续当前任务')
-                self.log.emit('[全平台暂停] 已进入暂停；保留任务与已有结果')
+                self.emit_log('[全平台暂停] 已进入暂停；保留任务与已有结果')
                 announced = True
             self.stopping.wait(.1)
         if announced and not self.stopping.is_set():
@@ -288,7 +312,7 @@ class MultiDeployWorker(QThread):
         self.report['target_count'] = len(entries)
         self.report['success_count'] = sum(r['status'] == SUCCESS for r in entries)
         self.report['failure_count'] = sum(r['status'] in {'FAILED','FAILED1','FAILED2'} for r in entries)
-        self.report['unconfirmed_count'] = 0  # Kept for old report readers.
+        self.report['unconfirmed_count'] = sum(r['status']=='RECOVERY_REQUIRED' for r in entries)
         self.report['ignored_count'] = sum(r['status']=='IGNORED' for r in entries)
         self.report['cancelled_count'] = sum(r['status'] == 'CANCELLED' for r in entries)
         failed = lambda item:any(r['status'] in {'FAILED','FAILED1','FAILED2'} for key,r in item['results'].items() if key in keys_for(item))
@@ -297,6 +321,7 @@ class MultiDeployWorker(QThread):
             if all(f['results'].get(key,{}).get('status') in (SUCCESS,'IGNORED') for key in keys_for(f))]
         self.report['failure_files'] = [summary(f) for f in self.report['files'] if failed(f)]
         self.report['source_success_count'] = len(self.report['success_files'])
+        self.report['all_selected_completed']=bool(self.report['files']) and len(self.report['success_files'])==len(self.report['files'])
         self.report['source_failure_count'] = len(self.report['failure_files'])
         self.report['platform_counts'] = {}
         for file in self.report['files']:
@@ -323,11 +348,12 @@ class MultiDeployWorker(QThread):
         return digest.hexdigest()
 
     def plan_batch(self):
+        self.log_context={}
         files = {}
         for target in self.targets:
             directory = Path(target.account.target_dir)
             if not target.account.target_dir or not directory.is_dir():
-                self.log.emit(f'[目录无效] {target.key}：{directory}')
+                self.emit_log(f'[目录无效] {target.key}：{directory}')
                 continue
             allowed = selected_extensions(target.account)
             for path in directory.iterdir():
@@ -359,7 +385,7 @@ class MultiDeployWorker(QThread):
                 digest = self.fingerprint(job['path'])
                 after = job['path'].stat()
             except OSError as error:
-                self.log.emit(f'[文件暂不能读取] {job["path"].name}：{error}；下次扫描再处理')
+                self.emit_log(f'[文件暂不能读取] {job["path"].name}：{error}；下次扫描再处理')
                 continue
             if digest is None:
                 break
@@ -401,12 +427,12 @@ class MultiDeployWorker(QThread):
                     historical=self.seed_douyin_success(job,target)
                     if historical:
                         previous=historical
-                        self.log.emit(f'[历史成功迁移] {job["path"].name} → {target.key}：归档目标的旧成功记录已恢复，未重新上传')
+                        self.emit_log(f'[历史成功迁移] {job["path"].name} → {target.key}：归档目标的旧成功记录已恢复，未重新上传')
                 if previous:
                     restored[target.key]=fresh_result(previous)
             except RuntimeError as error:
                 self.blocked[target.key]={'status':'CONFIG_REQUIRED','message':str(error)}
-                self.log.emit(f'[历史核对失败] {target.key}：{error}；其他上传账号继续，保留文件')
+                self.emit_log(f'[历史核对失败] {target.key}：{error}；其他上传账号继续，保留文件')
             except OSError as error:
                 restored[target.key]={'status':'FILE_CHANGED','message':str(error),'attempts':[]}
             if target.key in self.blocked:
@@ -440,10 +466,35 @@ class MultiDeployWorker(QThread):
         """Repair only the prior migration downgrade, never a real uncertain post."""
         result=self.ledger.restore_legacy_success(job['digest'],target.key,job['path'],job['signature'])
         if result.get('status')==SUCCESS and previous.get('status')!='SUCCESS':
-            self.log.emit(f'[历史成功恢复] {job["path"].name} → {target.key}；旧成功记录匹配，未重新投稿')
+            self.emit_log(f'[历史成功恢复] {job["path"].name} → {target.key}；旧成功记录匹配，未重新投稿')
         return result
 
     def attempt(self, job, target):
+        operation = self.diagnostics.operation(target.platform, target.account.account_id, job['path'].name)
+        self.failure_operation = operation
+        try:
+            status = self._attempt(job,target)
+            return status
+        finally:
+            result = job['item']['results'].get(target.key, {})
+            state = locals().get('status', 'FAILED')
+            marker = (job['digest'], target.key, state)
+            if state != SUCCESS and (operation.captures or marker not in self.diagnostic_states):
+                try:
+                    folder = operation.complete(state, result.get('message', ''), result=result)
+                    self.diagnostic_states.add(marker)
+                    self.diagnostic_states.add((job['digest'], target.key, result.get('status', state)))
+                    evidence = operation.capture_summary()
+                    details = ('；采集异常='+'；'.join(evidence['errors'])) if evidence['errors'] else ''
+                    self.emit_log(f'[失败诊断归档] {state}：{folder}；DOM文件={evidence["dom_files"]}；'
+                        f'截图={evidence["screenshots"]}{details}', platform=target.platform)
+                except OSError as error:
+                    self.emit_log('[失败诊断保存异常] '+str(error), platform=target.platform)
+            self.active_file_changed.emit('')
+
+    def _attempt(self, job, target):
+        self.log_context={'platform':target.platform,'account_id':target.account.account_id,
+            'account_name':target.account.account_name,'file_name':job['path'].name,'sha256':job['digest']}
         item = job['item']['results'][target.key]
         if not self.checkpoint():
             if item['status'] not in (SUCCESS, 'IGNORED', 'FAILED1', 'FAILED2'):
@@ -467,9 +518,44 @@ class MultiDeployWorker(QThread):
             return previous['status']
         attempts = self.attempts_by_target.setdefault((job['digest'],target.key),[])
         item['attempts'] = attempts
-        if previous.get('info') and previous.get('status') in ('UNCONFIRMED','IN_PROGRESS','FAILED','FAILED1','FAILED2'):
+        # These three adapters can validate captured acknowledgements entirely
+        # locally. This is allowed even at the retry ceiling; no browser opens.
+        if previous.get('info') and target.platform in ('douyin','xiaohongshu','kuaishou'):
+            if target.platform=='douyin':
+                validator=DeferredDouyinUploader(replace(target.account,auto_archive=False))
+            else:
+                adapter=XiaohongshuUploader if target.platform=='xiaohongshu' else KuaishouUploader
+                validator=adapter(target.account,target.profile,self.root/'dom_reports')
+            if validator.reconcile(previous['info']) is True:
+                item.update(self.ledger.set_result(job['digest'],target.key,SUCCESS,
+                    '已核验本地保存的平台成功回执，未打开浏览器或重新上传',previous['info']))
+                item.pop('quota_message',None)
+                self.save_report()
+                return SUCCESS
+        used = max(int(previous.get('attempt_count') or 0), max((a['number'] for a in attempts),default=0))
+        if previous.get('status')=='FAILED2' or used>=2:
+            item.update(status='FAILED2',attempt_count=max(2,used),message='已达到两次尝试上限；自动扫描和重启均不再上传或打开核对浏览器，需手动重试')
+            marker=(job['digest'],target.key)
+            if marker not in self.limit_notices:
+                self.emit_log('[重试已封顶] '+item['message'])
+                self.limit_notices.add(marker)
+            self.save_report()
+            return 'FAILED2'
+        if previous.get('requires_review'):
+            item.update(previous)
+            item.update(status='RECOVERY_REQUIRED', message='上次上传或提交中断；请先在平台核验，再使用“手动上传所选媒体”确认重试')
+            self.save_report()
+            return 'RECOVERY_REQUIRED'
+        self.active_file_changed.emit(str(job['path']))
+        marker=(job['digest'],target.key)
+        if (previous.get('info') and (previous.get('status') in ('UNCONFIRMED','IN_PROGRESS','FAILED','FAILED1')
+                or previous.get('manual_retry') and previous['info'].get('submitted'))
+                and marker not in self.reconciled and not (target.platform=='youtube' and previous['info'].get('draft') is True)):
+            self.reconciled.add(marker)
             try:
-                checker=self.factory(target,self.log.emit)
+                self.emit_log('[历史结果核验] 本任务仅核对一次已知结果，不选择文件、不新建投稿')
+                checker=self.factory(target,self.emit_log)
+                checker.failure_capture = self.failure_operation.capture
                 reconcile=getattr(checker,'reconcile',None)
                 if callable(reconcile) and reconcile(previous['info']) is True:
                     item.update(self.ledger.set_result(job['digest'],target.key,SUCCESS,'自动检查确认先前投稿成功，未重新上传',previous['info']))
@@ -478,7 +564,14 @@ class MultiDeployWorker(QThread):
                     self.save_report()
                     return SUCCESS
             except Exception as error:
-                self.log.emit(f'[自动检查] {target.key}：{error}；未确认成功，按失败重试规则处理')
+                self.emit_log(f'[自动检查] {target.key}：{error}；未确认成功，按失败重试规则处理')
+            if target.platform == 'youtube' and previous.get('manual_retry') and previous['info'].get('submitted'):
+                message = '已有提交记录仍未确认；本次只读核验原视频ID，未重新上传或再次发布，请在平台核验'
+                item.update(self.ledger.set_result(job['digest'], target.key, 'RECOVERY_REQUIRED', message,
+                    previous['info'], requires_review=True, attempt_count=used, task_id=self.report['task_id']))
+                self.emit_log('[已提交视频核验] '+message)
+                self.save_report()
+                return 'RECOVERY_REQUIRED'
         if len(attempts)>=2:
             item.update(status='FAILED2',attempt_count=2,message=previous.get('message','本任务已尝试两次，不再重试'))
             self.save_report()
@@ -525,7 +618,7 @@ class MultiDeployWorker(QThread):
             item['quota_message']=f'今日已用{quota["used"]}次，上限{quota["limit"]}次；北京时间次日00:00或提高本账号上限后继续'
             marker=(quota['day'],quota['limit'],quota['used'])
             if self.quota_notices.get(target.key)!=marker:
-                self.log.emit(f'[每日限额等待] {target.key}：'+item['quota_message'])
+                self.emit_log(f'[每日限额等待] {target.key}：'+item['quota_message'])
                 self.quota_notices[target.key]=marker
             self.save_report()
             return 'DAILY_LIMIT'
@@ -536,7 +629,9 @@ class MultiDeployWorker(QThread):
             failures=prerequisite_results([target],self.root/'dom_reports')
             if not failures:
                 with sync_playwright() as playwright:
-                    result=AccountPreflight(target,self.stopping.is_set,self.log.emit).check(playwright)
+                    check = AccountPreflight(target,self.stopping.is_set,self.emit_log)
+                    check.failure_capture = self.failure_operation.capture
+                    result=check.check(playwright)
                 failures=[] if result.passed else [result]
             if failures:
                 failure=failures[0]
@@ -545,17 +640,21 @@ class MultiDeployWorker(QThread):
                 self.save_report()
                 return failure.status
             self.deferred_preflight.remove(target.key)
-        attempt={'number':len(attempts)+1,'id':uuid.uuid4().hex,'started_at':now(),'logs':[],'upload_started':False}
+        attempt={'number':used+1,'id':self.failure_operation.operation_id,'started_at':now(),'logs':[],'upload_started':False}
         attempts.append(attempt)
+        self.ledger.set_result(job['digest'],target.key,'IN_PROGRESS',f'开始第{attempt["number"]}/2次尝试',
+            previous.get('info'),task_id=self.report['task_id'],attempt_count=attempt['number'])
+        self.emit_log(f'[上传流程开始] 第{attempt["number"]}/2次尝试；文件={path.name}；本地路径={path}；大小={job["signature"][0]}字节')
         item['status']='RETRYING' if attempt['number']==2 else 'IN_PROGRESS'
         self.save_report()
         def log(message):
+            message=redact(message)
             attempt['logs'].append({'time':now(),'message':message})
-            del attempt['logs'][:-100]
-            self.log.emit(f'[{target.platform}/{target.account.account_name}] {message}')
+            # Complete stage logs remain in JSONL and the task report.
+            self.emit_log(f'[{target.platform}/{target.account.account_name}] {message}')
             self.save_report()
         quota_error=None
-        boundary_info=previous.get('info')
+        boundary_info=None
         def before_upload():
             nonlocal quota_error
             if self.stopping.is_set():
@@ -566,8 +665,12 @@ class MultiDeployWorker(QThread):
                 quota_error=error
                 raise
             attempt['upload_started']=True
+            self.ledger.set_result(job['digest'], target.key, 'IN_PROGRESS',
+                '文件传输已开始；尚未确认发布成功',previous.get('info'),
+                requires_review=getattr(uploader,'supports_upload_boundary',False) is True,
+                attempt_count=attempt['number'],task_id=self.report['task_id'])
             usage=self.quota.snapshot(target.key,getattr(target.account,'daily_upload_limit',10))
-            self.log.emit(f'[上传计数] {target.platform}/{target.account.account_name}：今日已用{usage["used"]}次，上限{usage["limit"]}次，剩余{usage["remaining"]}次')
+            self.emit_log(f'[上传计数] {target.platform}/{target.account.account_name}：今日已用{usage["used"]}次，上限{usage["limit"]}次，剩余{usage["remaining"]}次')
             self.save_report()
         def before_submit(info):
             nonlocal boundary_info
@@ -579,17 +682,30 @@ class MultiDeployWorker(QThread):
             state=SUCCESS if confirmed else 'IN_PROGRESS'
             message='平台已确认本次发布成功，回执已保存' if confirmed else '已提交，等待成功证据；中断后按失败处理'
             saved=self.ledger.set_result(job['digest'],target.key,state,message,info,
-                task_id=self.report['task_id'],attempt_count=attempt['number'])
+                task_id=self.report['task_id'],attempt_count=attempt['number'],
+                requires_review=not confirmed)
             if confirmed:
                 item.update(saved)
             else:
                 item.update(message='已提交，等待平台确认',info=info)
             self.save_report()
         self.status.emit(f'{target.platform}/{target.account.account_name}：{path.name}')
+        uploader = None
         try:
             uploader=self.factory(target,log)
+            uploader.failure_capture = self.failure_operation.capture
             uploader.before_upload=before_upload
             uploader.before_submit=before_submit
+            if target.platform=='youtube':
+                uploader.resume_info=previous.get('info')
+                def draft_checkpoint(info):
+                    attempt['info']=info
+                    self.ledger.set_result(job['digest'],target.key,'IN_PROGRESS',
+                        '已记录YouTube草稿ID；后续重试继续该草稿，不重新选择文件',info,
+                        requires_review=False,attempt_count=attempt['number'],task_id=self.report['task_id'])
+                    self.emit_log('[草稿已记录] 视频ID='+info['video_id']+'；未发布；优先恢复此草稿')
+                    self.save_report()
+                uploader.on_draft_identified=draft_checkpoint
             # Injected adapters without a file-input boundary count their invocation.
             if getattr(uploader,'supports_upload_boundary',False) is not True:
                 before_upload()
@@ -603,9 +719,13 @@ class MultiDeployWorker(QThread):
             state,message,info='FAILED',str(error),boundary_info
         if quota_error:
             attempts.pop()
+            self.ledger.set_result(job['digest'],target.key,previous.get('status','PENDING'),
+                '额度竞争导致尚未开始传输；未消耗本次尝试',previous.get('info'),attempt_count=used,
+                requires_review=previous.get('requires_review',False))
             item.update(status='FAILED1' if attempts else 'PENDING',quota_message=str(quota_error))
             self.save_report()
             return 'DAILY_LIMIT'
+        message=redact(message)
         saved=self.ledger.result(job['digest'],target.key)
         if (state!=SUCCESS and saved.get('status')==SUCCESS and saved.get('task_id')==self.report['task_id']
                 and saved.get('attempt_count')==attempt['number']):
@@ -619,24 +739,45 @@ class MultiDeployWorker(QThread):
             info=dict(info) if isinstance(info,dict) else {}
             info['account_block']={'status':blocking_state,'message':message}
             state='FAILED'+str(attempt['number'])
+        consumed = attempt['number']
         if not attempt['upload_started'] and state in BLOCKING | {'CANCELLED','DURATION_LIMIT','PERMANENT_REJECT'}:
             attempts.pop()
-        item.update(self.ledger.set_result(job['digest'],target.key,state,message,info or boundary_info,
-            task_id=self.report['task_id'],attempt_count=len(attempts)))
-        attempt.update(status=state,finished_at=now(),message=message,info=info)
+            consumed = used
+        retained_info = info or boundary_info or saved.get('info') or previous.get('info')
+        unknown_youtube_transfer = (target.platform == 'youtube' and attempt['upload_started']
+            and getattr(uploader,'supports_upload_boundary',False) is True
+            and not (isinstance(retained_info,dict) and retained_info.get('video_id')))
+        # An explicit current submission rejection is a known failure, not an
+        # unknown acceptance. A challenge/closed page alone remains uncertain.
+        rejected = (target.platform in ('xiaohongshu','kuaishou')
+            and getattr(uploader,'business_rejected',False) is True)
+        confirmation = retained_info.get('confirmation') if isinstance(retained_info,dict) else None
+        if target.platform == 'douyin' and isinstance(confirmation,dict) and confirmation.get('code') is not None:
+            code = str(confirmation['code'])
+            rejected = code != '0' and code.lstrip('-').isdigit()
+        review = state != SUCCESS and not rejected and (boundary_info is not None or unknown_youtube_transfer)
+        if review:
+            state, message = 'RECOVERY_REQUIRED', '上传或提交结果未确认，请先核验平台，未自动重传；原始原因：' + message
+        item.update(self.ledger.set_result(job['digest'],target.key,state,message,retained_info,
+            task_id=self.report['task_id'],attempt_count=consumed, requires_review=review))
+        attempt.update(status=state,finished_at=now(),message=message,info=retained_info)
+        self.emit_log(f'[上传流程结束] 结果={state}；原因={message}；已用尝试={consumed}/2；'
+            + ('已确认成功，等待归档' if state==SUCCESS else '保留原文件；未把草稿计为发布成功'),
+            level='INFO' if state==SUCCESS else 'ERROR')
         account_block=(info or {}).get('account_block') if isinstance(info,dict) else None
         if blocking_state:
             self.blocked[target.key]={'status':blocking_state,'message':message}
             if blocking_state=='ACCOUNT_LIMIT':
                 self.ledger.block(target.key,blocking_state,message)
-            self.log.emit(f'[停止该账号] {target.key}：{message}；其他账号继续')
+            self.emit_log(f'[停止该账号] {target.key}：{message}；其他账号继续')
         elif account_block and account_block.get('status') in BLOCKING:
             self.blocked[target.key]=account_block
-            self.log.emit(f'[停止该账号] {target.key}：{account_block["message"]}；其他账号继续')
+            self.emit_log(f'[停止该账号] {target.key}：{account_block["message"]}；其他账号继续')
         self.save_report()
         return blocking_state or state
 
     def archive(self, job):
+        self.log_context={'file_name':job['path'].name,'sha256':job['digest']}
         item = job['item']
         required=job['plan']['required']
         for key in required:
@@ -653,9 +794,9 @@ class MultiDeployWorker(QThread):
             return
         source = job['path']
         try:
-            destination=archive_completed_file(source,job['signature'],self.log.emit,cloud_root=self.root)
+            destination=archive_completed_file(source,job['signature'],self.emit_log,cloud_root=self.root)
             item['archived_path'] = str(destination)
-            self.log.emit(f'[统一归档] {source.name}：本任务所选{len(required)}个账号已成功或不再跟踪；保留各账号原状态')
+            self.emit_log(f'[统一归档] {source.name}：本任务所选{len(required)}个账号已成功或不再跟踪；保留各账号原状态')
         except (OSError,ValueError) as error:
             item['archive_error'] = str(error)
         self.save_report()
@@ -677,12 +818,12 @@ class MultiDeployWorker(QThread):
         if self.stopping.is_set():
             return
         from .scan_cleanup import cleanup_completed_cloud_copies
-        self.log.emit('[部署后检查] 核对运行期间新增的云盘副本；仅归档本轮所选账号均已成功的文件')
+        self.emit_log('[部署后检查] 核对运行期间新增的云盘副本；仅归档本轮所选账号均已成功的文件')
         try:
             items = cleanup_completed_cloud_copies(self.targets,self.root,
                 history_targets=self.history_targets,
                 exclude_paths=[item['file_path'] for item in self.report['files']],
-                stopped=self.stopping.is_set,log=self.log.emit)
+                stopped=self.stopping.is_set,log=self.emit_log)
             records = {item['file_path']:item for item in self.report.get('completion_cleanup',[])}
             for item in items:
                 records[item['file_path']] = item
@@ -693,7 +834,7 @@ class MultiDeployWorker(QThread):
                 self.queue_changed.emit()
         except Exception as error:
             self.report['completion_cleanup_error'] = str(error)
-            self.log.emit(f'[部署后检查未完成] {error}；发布结果保留，未重新上传')
+            self.emit_log(f'[部署后检查未完成] {error}；发布结果保留，未重新上传')
 
     def run_batch(self, jobs):
         # Copies in different bound directories share a content job. Finish all
@@ -712,7 +853,7 @@ class MultiDeployWorker(QThread):
                 copy['plan'] = plan
                 copy['item']['task_targets'] = list(scope)
             retries=[]
-            self.log.emit(f'[文件开始] {copies[0]["path"].name}；平台顺序：'+
+            self.emit_log(f'[文件开始] {copies[0]["path"].name}；平台顺序：'+
                 ' → '.join(CHANNELS[t.platform].name+'/'+t.account.account_name for t in self.targets))
             for target in self.targets:
                 if target.key not in scope:
@@ -720,7 +861,7 @@ class MultiDeployWorker(QThread):
                 job=next((copy for copy in copies if target.key in {t.key for t in copy['targets']}),None)
                 if job is None:
                     if self.ledger.result(copies[0]['digest'],target.key).get('status') not in (SUCCESS,'IGNORED'):
-                        self.log.emit(f'[目录未包含此文件] {target.key}：未在该账号绑定目录找到同内容媒体；保留文件等待该账号完成')
+                        self.emit_log(f'[目录未包含此文件] {target.key}：未在该账号绑定目录找到同内容媒体；保留文件等待该账号完成')
                     continue  # Respect each account's bound directory/media filter.
                 before = len(job['item']['results'][target.key]['attempts'])
                 state = self.attempt(job, target)
@@ -733,20 +874,20 @@ class MultiDeployWorker(QThread):
             for job,target in retries:
                 if not self.checkpoint():
                     break
-                self.log.emit(f'[当前文件重试一次] {job["path"].name} → {target.key}')
+                self.emit_log(f'[当前文件重试一次] {job["path"].name} → {target.key}')
                 self.attempt(job,target)
                 self.controlled_wait(self.interval_seconds)
             for job in copies:
                 self.archive(job)
         if jobs and (summary:=self.blocked_summary(include_reason=True)):
-            self.log.emit('[本轮账号限制] '+summary)
+            self.emit_log('[本轮账号限制] '+summary)
 
     def run(self):
         try:
             self.ledger = MultiTargetLedger(self.root)
             self.quota.bootstrap_history(self.stopping.is_set)
             self.save_report()
-            self.log.emit(f'[任务报告] {self.report_path}')
+            self.emit_log(f'[任务报告] {self.report_path}')
             while not self.stopping.is_set():
                 if not self.checkpoint():
                     break
@@ -755,8 +896,10 @@ class MultiDeployWorker(QThread):
                 selected={t.key for t in self.targets}
                 quota_wait=any(r.get('quota_message') and r.get('status') not in (SUCCESS,'IGNORED','PERMANENT_REJECT','DURATION_LIMIT')
                     for f in self.report['files'] for key,r in f['results'].items() if key in selected)
-                if self.file_paths is not None and not quota_wait:
+                if self.file_paths is not None and (self.report['all_selected_completed'] or not quota_wait):
                     self.report['status'] = 'STOPPED' if self.stopping.is_set() else 'COMPLETED'
+                    self.emit_log('[手工任务结束] '+('所选平台全部完成；' if self.report['all_selected_completed'] else '本轮尝试已结束；')+
+                        '部署自动停止；成功项不重传，不转入目录轮询')
                     break
                 if all(t.key in self.blocked or self.ledger.quota_block(t.key) for t in self.targets):
                     self.report['status'] = 'BLOCKED'
@@ -765,17 +908,17 @@ class MultiDeployWorker(QThread):
                 interval=f'{self.poll_seconds:g}秒'
                 next_scan=(datetime.now(CHINA_TIME)+timedelta(seconds=self.poll_seconds)).strftime('%Y-%m-%d %H:%M:%S')
                 self.report['status']='WAITING_QUOTA' if quota_wait else 'RUNNING'
-                self.status.emit(f'每日限额等待；提高对应账号上限或次日继续' if quota_wait else f'定时扫描等待（每{interval}）；'+(summary or '成功不重传；本任务失败最多尝试两次'))
-                self.log.emit(f'[定时扫描等待] 本轮结束；每{interval}检查目录；下次 {next_scan}（北京时间）；成功不重传，失败2不再重试；限额账号等待跨日或提高上限')
+                self.status.emit(f'每日限额等待；提高对应账号上限或次日继续' if quota_wait else f'定时扫描等待（每{interval}）；'+(summary or '同账号同内容累计最多两次；重启不重置'))
+                self.emit_log(f'[定时扫描等待] 本轮结束；每{interval}检查目录；下次 {next_scan}（北京时间）；成功不重传；失败2跨重启保留，需手动确认重试；限额账号等待跨日或提高上限')
                 self.save_report()
                 current=datetime.now(CHINA_TIME)
                 until_midnight=((current+timedelta(days=1)).replace(hour=0,minute=0,second=0,microsecond=0)-current).total_seconds()
                 self.controlled_wait(min(self.poll_seconds,until_midnight) if quota_wait else self.poll_seconds)
                 if not self.stopping.is_set():
-                    self.log.emit('[定时扫描开始] 正在检查本地媒体目录的新文件；这是目录扫描，不是平台投稿结果查询')
+                    self.emit_log('[定时扫描开始] 正在检查本地媒体目录的新文件；这是目录扫描，不是平台投稿结果查询')
         except Exception as error:
             self.report.update(status='FAILED', error=str(error))
-            self.log.emit(f'[任务异常] {error}')
+            self.emit_log(f'[任务异常] {error}')
         finally:
             if self.report['status'] in ('RUNNING', 'PAUSED', 'WAITING_QUOTA'):
                 self.report['status'] = 'STOPPED'
@@ -788,6 +931,21 @@ class MultiDeployWorker(QThread):
                         result.update(status='FAILED'+str(min(2,max(1,len(result.get('attempts',[]))))), message='任务中断，未确认成功；保留原文件')
             try:
                 self.save_report()
-                self.log.emit(f'[任务结束] 成功{self.report["success_count"]}，失败{self.report["failure_count"]}，未确认{self.report["unconfirmed_count"]}；{self.report_path}')
+                self.emit_log(f'[任务结束] 成功{self.report["success_count"]}，失败{self.report["failure_count"]}，未确认{self.report["unconfirmed_count"]}；{self.report_path}')
             except Exception as error:
-                self.log.emit(f'[报告保存失败] {error}')
+                self.emit_log(f'[报告保存失败] {error}')
+            try:
+                # Include targets stopped before their browser could be started.
+                for file in self.report['files']:
+                    for target in self.targets:
+                        if target.key not in file.get('task_targets', [t.key for t in self.targets]):
+                            continue
+                        result = file.get('results', {}).get(target.key, {})
+                        state = result.get('status', 'CANCELLED')
+                        marker = (file['sha256'], target.key, state)
+                        if state != SUCCESS and marker not in self.diagnostic_states:
+                            self.diagnostics.operation(target.platform, target.account.account_id, file['file_name']).complete(
+                                state, result.get('message', ''), result=result)
+                self.diagnostics.finish()
+            except OSError as error:
+                self.emit_log('[失败诊断整理异常] '+str(error))

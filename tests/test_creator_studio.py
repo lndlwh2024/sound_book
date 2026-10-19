@@ -317,7 +317,9 @@ def test_explicit_description_is_written_and_stop_after_submit_is_unconfirmed(tm
 
 
 @pytest.mark.parametrize('platform',['xiaohongshu','kuaishou'])
-def test_missing_report_blocks_before_browser_launch(tmp_path,monkeypatch,platform):
+def test_missing_report_and_builtin_structure_blocks_before_browser_launch(tmp_path,monkeypatch,platform):
+    from src.publisher import page_structure
+    monkeypatch.setattr(page_structure,'STRUCTURES',{})
     owner=account(platform)
     cls=module.XiaohongshuUploader if platform=='xiaohongshu' else module.KuaishouUploader
     instance=cls(owner,tmp_path/'profile',tmp_path/'no-reports')
@@ -326,6 +328,22 @@ def test_missing_report_blocks_before_browser_launch(tmp_path,monkeypatch,platfo
     success,_,_=instance.upload_single_video(tmp_path/'fixture.mp4')
     assert not success and instance.last_outcome=='CONFIG_REQUIRED'
     launch.assert_not_called()
+
+
+@pytest.mark.parametrize('platform',['xiaohongshu','kuaishou'])
+def test_builtin_structure_runs_live_adapter_on_new_profile_without_recapture(tmp_path,monkeypatch,platform):
+    owner=account(platform)
+    cls=module.XiaohongshuUploader if platform=='xiaohongshu' else module.KuaishouUploader
+    instance=cls(owner,tmp_path/'new-profile',tmp_path/'no-personal-reports',headless=True)
+    instance.upload_seconds,instance.publish_seconds,instance.stable_seconds=4,.8,.1
+    source=tmp_path/'一分钟趣味知识_第1问.mp4'
+    source.write_bytes(b'local video fixture')
+    with sync_playwright() as playwright:
+        records=install_local_browser(monkeypatch,playwright,'api')
+        success,message,_=instance.upload_single_video(source)
+    assert success,message
+    assert records['calls']==[platform]
+    assert not instance.report_root.exists()
 
 
 def test_default_task_factory_runs_both_real_adapters_then_archives_once(tmp_path,monkeypatch):
@@ -450,7 +468,7 @@ def test_real_adapters_obey_task_account_limit_and_retry_isolation(tmp_path,monk
         assert records['calls']==(['xiaohongshu','kuaishou','kuaishou'] if scenario=='busy' else ['kuaishou','kuaishou'])
         assert job.report['success_count']==2 and all(source.exists() for source in sources)
         first=job.report['files'][0]['results'][targets[0].key]
-        assert first['status']=='FAILED1'
+        assert first['status']==('RECOVERY_REQUIRED' if scenario=='uncertain_verification' else 'FAILED1')
         assert job.report['files'][1]['results'][targets[0].key]['status']==state
         assert not MultiTargetLedger(job.root).quota_block(targets[0].key)
     else:

@@ -92,62 +92,14 @@ class DouyinBrowserManager:
 
     @staticmethod
     def extract_nickname(page: Page) -> Optional[str]:
-        """
-        从创作者中心页面中提取当前登录用户的真实昵称。
-        采用多重稳健定位（类名特征、头像临近节点、本地存储对象）。
-        """
+        """Use the same own-account reader as the multi-platform client."""
+        from ..identity import refresh_platform_identity
         try:
-            extract_js = """
-            () => {
-                const ignoreTexts = ['创作者', '发布', '消息', '通知', '登录', '退出', '服务', '帮助', '抖音', '首页', '管理', '搜索', '合集'];
-                
-                // 1. 尝试常见的类名和属性选择器
-                const selectors = [
-                    '[class*="user-name"]',
-                    '[class*="userName"]',
-                    '[class*="nickname"]',
-                    '[class*="user_name"]',
-                    '[class*="creator-header"] [class*="name"]',
-                    '[class*="header"] [class*="name"]',
-                    '[class*="avatar"] + div',
-                    '[class*="avatar"] + span'
-                ];
-                
-                for (const sel of selectors) {
-                    const elements = document.querySelectorAll(sel);
-                    for (const el of elements) {
-                        const txt = ((el.innerText || el.textContent || '') + '').trim();
-                        if (txt && txt.length >= 2 && txt.length <= 30) {
-                            if (!ignoreTexts.some(bad => txt.includes(bad))) {
-                                return txt;
-                            }
-                        }
-                    }
-                }
-                
-                // 2. 尝试从 local/session storage 或常见全局挂载对象中提取
-                try {
-                    for (let key in localStorage) {
-                        if (key.includes('user') || key.includes('info') || key.includes('account')) {
-                            const val = localStorage.getItem(key);
-                            if (val && val.includes('{')) {
-                                const obj = JSON.parse(val);
-                                const nick = obj.nickname || obj.user_name || obj.name || (obj.user && obj.user.nickname);
-                                if (nick && typeof nick === 'string' && nick.trim()) return nick.trim();
-                            }
-                        }
-                    }
-                } catch (e) {}
-
-                return null;
-            }
-            """
-            nick = page.evaluate(extract_js)
-            if nick and isinstance(nick, str) and nick.strip():
-                return nick.strip()
-        except Exception as e:
-            logger.debug(f"提取创作者昵称异常（可忽略）: {e}")
-        return None
+            identity = refresh_platform_identity(page, 'douyin')
+            return identity['nickname'] if identity else None
+        except Exception as error:
+            logger.debug('提取创作者昵称异常（保留登录和原昵称）: %s', error)
+            return None
 
     @classmethod
     def create_persistent_context(
@@ -158,14 +110,7 @@ class DouyinBrowserManager:
         viewport: Optional[dict] = None,
         timeout: Optional[int] = None
     ) -> BrowserContext:
-        """
-        统一工厂方法：启动 Playwright 纯净独立的持久化 Chromium 浏览器上下文。
-        【为什么这样设计】
-        1. 采用 Playwright 纯净的独立 Chromium 内核，不拉起外部 Chrome，
-           彻底消除 Windows 环境因外部拉起被注入 --no-sandbox 导致的黄条警告与多进程 Web Worker 冲突；
-        2. 在此纯净环境下抖音创作者中心页面表单、封面与合集列表能够 100% 稳定就绪；
-        3. 抹除自动化痕迹，保证登录状态稳定持久化。
-        """
+        """Use the shared runtime factory while retaining this account's profile."""
         profile_path = Path(profile_path).resolve()
         profile_path.mkdir(parents=True, exist_ok=True)
 
@@ -178,7 +123,8 @@ class DouyinBrowserManager:
 
         if timeout is not None:
             launch_kwargs["timeout"] = timeout
-        context = playwright_instance.chromium.launch_persistent_context(**launch_kwargs)
+        from ..media_browser import launch_media_context
+        context = launch_media_context(playwright_instance, **launch_kwargs)
         return context
 
     def launch_interactive_login(self, account: DouyinAccountConfig, timeout_secs: int = 180) -> Tuple[bool, str]:

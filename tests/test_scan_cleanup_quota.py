@@ -221,7 +221,7 @@ def test_cleanup_fixed_full_group_ignored_counts_complete_even_auto_archive_off(
     assert len(MultiTargetLedger(root).data['plans'][digest]['required'])==4
 
 
-def test_old_failed_unknown_are_pending_without_mutating_history_report(tmp_path):
+def test_old_failure_ceiling_is_preserved_without_mutating_history_report(tmp_path):
     path=media(tmp_path/'media')
     group=targets(path.parent);root=tmp_path/'state'
     ledger=MultiTargetLedger(root);digest=hashlib.sha256(path.read_bytes()).hexdigest()
@@ -232,7 +232,7 @@ def test_old_failed_unknown_are_pending_without_mutating_history_report(tmp_path
     (folder/'history.json').write_text(historic)
     scanner=ScanCleanupWorker(group[:1],group,root);scanner.run()
     assert not scanner.error and path.exists()
-    assert [r['status'] for r in scanner.items[0]['results'].values()]==['SUCCESS','PENDING','PENDING','PENDING']
+    assert [r['status'] for r in scanner.items[0]['results'].values()]==['SUCCESS','FAILED2','PENDING','PENDING']
     assert MultiTargetLedger(root).result(digest,group[2].key)['status']=='FAILED'
     assert (folder/'history.json').read_text()==historic
 
@@ -282,7 +282,7 @@ def test_archive_collision_preserves_existing_media_and_subtitle(tmp_path):
 
 
 @pytest.mark.parametrize('platform',list(CHANNELS))
-def test_duplicate_copies_share_two_attempts_poll_does_not_reset_new_task_does(tmp_path,platform):
+def test_duplicate_copies_and_new_task_do_not_repeat_an_unknown_submission(tmp_path,platform):
     path=media(tmp_path/'media');media(path.parent,'copy.mp4',path.read_bytes())
     target=next(t for t in targets(path.parent) if t.platform==platform);calls=[]
     class Uploader:
@@ -295,14 +295,14 @@ def test_duplicate_copies_share_two_attempts_poll_does_not_reset_new_task_does(t
     root=tmp_path/'state'
     first=task(root,[target],lambda *args:Uploader())
     first.run_batch(first.plan_batch());first.run_batch(first.plan_batch())
-    assert len(calls)==2
-    assert all(item['results'][target.key]['status']=='FAILED2' for item in first.report['files'])
-    assert first.quota.snapshot(target.key)['used']==2
+    assert len(calls)==1
+    assert all(item['results'][target.key]['status']=='RECOVERY_REQUIRED' for item in first.report['files'])
+    assert first.quota.snapshot(target.key)['used']==1
     second=task(root,[target],lambda *args:Uploader())
     jobs=second.plan_batch()
-    assert all(j['item']['results'][target.key]['status']=='PENDING' for j in jobs)
+    assert all(j['item']['results'][target.key]['status']=='RECOVERY_REQUIRED' for j in jobs)
     second.run_batch(jobs)
-    assert len(calls)==4 and second.quota.snapshot(target.key)['used']==4
+    assert len(calls)==1 and second.quota.snapshot(target.key)['used']==1
 
 
 def test_failed_retry_waits_for_quota_then_rollover_without_resetting_failure2(tmp_path):

@@ -477,6 +477,9 @@ def test_manual_cleanup_archives_completed_ignored_plan_even_when_auto_archive_d
 
 
 def test_queue_columns_align_fit_contents_and_resize_file_name(panel,tmp_path):
+    for check in panel.channel_checks.values():
+        check.setChecked(True)
+    panel.update_selection()
     import hashlib
     from PySide6.QtCore import Qt
     from PySide6.QtWidgets import QApplication,QToolButton

@@ -5,11 +5,12 @@ import re
 import time
 import queue
 import threading
+import uuid
 from dataclasses import replace
 from pathlib import Path
 
 from PySide6.QtCore import QThread, Qt, Signal, QTimer, QRect, QUrl
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtGui import QDesktopServices, QColor, QBrush
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QCheckBox, QComboBox,
     QStackedWidget, QListWidget, QListWidgetItem, QPushButton,
     QMessageBox, QInputDialog, QDialog, QPlainTextEdit, QSplitter,
@@ -22,13 +23,16 @@ from ..publisher.account_repository import PlatformAccountRepository
 from ..publisher.platforms import CHANNELS, ChannelAccountStore, deployment_block_reason
 from ..publisher.channel_probe import ChannelDOMProbe, STAGES, safe_url
 from ..publisher.multi_deploy import PublishTarget, MultiDeployWorker
-from ..publisher.identity import extract_platform_identity
+from ..publisher.identity import extract_platform_identity, refresh_platform_identity, identity_read_failure, read_homepage_identity
 from ..publisher.status import STATUS_TEXT, result_status_text, fresh_result
 from ..publisher.scan_cleanup import ScanCleanupWorker
 from ..publisher.upload_quota import DailyUploadQuota
 from ..publisher.preflight import DeploymentPreflightWorker, prerequisite_results, failure_message
 from ..publisher.douyin.browser import DouyinBrowserManager
 from ..publisher.douyin.config import DouyinAccountManager
+from ..publisher.youtube_browser import (launch_youtube_context, start_manual_login,
+    google_login_rejected, GOOGLE_LOGIN_HELP, youtube_runtime_summary,
+    manual_browser_open, ManualBrowserHandoff)
 
 QUEUE_HEADERS = ['序号', '文件名', '类型', '文件大小', '修改时间', '抖音', '小红书', '快手', 'YouTube']
 
@@ -42,7 +46,7 @@ class QueueSnapshotWorker(QThread):
 
     def run(self):
         from ..publisher.media import MEDIA_TYPES
-        from ..publisher.dom_readiness import account_dom_state
+        from ..publisher.dom_readiness import publishing_dom_state as account_dom_state
         snapshots = []
         for platform, request in self.requests:
             if self.isInterruptionRequested():
@@ -70,6 +74,8 @@ def size_queue_columns(table):
     header.setMinimumSectionSize(36)
     metrics = table.fontMetrics()
     for column in (0,2,3,4,5,6,7,8):
+        if table.isColumnHidden(column):
+            continue
         labels = [QUEUE_HEADERS[column]]
         for row in range(table.rowCount()):
             item=table.item(row,column)
@@ -84,7 +90,8 @@ def size_queue_columns(table):
         if item:
             bounds=metrics.boundingRect(QRect(0,0,max(30,table.columnWidth(1)-12),1000),
                 Qt.TextWordWrap,item.text())
-            accounts=max([len(table.item(row,c).text().split(' / ')) for c in range(5,9) if table.item(row,c)]+[1])
+            accounts=max([len(table.item(row,c).text().split(' / ')) for c in range(5,9)
+                if not table.isColumnHidden(c) and table.item(row,c)]+[1])
             table.setRowHeight(row,max(30,bounds.height()+10,accounts*26))
 
 
@@ -95,6 +102,7 @@ class ChannelProbeWorker(QThread):
     error = Signal(str)
     status = Signal(str)
     identity_found = Signal(dict)
+    manual_changed = Signal(bool)
 
     def __init__(self, account, profile, output, parent=None):
         super().__init__(parent)
@@ -103,6 +111,18 @@ class ChannelProbeWorker(QThread):
         self.probe = ChannelDOMProbe(self.account, output)
         self.commands = queue.Queue()
         self.closing = threading.Event()
+        self.google_manual = threading.Event()
+        self.manual_active = threading.Event()
+        self.manual_finish = threading.Event()
+        self.verify_after_manual = False
+
+    def request_google_manual(self):
+        if self.account.platform == 'youtube':
+            self.google_manual.set()
+
+    def request_manual_finish(self):
+        if self.manual_active.is_set():
+            self.manual_finish.set()
 
     def request_capture(self, stage, token):
         self.commands.put((stage, token))
@@ -113,7 +133,97 @@ class ChannelProbeWorker(QThread):
     def request_identity(self, token):
         self.commands.put(('__identity__', token))
 
+    def read_identity(self, page):
+        detail = ''
+        try:
+            identity = refresh_platform_identity(page, self.account.platform, self.closing.is_set)
+            if not identity and self.account.platform == 'douyin':
+                def diagnostic(home):
+                    report, image = self.probe.capture(home, '异常提示')
+                    self.captured.emit(report, image)
+                identity = read_homepage_identity(page, self.account.platform, self.closing.is_set,
+                                                 diagnostic=diagnostic)
+        except Exception as error:
+            identity, detail = None, str(error)
+        if identity:
+            if self.account.platform == 'youtube':
+                uid = identity.get('channel_id') or identity.get('platform_uid','')
+                if not re.fullmatch(r'UC[\w-]{22}',uid):
+                    raise ValueError('尚未读到实际频道 ID，请在 YouTube Studio 选择正确频道后重试；未标记登录成功。')
+                if self.account.channel_id and uid != self.account.channel_id:
+                    raise ValueError('实际频道与已绑定频道不同；未覆盖账号身份，请切换到正确频道。')
+            return identity
+        try:
+            message = identity_read_failure(page, self.account.platform)
+        except Exception:
+            message = '昵称读取未完成，页面可能已关闭或正在切换；原昵称与登录状态保留。'
+        if detail:
+            message += '；读取原因：' + detail[:500]
+        try:
+            report, image = self.probe.capture(page, '异常提示')
+            self.captured.emit(report, image)
+        except Exception as error:
+            self.status.emit('昵称读取诊断未能保存：'+str(error))
+        raise ValueError(message)
+
     def run(self):
+        try:
+            if self.account.platform == 'youtube' and manual_browser_open(self.profile):
+                self.google_manual.set()
+                self.status.emit('检测到上次的本账号专用浏览器仍在运行；可继续登录，随后点击“登录完成，验证频道”。')
+        except Exception as error:
+            self.error.emit(f'检查专用浏览器占用失败：{error}')
+            return
+        while not self.closing.is_set():
+            if self.google_manual.is_set():
+                self.google_manual.clear()
+                self.manual_active.set()
+                self.manual_finish.clear()
+                self.manual_changed.emit(True)
+                try:
+                    process, browser = start_manual_login(self.profile)
+                    handoff = ManualBrowserHandoff(self.profile,browser,process)
+                    self.status.emit(f'{browser.name} 本账号专用窗口已打开或已恢复。完成登录并进入正确频道后，'
+                                     '点击下方“登录完成，验证频道”；书声会正常关闭该专用窗口并验证，不会代填密码。')
+                    deadline = None
+                    while not self.closing.is_set():
+                        if self.manual_finish.is_set():
+                            self.manual_finish.clear()
+                            if deadline is None:
+                                try:
+                                    count = handoff.close_windows()
+                                    self.status.emit(f'已请求正常关闭 {count} 个本账号专用浏览器窗口；正在等待登录数据保存并验证频道。')
+                                    deadline = time.monotonic() + 20
+                                except Exception as error:
+                                    self.error.emit(f'专用窗口关闭请求失败：{error}；可手工关闭该浏览器后重试验证。')
+                        if handoff.released():
+                            self.verify_after_manual = True
+                            self.status.emit('账号专用目录已释放；正在恢复同一浏览器并读取、核验当前频道。')
+                            break
+                        if deadline is not None and time.monotonic() >= deadline:
+                            deadline = None
+                            self.error.emit('浏览器尚未释放账号目录；请处理该专用窗口中的提示，再点“登录完成，验证频道”。'
+                                            '当前登录数据保留；也可取消等待。')
+                        time.sleep(.3)
+                    if self.closing.is_set():
+                        self.status.emit('已取消等待；专用浏览器和已保存登录数据保留。下次打开登录窗口可继续验证，未标记登录成功。')
+                except Exception as error:
+                    self.error.emit(f'手工登录浏览器未能打开：{error}')
+                finally:
+                    self.manual_active.clear()
+                    self.manual_changed.emit(False)
+                while not self.commands.empty():
+                    try:
+                        self.commands.get_nowait()
+                    except queue.Empty:
+                        break
+            if self.closing.is_set():
+                break
+            self._run_automated()
+            if not self.google_manual.is_set():
+                break
+
+    def _run_automated(self):
         context = None
         try:
             self.profile.mkdir(parents=True, exist_ok=True)
@@ -123,8 +233,13 @@ class ChannelProbeWorker(QThread):
                     if self.account.platform == 'douyin':
                         context = DouyinBrowserManager.create_persistent_context(playwright, self.profile,
                             headless=False, viewport={'width':1440,'height':900}, timeout=10000)
+                    elif self.account.platform == 'youtube':
+                        context = launch_youtube_context(playwright, self.profile,
+                            headless=False, viewport={'width':1440,'height':900}, timeout=10000)
+                        self.status.emit(youtube_runtime_summary(context, self.profile))
                     else:
-                        context = playwright.chromium.launch_persistent_context(
+                        from ..publisher.media_browser import launch_media_context
+                        context = launch_media_context(playwright,
                             str(self.profile), headless=False, viewport={'width': 1440, 'height': 900}, timeout=10000)
                     if self.closing.is_set():
                         return
@@ -137,7 +252,9 @@ class ChannelProbeWorker(QThread):
                     previous = None
                     previous_identity = None
                     next_identity_check = 0
-                    while not self.closing.is_set():
+                    rejection_reported = False
+                    verify_deadline = time.monotonic() + 30 if self.verify_after_manual else None
+                    while not self.closing.is_set() and not self.google_manual.is_set():
                         pages = [p for p in context.pages if not p.is_closed()]
                         if not pages:
                             break
@@ -145,16 +262,31 @@ class ChannelProbeWorker(QThread):
                         if inventory != previous:
                             self.pages_changed.emit(inventory)
                             previous = inventory
+                        if self.account.platform == 'youtube' and not rejection_reported and any(
+                                google_login_rejected(p.url) for p in pages):
+                            rejection_reported = True
+                            self.status.emit(GOOGLE_LOGIN_HELP)
                         if time.monotonic() >= next_identity_check:
                             next_identity_check = time.monotonic() + 2
                             for candidate in pages:
                                 try:
                                     identity = extract_platform_identity(candidate, self.account.platform)
+                                    if identity and self.account.platform == 'youtube':
+                                        uid = identity.get('channel_id') or identity.get('platform_uid','')
+                                        if not re.fullmatch(r'UC[\w-]{22}',uid) or self.account.channel_id and uid != self.account.channel_id:
+                                            identity = None
                                     if identity and identity != previous_identity:
                                         self.identity_found.emit(identity)
                                         previous_identity = identity
+                                        if self.verify_after_manual:
+                                            self.verify_after_manual = False
+                                            self.status.emit('已读到实际频道 ID 与昵称，已交由当前账号配置保存；请查看主界面登录状态。')
                                 except Exception:
                                     pass
+                        if self.verify_after_manual and verify_deadline and time.monotonic() >= verify_deadline:
+                            self.verify_after_manual = False
+                            self.error.emit('暂未核验到正确频道；请在浏览器打开 YouTube Studio 并选择正确频道，再点击“读取平台昵称”。'
+                                            '登录数据保留，未伪装为登录成功。')
                         try:
                             stage, token = self.commands.get_nowait()
                         except queue.Empty:
@@ -165,15 +297,15 @@ class ChannelProbeWorker(QThread):
                                 if active is None:
                                     raise ValueError('所选标签页已关闭，请重新选择采集页面')
                                 if stage == '__identity__':
-                                    identity = extract_platform_identity(active, self.account.platform)
-                                    if not identity:
-                                        raise ValueError('未找到唯一的本人账号昵称；保留原备注，请登录后采集账号区域 DOM')
+                                    identity = self.read_identity(active)
                                     self.identity_found.emit(identity)
+                                    previous_identity = identity
                                     continue
                                 report, image = self.probe.capture(active, stage)
                                 self.captured.emit(report, image)
                             except Exception as error:
-                                self.error.emit(f'采集失败（会话仍保持打开）：{error}')
+                                label = '昵称读取失败' if stage == '__identity__' else '采集失败'
+                                self.error.emit(f'{label}（会话仍保持打开）：{error}')
                         try:
                             pages[-1].wait_for_timeout(300)
                         except TargetClosedError:
@@ -188,6 +320,11 @@ class ChannelProbeWorker(QThread):
                             context.close()
                         except TargetClosedError:
                             pass  # Closing the last browser window manually is a normal exit.
+                        except Exception:
+                            # A failed shutdown must not hand the same profile to
+                            # a normal browser while automation might still own it.
+                            self.google_manual.clear()
+                            raise
         except Exception as error:
             self.error.emit(f'浏览器会话异常：{error}')
 
@@ -198,20 +335,30 @@ class ChannelProbeDialog(QDialog):
 
     def __init__(self, account, profile, output, parent=None):
         super().__init__(parent)
-        self.setWindowTitle(f'{CHANNELS[account.platform].name} · {account.account_name} · 登录与DOM采集')
+        self.setWindowTitle(f'{CHANNELS[account.platform].name} · {account.account_name} · 登录与页面诊断')
         self.resize(680, 450)
         self.setWindowModality(Qt.WindowModal)
         self.setStyleSheet('QDialog{background:#1A202C;color:#E2E8F0} QLabel{color:#E2E8F0} '
                           'QComboBox,QPlainTextEdit{background:#111827;color:#F1F5F9;padding:6px} '
-                          'QPushButton{background:#2B6CB0;color:white;padding:7px}')
+                          'QPushButton{background:#2B6CB0;color:white;padding:7px} '
+                          'QPushButton:disabled{background:#303B4B;color:#8493A7} '
+                          'QComboBox:disabled{color:#8493A7;background:#202938}')
         self.pending_result = None
+        self.pending_identity_read = False
         self.last_report = ''
+        self.in_manual_login = False
+        self.is_youtube = account.platform == 'youtube'
         layout = QVBoxLayout(self)
-        guide = QLabel('请在浏览器手工登录、核对账号/频道，再进入发布页并选择测试视频。\n'
+        guide = QLabel('已有登录可直接读取平台昵称；新电脑需要登录，内置平台页面结构可复用。\n'
                        '选择采集阶段与标签页，可连续采集；不会自动点击发布或处理无关弹窗。\n'
-                       'YouTube：登录后点击“创建 → 上传视频”。登录受阻时保留提示用于排查。')
+                       'YouTube：手工登录后，点击下方“登录完成，验证频道”；不必重新采集全部 DOM。')
         guide.setWordWrap(True)
         layout.addWidget(guide)
+        self.google_login_button = None
+        if account.platform == 'youtube':
+            self.google_login_button = QPushButton('手工登录 Google（正常 Chrome / Edge）')
+            self.google_login_button.setToolTip('先关闭自动化会话，再打开本账号专用的正常浏览器；手工登录后关闭浏览器，书声自动重新验证。')
+            layout.addWidget(self.google_login_button)
         self.tabs = QComboBox()
         layout.addWidget(self.tabs)
         self.stage = QComboBox()
@@ -225,10 +372,12 @@ class ChannelProbeDialog(QDialog):
         self.logs.setReadOnly(True)
         layout.addWidget(self.logs)
         row = QHBoxLayout()
-        confirm = QPushButton('我已核对登录账号/频道')
+        confirm = QPushButton('核验登录账号/频道' if self.is_youtube else '我已核对登录账号/频道')
+        self.confirm_button = confirm
         confirm.clicked.connect(self.confirm_login)
         row.addWidget(confirm)
         nickname = QPushButton('读取平台昵称')
+        self.nickname_button = nickname
         nickname.clicked.connect(lambda:self.worker.request_identity(self.tabs.currentData()))
         row.addWidget(nickname)
         self.folder_button = QPushButton('打开采集报告')
@@ -240,15 +389,33 @@ class ChannelProbeDialog(QDialog):
         row.addWidget(self.close_button)
         layout.addLayout(row)
         self.worker = ChannelProbeWorker(account, profile, output, self)
-        self.worker.ready.connect(lambda: self.logs.appendPlainText('浏览器已打开，请手工登录与操作。'))
+        self.worker.ready.connect(lambda: self.logs.appendPlainText('浏览器会话已打开；已有登录会继续使用，可直接读取平台昵称或采集DOM。'))
         self.worker.pages_changed.connect(self.update_tabs)
         self.worker.status.connect(self.logs.appendPlainText)
         self.worker.error.connect(self.on_error)
         self.worker.captured.connect(self.on_captured)
         self.worker.identity_found.connect(self.identity_found.emit)
-        self.worker.identity_found.connect(lambda result:self.logs.appendPlainText('已自动读取平台昵称：'+result['nickname']))
+        self.worker.identity_found.connect(lambda result:self.logs.appendPlainText('已读取平台昵称：'+result['nickname']))
+        self.worker.manual_changed.connect(self.on_manual_changed)
+        if self.google_login_button:
+            self.google_login_button.clicked.connect(self.worker.request_google_manual)
         self.worker.finished.connect(self.on_finished)
         self.worker.start()
+
+    def on_manual_changed(self, active):
+        self.in_manual_login = active
+        if self.google_login_button:
+            self.google_login_button.setEnabled(not active and self.worker.isRunning())
+        self.tabs.setEnabled(not active)
+        self.stage.setEnabled(not active)
+        self.capture_button.setEnabled(not active and bool(self.tabs.count()) and self.pending_result is None)
+        self.confirm_button.setText('登录完成，验证频道' if active else '核验登录账号/频道' if self.is_youtube else '我已核对登录账号/频道')
+        self.confirm_button.setEnabled(self.pending_result is None)
+        self.close_button.setText('取消等待并关闭' if active else '关闭会话')
+        self.nickname_button.setEnabled(not active)
+        if active:
+            self.tabs.clear()
+            self.capture_button.setEnabled(False)
 
     def update_tabs(self, pages):
         selected = self.tabs.currentData()
@@ -258,18 +425,35 @@ class ChannelProbeDialog(QDialog):
         index = self.tabs.findData(selected)
         self.tabs.setCurrentIndex(index if index >= 0 else self.tabs.count() - 1)
         self.capture_button.setEnabled(bool(pages) and self.pending_result is None)
+        if pages and self.pending_identity_read:
+            self.pending_identity_read = False
+            self.worker.request_identity(self.tabs.currentData())
+
+    def read_identity_when_ready(self):
+        if self.tabs.currentData():
+            self.worker.request_identity(self.tabs.currentData())
+        else:
+            self.pending_identity_read = True
 
     def capture(self):
         self.capture_button.setEnabled(False)
         self.worker.request_capture(self.stage.currentText(), self.tabs.currentData())
 
     def confirm_login(self):
+        if self.is_youtube:
+            if self.in_manual_login:
+                self.worker.request_manual_finish()
+                self.logs.appendPlainText('正在完成手工登录交接；只请求关闭本账号的专用浏览器，随后验证频道。')
+            else:
+                self.read_identity_when_ready()
+                self.logs.appendPlainText('正在读取实际频道；只有核验并保存成功后才显示已登录。')
+            return
         self.login_confirmed.emit()
         self.logs.appendPlainText('已记录用户核对登录状态；这不是平台身份的自动验证。')
 
     def on_error(self, error):
         self.logs.appendPlainText(error)
-        self.capture_button.setEnabled(self.worker.isRunning() and self.pending_result is None)
+        self.capture_button.setEnabled(not self.in_manual_login and bool(self.tabs.count()) and self.worker.isRunning() and self.pending_result is None)
 
     def on_captured(self, report, image):
         self.last_report = report
@@ -296,15 +480,24 @@ class ChannelProbeDialog(QDialog):
 
     def on_finished(self):
         self.capture_button.setEnabled(False)
+        self.confirm_button.setEnabled(False)
+        self.nickname_button.setEnabled(False)
+        if self.google_login_button:
+            self.google_login_button.setEnabled(False)
         self.logs.appendPlainText('浏览器会话已结束。')
         if self.pending_result is not None:
             self.done(self.pending_result)
 
 
 class MultiPlatformPublisherPanel(QWidget):
-    def __init__(self, parent=None, store=None):
+    def __init__(self, parent=None, store=None, douyin_manager=None, storage_policy=None):
         super().__init__(parent)
+        self.storage_policy = storage_policy
         self.store = store or ChannelAccountStore()
+        from ..publisher.event_log import event_log
+        from collections import deque
+        self.publish_events=event_log(self.store.root)
+        self.event_history=deque(self.publish_events.tail(),maxlen=1500)
         from ..publisher.google_drive import DriveCredentials
         self.drive_credentials = DriveCredentials(self.store.root)
         self.drive_auth_worker = None
@@ -354,7 +547,7 @@ class MultiPlatformPublisherPanel(QWidget):
         self.selection_status.setWordWrap(True)
         self.selection_status.hide()
         self.stack = QStackedWidget()
-        self.repository = PlatformAccountRepository(self.store, DouyinAccountManager())
+        self.repository = PlatformAccountRepository(self.store, douyin_manager or DouyinAccountManager())
         self.douyin = ChannelAccountPanel('douyin', self.store, self)
         self.stack.addWidget(self.douyin)
         self.new_panels = []
@@ -363,11 +556,16 @@ class MultiPlatformPublisherPanel(QWidget):
             self.new_panels.append(panel)
             self.stack.addWidget(panel)
         self.panels = [self.douyin, *self.new_panels]
+        for event in self.event_history:
+            for panel in self.panels:panel.logs.append_event(event)
         self.channel_view.currentIndexChanged.connect(self.switch_platform)
         layout.addWidget(self.stack, 1)
         self.switch_platform(0)
         self.update_selection()
         self.restore_results()
+        self.restore_task_log_history()
+        from ..publisher import __version__
+        self.log_message('[发布组件版本] '+__version__+'；两次重试上限跨扫描/重启保留；YouTube优先恢复已记录草稿')
         self.render_results()
         self.timer = QTimer(self)
         self.snapshot_worker = None
@@ -509,13 +707,16 @@ class MultiPlatformPublisherPanel(QWidget):
             and (chosen is None or t.key in chosen)]
         if targets and self.drive_watch_worker is None:
             worker = DriveWatchWorker(self.store.root, self.drive_credentials, self)
+            worker.storage_policy = self.storage_policy
             self.drive_watch_worker = worker
-            worker.log.connect(self.log_message)
+            self.connect_worker_logs(worker)
             worker.binding_status.connect(self.receive_drive_status)
             worker.file_ready.connect(self.drive_file_ready)
             worker.authorization_error.connect(self.drive_authorization_error)
             worker.start()
         if self.drive_watch_worker:
+            report=getattr(self.worker,'report',{}) if self.worker else {}
+            self.drive_watch_worker.task_id=report.get('task_id','') if isinstance(report,dict) else ''
             self.drive_watch_worker.configure(targets, paused=not deploying or self.worker.pause_requested.is_set())
         for panel in self.panels:
             panel.refresh_cloud_badges()
@@ -528,6 +729,11 @@ class MultiPlatformPublisherPanel(QWidget):
         self.update_drive_connection()
 
     def receive_drive_status(self, key, text):
+        if self.drive_states.get(key)!=text:
+            platform,_,account_id=key.partition(':')
+            account=next((a for a in self.repository.accounts(platform) if a.account_id==account_id),None)
+            self.log_message('[云盘状态] '+text,platform=platform,account_id=account_id,
+                account_name=account.account_name if account else '')
         self.drive_states[key] = text
         for panel in self.panels:
             current = panel.current()
@@ -585,6 +791,8 @@ class MultiPlatformPublisherPanel(QWidget):
         if not hasattr(self, 'selection_status'):
             return
         selected = self.selected_channels()
+        self._queue_platforms = set(selected)
+        self.render_results()
         if selected != self.store.selected_channels and not self.store.load_error:
             self.store.selected_channels = selected
             try:
@@ -705,8 +913,45 @@ class MultiPlatformPublisherPanel(QWidget):
         targets = self.choose_targets()
         if not targets:
             return
+        if file_paths is not None and not self.confirm_retry_budget(targets,file_paths):
+            return
         self._pending_deployment=(targets,list(file_paths) if file_paths is not None else None)
         self.begin_cleanup(targets,force=False)
+
+    def confirm_retry_budget(self,targets,file_paths):
+        """Only an explicit selected-file action resets durable failure limits."""
+        from ..publisher.multi_deploy import MultiTargetLedger
+        from ..publisher.drive_ingest import file_hashes
+        ledger=MultiTargetLedger(self.store.root)
+        pending=[]
+        for filename in file_paths:
+            path=Path(filename)
+            if not path.is_file():return False
+            digest,_=file_hashes(path)
+            for target in targets:
+                item=ledger.result(digest,target.key)
+                if item.get('status') in ('SUCCESS','IGNORED'):continue
+                if item.get('requires_review') or item.get('status')=='FAILED2' or int(item.get('attempt_count') or 0)>=2:
+                    pending.append((digest,target,path.name,item))
+        if not pending:return True
+        uncertain=any(item.get('requires_review') for _,_,_,item in pending)
+        note=('存在已提交但未确认的记录。YouTube已提交视频仅按原ID只读核验；确认成功则跳过，仍未确认则停止。其他平台请先核验未发布；若已发布，请勿重试。\n' if uncertain else '')
+        details='\n'.join(f'{CHANNELS[t.platform].name}/{t.account.account_name}：{name}' for _,t,name,_ in pending)
+        answer=QMessageBox.question(self,'手动开启新一轮重试',note+details+
+            '\n\n是否为这些失败项继续处理？\n未提交项开启新一轮最多两次尝试；YouTube已提交记录只核验，未提交草稿优先恢复原ID；已成功项不重传。',
+            QMessageBox.Yes|QMessageBox.No,QMessageBox.No)
+        if answer!=QMessageBox.Yes:return False
+        for digest,target,name,item in pending:
+            info=item.get('info')
+            if isinstance(info,dict) and target.platform=='youtube' and info.get('video_id'):
+                # Preserve the submission marker so a false negative can first
+                # be reconciled read-only against that exact existing video.
+                info=dict(info) if info.get('submitted') else dict(info,draft=True,submitted=False)
+            ledger.set_result(digest,target.key,'PENDING','用户手动开启新一轮重试',info,
+                attempt_count=0,requires_review=False,manual_retry=True,previous_failure=item)
+            self.log_message('[手动重试] 用户确认新一轮最多两次尝试；保留原结果和草稿ID',platform=target.platform,
+                account_id=target.account.account_id,account_name=target.account.account_name,file_name=name)
+        return True
 
     def all_targets(self):
         return [PublishTarget(key,self.repository.publish_account(account),self.repository.profile(account))
@@ -786,24 +1031,66 @@ class MultiPlatformPublisherPanel(QWidget):
         self.begin_preflight(*pending)
 
     def begin_preflight(self,targets,file_paths):
+        self._deployment_task_id = uuid.uuid4().hex
+        self._queue_platforms = {t.platform for t in targets}
+        self.render_results()
         quota=DailyUploadQuota(self.store.root)
         self._all_deployment_targets=targets
-        self._deferred_preflight={t.key for t in targets if not quota.snapshot(t.key,t.account.daily_upload_limit)['remaining']}
-        eligible=[t for t in targets if t.key not in self._deferred_preflight]
+        pending=targets
+        if file_paths is not None:
+            from ..publisher.multi_deploy import MultiTargetLedger
+            from ..publisher.drive_ingest import file_hashes
+            ledger=MultiTargetLedger(self.store.root)
+            digests=[]
+            for filename in file_paths:
+                path=Path(filename).resolve()
+                if path.is_file():digests.append(file_hashes(path)[0])
+                else:
+                    previous=self.results.get(str(path),{})
+                    if previous.get('archived_path') and previous.get('sha256'):
+                        digests.append(previous['sha256'])
+                    else:break
+            if len(digests)==len(file_paths) and digests:
+                pending=[t for t in targets if any(ledger.result(d,t.key).get('status') not in ('SUCCESS','IGNORED') for d in digests)]
+                skipped=[t for t in targets if t not in pending]
+                for target in skipped:
+                    self.log_message('[手工任务跳过成功账号] 所选内容已完成，不打开该账号浏览器、不重新上传',
+                        platform=target.platform,account_id=target.account.account_id,account_name=target.account.account_name)
+                if not pending:
+                    self.on_manual_upload_finished()
+                    self.sync_deployment_buttons()
+                    self.sync_drive_watch()
+                    self.show_status('手工上传任务已完成：所选平台均已有成功记录，部署已自动停止')
+                    self.log_message('[手工任务完成] 所选平台均已完成，未启动上传；部署已自动停止')
+                    return
+        self._deferred_preflight={t.key for t in pending if not quota.snapshot(t.key,t.account.daily_upload_limit)['remaining']}
+        eligible=[t for t in pending if t.key not in self._deferred_preflight]
         self._preflight_file_paths=file_paths
         if not eligible:
             self.launch_deployment(targets,file_paths)
             return
-        reason = failure_message(prerequisite_results(eligible, self.store.root/'dom_reports'))
+        failures = prerequisite_results(eligible, self.store.root/'dom_reports')
+        reason = failure_message(failures)
         if reason:
-            self.log_message('[部署前检查] '+reason)
+            self.log_message('[部署前检查] '+reason, task_id=self._deployment_task_id)
+            from ..publisher.failure_diagnostics import TaskFailureDiagnostics
+            diagnostics = TaskFailureDiagnostics(self.store.root, self._deployment_task_id,
+                self.publish_events.task_events(self._deployment_task_id))
+            try:
+                for failure in failures:
+                    target = next(t for t in eligible if t.key == failure.key)
+                    diagnostics.operation(target.platform, target.account.account_id).complete(failure.status, failure.message)
+            except OSError as error:
+                self.log_message('[失败诊断保存异常] '+str(error))
+            finally:
+                diagnostics.finish()
             QMessageBox.warning(self,'部署前校验',reason)
             return
-        self.preflight_worker = DeploymentPreflightWorker(eligible, self.store.root, parent=self)
-        self.preflight_worker.log.connect(self.log_message)
+        self.preflight_worker = DeploymentPreflightWorker(eligible, self.store.root, parent=self, task_id=self._deployment_task_id)
+        self.connect_worker_logs(self.preflight_worker)
         self.preflight_worker.status.connect(self.show_status)
         self.preflight_worker.finished.connect(self.preflight_finished)
-        self.show_status('正在检查所有所选账号的当前登录状态与 DOM；尚未开始上传')
+        self.show_status('正在检查所选账号的当前登录、身份与页面访问；尚未开始上传')
         self.preflight_worker.start()
         self.sync_deployment_buttons()
         for check in self.channel_checks.values():
@@ -828,19 +1115,24 @@ class MultiPlatformPublisherPanel(QWidget):
             reason = '部署前检查未全部完成，请检查网络与浏览器会话后重试；本次部署未启动。'
         if reason:
             self.log_message('[部署未启动] '+reason)
-            self.show_status('部署前检查未通过；请完成提示中的登录或 DOM 采集后重新启动')
+            self.show_status('部署前检查未通过；按提示处理登录或页面异常后重新启动')
             self.refresh_queues()
             QMessageBox.warning(self, '部署前校验', reason)
             return
-        self.log_message('[部署前检查] 全部所选账号通过当前登录、身份与 DOM 校验，开始部署')
+        self.log_message('[部署前检查] 全部所选账号通过当前登录、身份与页面校验，开始部署')
         self.launch_deployment(getattr(self,'_all_deployment_targets',targets),file_paths)
 
     def launch_deployment(self,targets,file_paths):
+        self.set_active_file('')
         self.worker = MultiDeployWorker(targets, root=self.store.root, parent=self, file_paths=file_paths,
-            archive_targets=targets, history_targets=self.all_targets(), deferred_preflight=self._deferred_preflight)
-        self.worker.log.connect(self.log_message)
+            archive_targets=targets, history_targets=self.all_targets(), deferred_preflight=self._deferred_preflight,
+            strict_recovery=getattr(self, 'strict_recovery', False), task_id=getattr(self,'_deployment_task_id',None))
+        self._queue_platforms = {t.platform for t in targets}
+        self.render_results()
+        self.connect_worker_logs(self.worker)
         self.worker.status.connect(self.show_status)
         self.worker.result_changed.connect(self.receive_result)
+        self.worker.active_file_changed.connect(self.set_active_file)
         self.worker.queue_changed.connect(self.refresh_queues)
         self.worker.finished.connect(self.deployment_finished)
         self.worker.start()
@@ -878,9 +1170,63 @@ class MultiPlatformPublisherPanel(QWidget):
             panel.pause_button.setText('继续全部平台' if paused else '暂停全部平台')
             panel.pause_button.setEnabled(bool(deploying and not stopping))
 
-    def log_message(self, message):
-        for panel in self.panels:
-            panel.logs.appendPlainText(message)
+    def connect_worker_logs(self,worker):
+        if hasattr(worker,'event_logged'):
+            worker.event_logged.connect(self.receive_log_event)
+        else:
+            worker.log.connect(self.log_message)
+
+    def receive_log_event(self,event):
+        self.event_history.append(event)
+        for panel in getattr(self,'panels',[]):panel.logs.append_event(event)
+
+    def restore_task_log_history(self):
+        marker=self.publish_events.folder/'legacy-replayed.json'
+        if marker.exists():return
+        paths=sorted((self.store.root/'publish_reports').glob('*.json'),key=lambda p:p.stat().st_mtime)[-3:]
+        if not paths:return
+        seen=set()
+        records=[]
+        try:
+            for path in paths:
+                report=json.loads(path.read_text(encoding='utf-8-sig'))
+                for file in report.get('files',[]):
+                    for key,result in file.get('results',{}).items():
+                        platform,_,account_id=key.partition(':')
+                        context={'platform':platform,'account_id':account_id,'file_name':file.get('file_name',''),
+                                 'task_id':report.get('task_id','')}
+                        for attempt in result.get('attempts',[]):
+                            identity=(report.get('task_id'),key,attempt.get('id') or (file.get('sha256'),attempt.get('number')))
+                            if identity in seen:continue
+                            seen.add(identity)
+                            for log in attempt.get('logs',[]):
+                                records.append((log.get('time') or attempt.get('started_at'),log.get('message',''),context))
+                            records.append((attempt.get('finished_at') or attempt.get('started_at'),
+                                '[历史上传结果] '+str(attempt.get('status',''))+'：'+str(attempt.get('message','')),context))
+            for timestamp,message,context in records[-2000:]:
+                self.receive_log_event(self.publish_events.write(message,timestamp=timestamp,**context))
+            if records:
+                marker.write_text(json.dumps({'reports':[p.name for p in paths]}),encoding='utf-8')
+        except (OSError,ValueError,TypeError) as error:
+            self.log_message('[历史日志回放失败] '+type(error).__name__+'；原任务报告保留，可重新导出查看')
+
+    def log_message(self, message, **context):
+        self.receive_log_event(self.publish_events.write(message,**context))
+
+    def export_publish_logs(self):
+        from ..publisher.diagnostic_export import export_diagnostics
+        filename,_=QFileDialog.getSaveFileName(self,'导出发布诊断包（含失败截图与DOM）','书声发布诊断包.zip','ZIP (*.zip)')
+        if not filename:return
+        try:
+            result=export_diagnostics(self.store.root,self.publish_events.folder,filename)
+            counts=result['counts']
+            message=(f'日志 {counts["normal_logs"]} 份，DOM {counts["dom"]} 份，截图 {counts["screenshots"]} 张，'
+                f'任务日志 {counts["task_logs"]} 份；采集/文件异常 {len(result["warnings"])} 项，'
+                f'缺失归档 {len(result["missing_failure_archives"])} 项。')
+            self.log_message('[诊断包导出] '+message+'详情见压缩包内 diagnostic-manifest.json；不包含凭据或Cookie')
+            QMessageBox.information(self,'诊断包已导出',message)
+        except (OSError,ValueError) as error:
+            QMessageBox.warning(self,'日志导出失败',str(error))
 
     def show_status(self, message):
         for panel in self.panels:
@@ -890,6 +1236,10 @@ class MultiPlatformPublisherPanel(QWidget):
     def deployment_finished(self):
         worker = self.worker
         self.worker = None
+        self.set_active_file('')
+        manual=bool(worker and worker.file_paths is not None)
+        report=worker.report if worker else {}
+        if manual:self.on_manual_upload_finished()
         if worker:
             worker.deleteLater()
         self.sync_drive_watch()
@@ -897,8 +1247,16 @@ class MultiPlatformPublisherPanel(QWidget):
             panel.deploy_button.setText('启动部署')
             panel.pause_button.setEnabled(False)
             panel.pause_button.setText('暂停全部平台')
-        self.show_status('任务已停止，结果已保存；原文件保留表示存在未成功目标或关闭了归档')
+        if manual:
+            complete=bool(report.get('all_selected_completed'))
+            self.show_status(('手工上传任务已完成：所选平台全部完成，部署已自动停止' if complete else
+                f'手工上传本轮已结束，部署已自动停止；成功{report.get("success_count",0)}，失败{report.get("failure_count",0)}，待核验{report.get("unconfirmed_count",0)}'))
+        else:self.show_status('任务已停止，结果已保存；原文件保留表示存在未成功目标或关闭了归档')
         self.refresh_queues()
+
+    def on_manual_upload_finished(self):
+        """Standalone clients additionally clear their persisted recovery intent."""
+        pass
 
     def receive_result(self, item):
         self.results[item['file_path']] = item
@@ -969,10 +1327,17 @@ class MultiPlatformPublisherPanel(QWidget):
                 panel.dom_state.setToolTip(str(state.reports[-1]) if state.reports else '')
         self.render_results()
 
+    def set_active_file(self,path):
+        from ..publisher.drive_ingest import canonical_local_path
+        self.active_file=canonical_local_path(path) if path else ''
+        self.render_results()
+
     def render_results(self):
         if not hasattr(self,'panels'):
             return
         for panel in self.panels:
+            for column, platform in enumerate(CHANNELS, 5):
+                panel.table_queue.setColumnHidden(column, platform not in getattr(self, '_queue_platforms', self.selected_channels()))
             account=panel.current()
             if not account:
                 continue
@@ -996,6 +1361,13 @@ class MultiPlatformPublisherPanel(QWidget):
                         +('\n'+entry['blocking_message'] if entry.get('blocking_message') else ''))
                     panel.table_queue.removeCellWidget(row,column)
                     panel.table_queue.setItem(row,column,cell)
+                from ..publisher.drive_ingest import canonical_local_path
+                active=bool(getattr(self,'active_file','') and canonical_local_path(path)==self.active_file)
+                for column in range(panel.table_queue.columnCount()):
+                    cell=panel.table_queue.item(row,column)
+                    if cell:
+                        cell.setData(Qt.UserRole+2,active)
+                        cell.setForeground(QBrush(QColor('#9BD3AF')) if active else QBrush())
             size_queue_columns(panel.table_queue)
 
     def busy(self):

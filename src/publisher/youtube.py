@@ -1,5 +1,6 @@
 """YouTube Studio publisher. Upload, draft and persisted visibility are separate states."""
 import re
+import time
 from pathlib import Path
 from urllib.parse import urlsplit, parse_qs
 
@@ -7,6 +8,7 @@ from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeo
 from .browser_workflow import BrowserPublishWorkflow
 from .channel_probe import ChannelDOMProbe
 from .douyin.uploader import resolve_publish_series
+from .youtube_browser import launch_youtube_context, google_login_rejected, GOOGLE_LOGIN_HELP, youtube_runtime_summary
 
 
 class UploadStopped(Exception):
@@ -46,6 +48,9 @@ class YouTubeUploader(BrowserPublishWorkflow):
         self.before_upload = lambda: None
         self.supports_upload_boundary = True
         self._upload_activity_seen = False
+        self.resume_info = None
+        self.on_draft_identified = lambda info: None
+        self._checkpoint_video_id = ''
 
     def stop_check(self):
         if self.stop_requested():
@@ -60,6 +65,50 @@ class YouTubeUploader(BrowserPublishWorkflow):
 
     def _progress(self,message):
         self.log(message)
+
+    def attach_network_diagnostics(self,page):
+        self.network_errors=[]
+        seen=set()
+        def record(kind,url,reason):
+            parsed=urlsplit(url)
+            if not parsed.hostname or not any(part in parsed.hostname for part in ('youtube','google','ytimg','ggpht')):
+                return
+            endpoint=parsed.scheme+'://'+parsed.hostname+parsed.path
+            item=(endpoint,str(reason))
+            if item in seen or len(seen)>=40:return
+            seen.add(item)
+            message=f'[网络{kind}] {endpoint}：{reason}'
+            self.network_errors.append(message)
+            self.log(message)
+        page.on('requestfailed',lambda request:record('失败',request.url,request.failure))
+        page.on('response',lambda response:record('响应异常',response.url,'HTTP '+str(response.status))
+                if response.status>=400 else None)
+        page.on('pageerror',lambda error:self.log('[页面脚本异常] '+str(error)[:500]))
+        console_errors=set()
+        def console(message):
+            if message.type=='error' and message.text not in console_errors and len(console_errors)<20:
+                console_errors.add(message.text)
+                self.log('[浏览器控制台错误] '+message.text[:700])
+        page.on('console',console)
+
+    def open_saved_draft(self,page,info):
+        identity=info.get('video_id','')
+        if not re.fullmatch(r'[\w-]{11}',identity) or info.get('channel_id')!=self.account.channel_id:
+            raise PlatformRejected('CONFIG_REQUIRED','旧草稿身份不完整；未重新上传，请先核验已有草稿')
+        self.video_id=identity
+        self.is_short=bool(info.get('is_short'))
+        self.log('[恢复草稿] 正在打开已记录视频ID '+identity+'；不会重新选择或上传文件')
+        page.goto(f'https://studio.youtube.com/video/{identity}/edit',wait_until='domcontentloaded',timeout=45000)
+        def editor():
+            dialog=self.one_visible(self.dialog(page))
+            if dialog is not None:return dialog
+            button=self.one_visible(page.get_by_role('button',name=re.compile(r'^(编辑草稿|继续编辑|Edit draft|Continue editing)$',re.I)))
+            if button is not None:button.click(timeout=1000)
+            return None
+        self.wait(page,'等待原草稿编辑窗口（不新建视频）',editor,seconds=90)
+        self._video_selected=True
+        self._checkpoint_video_id=identity
+        self.on_draft_identified(self.result_hint())
 
     def _check_duration_notice(self,page):
         self.check_rejection(page)
@@ -76,6 +125,9 @@ class YouTubeUploader(BrowserPublishWorkflow):
             if candidate:
                 self.video_id=candidate
                 self.is_short='/shorts/' in urlsplit(link).path
+        if self.video_id and self.video_id != self._checkpoint_video_id:
+            self.on_draft_identified(self.result_hint())
+            self._checkpoint_video_id = self.video_id
         return {'ready':state['complete'] and bool(self.video_id),'pending':['上传/处理进行中'] if state['busy'] else [],
                 'incomplete':state['busy'],'progress':[],'failed':[],
                 'reupload':False,'form':bool(self.video_id),'preview':state['video']}
@@ -123,7 +175,8 @@ class YouTubeUploader(BrowserPublishWorkflow):
         def check():
             parsed = urlsplit(page.url)
             if parsed.hostname == 'accounts.google.com':
-                raise PlatformRejected('AUTH_REQUIRED', 'Google登录已失效，请先登录')
+                raise PlatformRejected('AUTH_REQUIRED', GOOGLE_LOGIN_HELP if google_login_rejected(page.url)
+                    else 'Google登录已失效，请先在本账号的登录窗口使用“手工登录 Google”。')
             match = re.match(r'/channel/(UC[\w-]{22})(?:/|$)', parsed.path)
             if parsed.hostname == 'studio.youtube.com' and match:
                 if match.group(1) != wanted:
@@ -137,7 +190,8 @@ class YouTubeUploader(BrowserPublishWorkflow):
         self.click(page, page.get_by_role('button', name='创建', exact=True), '打开创建菜单')
         self.click(page, page.get_by_text('上传视频', exact=True), '打开上传视频窗口')
         def file_input():
-            candidates = page.locator('input[type=file]')
+            from .page_structure import file_input_selector
+            candidates = page.locator(file_input_selector('youtube'))
             allowed = [candidates.nth(i) for i in range(candidates.count())
                        if not re.search(r'image|png|jpg|jpeg', candidates.nth(i).get_attribute('accept') or '', re.I)]
             if len(allowed) != 1:
@@ -186,8 +240,19 @@ class YouTubeUploader(BrowserPublishWorkflow):
                     control=self.one_visible(dialog.locator('ytcp-button#toggle-button').filter(
                         has_text=re.compile(r'^(展开|显示更多|Show more)$',re.I)))
                 return control
-            button=self.wait(page,'等待YouTube高级设置入口',advanced_control)
-            self.click(page,button,'展开YouTube详细选项')
+            def expanded():
+                # A Studio click may already expand the panel before Playwright
+                # finishes its actionability wait. Re-check the resulting state
+                # on every retry rather than waiting on a stale "Show more" label.
+                ready=self.one_visible(paid)
+                if ready is not None:return ready
+                button=advanced_control()
+                if button is not None:
+                    self.stop_check()
+                    button.click(timeout=1000)
+                return self.one_visible(paid)
+            self.wait(page,'展开并核验YouTube高级设置',expanded,seconds=90)
+        self.log('[高级设置确认] 当前上传弹窗的付费宣传选项已就绪，不重复切换展开状态')
         self.click(page,paid,'默认不包含付费宣传')
         if paid.get_attribute('aria-checked')!='true' and not paid.evaluate('(el)=>Boolean(el.checked)'):
             raise RuntimeError('无付费宣传设置回读失败，未提交')
@@ -222,16 +287,36 @@ class YouTubeUploader(BrowserPublishWorkflow):
         if not language.count():
             heading=dialog.get_by_text('视频语言',exact=True)
             language=heading.locator('xpath=ancestor::*[.//ytcp-dropdown-trigger][1]').locator('ytcp-dropdown-trigger')
-        dropdown=self.wait(page,'设置视频语言：中文（简体）',lambda:self.one_visible(language))
-        if not re.search(r'中文\s*[（(]\s*简体\s*[）)]',dropdown.inner_text()):
-            dropdown.click(timeout=1000)
-            option=page.get_by_role('option',name=re.compile(r'^中文\s*[（(]\s*简体\s*[）)]$'))
-            if not option.count():
-                option=page.get_by_text(re.compile(r'^中文\s*[（(]\s*简体\s*[）)]$'))
-            self.click(page,option,'选择中文（简体）')
-        if not re.search(r'中文\s*[（(]\s*简体\s*[）)]',dropdown.inner_text()):
-            raise RuntimeError('视频语言回读失败，未提交')
+        self.select_video_language(page,language)
         self.log('[YouTube默认选项] 无付费宣传；AI声明已设置；自动地点信息关闭；视频语言中文（简体）；其余沿用平台默认')
+
+    def select_video_language(self, page, language):
+        chinese = re.compile(r'中文\s*[（(]\s*简体\s*[）)]')
+        option = page.get_by_role('option',name=re.compile('^'+chinese.pattern+'$'))
+        fallback = page.get_by_text(re.compile('^'+chinese.pattern+'$'))
+        last_click = [0.0]
+        def open_menu():
+            dropdown = self.one_visible(language)
+            if dropdown is None:
+                return None
+            if chinese.search(dropdown.inner_text()):
+                return 'selected'
+            target = self.one_visible(option)
+            if target is None and not option.count():
+                target = self.one_visible(fallback)
+            if target is not None:
+                return target
+            # Retry actionability failures, but never toggle an already open menu.
+            if dropdown.get_attribute('aria-expanded') != 'true' and time.monotonic()-last_click[0] >= 2:
+                last_click[0] = time.monotonic()
+                dropdown.click(timeout=5000,no_wait_after=True)
+            return None
+        target = self.wait(page,'打开视频语言菜单：中文（简体）',open_menu,seconds=30)
+        if target != 'selected':
+            # Resolve the unique visible option again if Studio replaces its DOM.
+            self.click(page,option if option.count() else fallback,'选择中文（简体）')
+        self.wait(page,'视频语言回读失败，未提交：等待中文（简体）',lambda:
+            self.one_visible(language) is not None and chinese.search(self.one_visible(language).inner_text()),seconds=15)
 
     def select_playlist(self, page, dialog):
         control = dialog.get_by_role('button', name='选择播放列表', exact=True)
@@ -307,11 +392,25 @@ class YouTubeUploader(BrowserPublishWorkflow):
         # icon. Click its caption, without activating any upload-file control.
         caption = button.locator('#select-text')
         self.click(page, caption, '从当前视频选择内置帧')
-        picker = self.wait(page, '等待视频内置帧选择窗口', lambda: self.one_visible(
-            page.locator('ytcp-video-autogenerated-thumbnails-dialog')))
+        def frame_picker():
+            # The live Studio popup is a tp-yt-paper-dialog with this accessible
+            # name. Older captures wrapped it in the autogenerated host tag.
+            for locator in (page.get_by_role('dialog', name=re.compile(
+                    r'从视频中选择一帧画面|Choose (?:a )?(?:frame|thumbnail) from (?:the )?video', re.I)),
+                    page.locator('ytcp-video-autogenerated-thumbnails-dialog')):
+                found = self.one_visible(locator)
+                if found is not None:
+                    return found
+        picker = self.wait(page, '等待视频内置帧选择窗口', frame_picker)
 
+        frame_progress=[None]
         def available_frame():
             options = picker.get_by_role('option', name=frame_name)
+            state=options.evaluate_all('''els=>({total:els.length, enabled:els.filter(e=>!e.disabled&&e.getAttribute('aria-disabled')!=='true').length,
+                loaded:els.filter(e=>Array.from(e.querySelectorAll('img')).some(i=>i.complete&&i.naturalWidth>0)).length})''')
+            if state!=frame_progress[0]:
+                self.log(f'[视频帧状态] 候选={state["total"]}，可操作={state["enabled"]}，图片已加载={state["loaded"]}；等待真实帧就绪，不使用占位图片')
+                frame_progress[0]=state
             for index in range(options.count()):
                 option = options.nth(index)
                 if option.is_visible() and option.is_enabled() and option.evaluate('''el =>
@@ -324,6 +423,33 @@ class YouTubeUploader(BrowserPublishWorkflow):
 
         frame = self.wait(page, '等待平台生成可选视频帧', available_frame, seconds=1800)
         name = frame.get_attribute('aria-label')
+        done=picker.get_by_role('button',name=re.compile(r'^(完成|Done)$',re.I))
+        if (frame.get_attribute('aria-selected')=='true' and done.count()==1
+                and done.is_visible() and not done.is_enabled()):
+            # An unchanged native frame disables Done. Cancel, reopen and verify
+            # that Studio persists the same selected frame; never force Done or
+            # confuse the select-card placeholder with a newly saved thumbnail.
+            cancel=lambda: self.click(page,picker.get_by_role('button',name=re.compile(r'^(取消|Cancel)$',re.I)),
+                                      '关闭未变更的视频帧选择')
+            cancel()
+            self.wait(page,'确认视频帧窗口已关闭',lambda:not picker.is_visible())
+            self.click(page,caption,'重新核验平台已有视频帧')
+            picker=self.wait(page,'等待视频内置帧选择窗口',frame_picker)
+            current=picker.get_by_role('option',name=name,exact=True)
+            def persisted():
+                item=self.one_visible(current)
+                if item is None or item.get_attribute('aria-selected')!='true':return False
+                return item.evaluate('''el=>Array.from(el.querySelectorAll('img')).some(i=>
+                    i.complete&&i.naturalWidth>0&&i.getBoundingClientRect().width>0
+                    &&getComputedStyle(i).visibility!=='hidden')''')
+            self.wait(page,'核验平台保留同一个已选视频帧',persisted,seconds=60)
+            done=picker.get_by_role('button',name=re.compile(r'^(完成|Done)$',re.I))
+            if done.count()!=1 or not done.is_visible() or done.is_enabled():
+                raise RuntimeError('现有视频帧仍有未保存变更，未将其认定为已保存')
+            cancel()
+            self.wait(page,'确认视频帧窗口已关闭',lambda:not picker.is_visible())
+            self.log('[缩略图确认] 已重新打开并核验平台保留原视频帧：'+name+'；沿用已有选择，无需重复保存')
+            return
         if frame.get_attribute('aria-selected') != 'true':
             self.click(page, frame, '选择'+name)
         self.wait(page, '确认视频帧已选中', lambda: frame.get_attribute('aria-selected') == 'true')
@@ -395,7 +521,22 @@ class YouTubeUploader(BrowserPublishWorkflow):
                         continue
                     links=dialog.locator('a[href]').evaluate_all('(els)=>els.map(el=>el.href)')
                     if any(youtube_video_id(link)==self.video_id for link in links):
-                        self.verify_channel(page)
+                        # Studio navigates to /video/<id>/edit after publishing.
+                        # That URL cannot supply a channel ID: verify it on a separate
+                        # channel page while preserving the current submission proof.
+                        parsed = urlsplit(page.url)
+                        if parsed.hostname != 'studio.youtube.com':
+                            continue
+                        if parsed.path.startswith('/channel/'):
+                            self.verify_channel(page)
+                        elif parsed.path != f'/video/{self.video_id}/edit':
+                            continue
+                        try:
+                            verify_page.goto(url, wait_until='domcontentloaded', timeout=10000)
+                        except PlaywrightTimeoutError:
+                            self.log('[频道核对等待] 完成弹窗已匹配，独立频道页面加载超时，继续等待核验')
+                            return None
+                        self.verify_channel(verify_page)
                         self.log('[发布确认] 本次公开发布完成弹窗确认目标视频ID与标题')
                         return True
             try:
@@ -408,8 +549,10 @@ class YouTubeUploader(BrowserPublishWorkflow):
                         tabs=verify_page.get_by_role('tab',name='Shorts',exact=True)
                         if not tabs.count():
                             tabs=verify_page.get_by_text('Shorts',exact=True)
-                        if tabs.count()==1 and tabs.is_visible():
-                            tabs.click(timeout=1000)
+                        visible=self.one_visible(tabs)
+                        if visible is not None:
+                            visible.click(timeout=1000)
+                            self.log('[结果页面] 已切换Shorts，按视频ID核对，不以草稿或标题相同判断成功')
                 polls+=1
                 # Give the existing page a second poll before refreshing it.
                 self._pause(verify_page,1000)
@@ -425,16 +568,29 @@ class YouTubeUploader(BrowserPublishWorkflow):
                 pass
             self.log('[发布核对] 尚未在内容管理页确认目标状态，保留浏览器与原文件')
             return None
-        return bool(self._wait_for_confirmation(page,confirmed,seconds,poll_ms=10000))
+        result = False
+        try:
+            result = bool(self._wait_for_confirmation(page,confirmed,seconds,poll_ms=10000))
+            return result
+        finally:
+            if not result:
+                self._capture_failure_page(verify_page, '内容管理页未确认目标视频状态', role='verification')
+            try:
+                verify_page.close()
+            except Exception:
+                pass
 
     def upload_single_video(self, video):
         context, page = None, None
         self.last_outcome, self.submitted, self.video_id = 'FAILED', False, ''
         self.is_short=False
         self._video_selected,self._publish_armed,self._upload_activity_seen=False,False,False
+        self._checkpoint_video_id=''
+        self.title=(resolve_publish_series(video.name) if self.account.title_mode=='series' else video.stem)[:100]
         try:
             self.stop_check()
-            self.log('[YouTube流程] 从视频中选择内置帧；保存并回读封面（20261011-6）')
+            self.log('[YouTube流程 20261018.6] '+('恢复既有草稿' if self.resume_info else '上传新文件')+
+                '；缩略图模式='+self.account.thumbnail_mode+'；目标公开范围='+self.account.visibility)
             if self.account.made_for_kids is None:
                 raise PlatformRejected('CONFIG_REQUIRED', '未配置是否面向儿童')
             if self.account.visibility not in ('public', 'private', 'unlisted'):
@@ -442,17 +598,24 @@ class YouTubeUploader(BrowserPublishWorkflow):
             self.profile.mkdir(parents=True, exist_ok=True)
             with sync_playwright() as p:
                 try:
-                    context = p.chromium.launch_persistent_context(str(self.profile), headless=self.headless,
+                    context = launch_youtube_context(p, self.profile, headless=self.headless,
                         viewport={'width': 1440, 'height': 900}, timeout=10000)
+                    self.log(youtube_runtime_summary(context, self.profile))
                     context.set_default_timeout(1000)
                     page = context.pages[0] if context.pages else context.new_page()
+                    self.attach_network_diagnostics(page)
                     page.goto('https://studio.youtube.com/', wait_until='domcontentloaded', timeout=10000)
                     self.verify_channel(page)
-                    file_input = self.open_upload(page)
-                    self.stop_check()
-                    self.before_upload()
-                    file_input.set_input_files(str(video.resolve()))
-                    self._video_selected=True
+                    self.log('[登录状态] 已核对当前Google登录及绑定频道；尚未上传文件')
+                    if isinstance(self.resume_info,dict) and self.resume_info.get('video_id'):
+                        self.open_saved_draft(page,self.resume_info)
+                    else:
+                        file_input = self.open_upload(page)
+                        self.stop_check()
+                        self.before_upload()
+                        file_input.set_input_files(str(video.resolve()))
+                        self._video_selected=True
+                        self.log('[正在上传] '+video.name+'；已选择本地文件，尚未发布')
                     submit=self.prepare_publish_form(page,
                         details=('填写视频详细信息',lambda:self.fill_details(page,video)),
                         cover=('设置视频缩略图',lambda:self.set_thumbnail(page,video)),
@@ -460,7 +623,7 @@ class YouTubeUploader(BrowserPublishWorkflow):
                         upload=('等待视频上传、处理与检查完成',lambda:self.wait_upload(page)),
                         prepare_submit=('配置视频元素、检查及公开范围',lambda:self.prepare_visibility(page)),
                         submit=('校验最终提交按钮',lambda:self.submit_control(page)),
-                        collection_before_cover=True)
+                        collection_before_cover=True, uploaded_before_options=True)
                     title=self.title
                     self.stop_check()
                     self.before_submit(self.result_hint())
@@ -473,7 +636,8 @@ class YouTubeUploader(BrowserPublishWorkflow):
                     return True, '已确认目标公开范围，等待统一归档', {
                         'video_id': self.video_id, 'url': f'https://www.youtube.com/watch?v={self.video_id}',
                         'visibility': self.account.visibility, 'channel_id': self.account.channel_id, 'title': title}
-                except Exception:
+                except Exception as failure:
+                    self._capture_failure_page(page, failure)
                     if page and not page.is_closed():
                         try:
                             probe = ChannelDOMProbe(self.account, self.report_root)
@@ -496,12 +660,14 @@ class YouTubeUploader(BrowserPublishWorkflow):
             return False, str(error), self.result_hint()
         except Exception as error:
             self.last_outcome = 'FAILED'
-            return False, str(error), self.result_hint()
+            message=str(error)
+            if getattr(self,'network_errors',[]):message+='；可见网络异常：'+'；'.join(self.network_errors[-5:])
+            return False, message, self.result_hint()
 
     def result_hint(self):
         return {'video_id': self.video_id, 'channel_id': self.account.channel_id,
                 'visibility': self.account.visibility, 'title': self.title,
-                'is_short':self.is_short} if self.video_id else None
+                'is_short':self.is_short,'draft':not self.submitted,'submitted':self.submitted} if self.video_id else None
 
     def reconcile(self, info):
         """Read-only recheck of a previous submission; never clicks upload or publish."""
@@ -510,14 +676,19 @@ class YouTubeUploader(BrowserPublishWorkflow):
             return False
         self.video_id = info['video_id']
         self.is_short=bool(info.get('is_short'))
+        confirmed = False
         with sync_playwright() as p:
-            context = p.chromium.launch_persistent_context(str(self.profile), headless=self.headless,
+            context = launch_youtube_context(p, self.profile, headless=self.headless,
                 viewport={'width': 1440, 'height': 900}, timeout=10000)
+            self.log(youtube_runtime_summary(context, self.profile))
             try:
                 page = context.pages[0] if context.pages else context.new_page()
                 context.set_default_timeout(1000)
                 page.goto('https://studio.youtube.com/', wait_until='domcontentloaded', timeout=10000)
                 self.verify_channel(page)
-                return self.verify_persisted_result(context, page, info['title'], seconds=60)
+                confirmed = self.verify_persisted_result(context, page, info['title'], seconds=60)
+                return confirmed
             finally:
+                if not confirmed:
+                    self._capture_failure_page(locals().get('page'), '历史投稿结果未确认')
                 context.close()

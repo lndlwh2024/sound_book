@@ -243,6 +243,29 @@ def test_default_settings_readback_failure_blocks_continuation(tmp_path,broken):
 FRAME_IMAGE = 'data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxMzEiIGhlaWdodD0iMjMyIj48cmVjdCB3aWR0aD0iMTMxIiBoZWlnaHQ9IjIzMiIgZmlsbD0iYmx1ZSIvPjwvc3ZnPg=='
 
 
+@pytest.mark.parametrize('delayed_overlay',[True,False])
+def test_video_language_waits_for_slow_click_and_does_not_toggle_open_menu(tmp_path,delayed_overlay):
+    uploader=module.YouTubeUploader(account(),tmp_path/'p',tmp_path/'r')
+    with sync_playwright() as p:
+        browser=p.chromium.launch(headless=True)
+        try:
+            page=browser.new_page()
+            page.set_content('''<button role="combobox" aria-label="视频语言" aria-expanded="false"
+              onclick="window.clicks=(window.clicks||0)+1;this.setAttribute('aria-expanded','true');
+              setTimeout(()=>document.querySelector('#options').style.display='block',2500)">请选择</button>
+              <div id="options" style="display:none"><div role="option" onclick="
+              document.querySelector('button').textContent=this.textContent;this.parentElement.style.display='none'">中文（简体）</div></div>''')
+            if delayed_overlay:
+                page.evaluate('''() => {const overlay=document.createElement('div');overlay.id='overlay';
+                    overlay.style='position:fixed;inset:0;background:#fff;z-index:100';document.body.append(overlay);
+                    setTimeout(()=>overlay.remove(),1800)}''')
+            uploader.select_video_language(page,page.get_by_role('combobox',name='视频语言'))
+            assert page.evaluate('window.clicks')==1
+            assert page.get_by_role('combobox').inner_text()=='中文（简体）'
+            assert not uploader.submitted
+        finally:browser.close()
+
+
 def native_thumbnail_html(delay=0, failure='', preselected=False):
     """Studio's native frame popup, using option/aria-selected and loaded images."""
     html = '''

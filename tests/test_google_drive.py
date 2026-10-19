@@ -165,9 +165,9 @@ def test_bad_checksum_does_not_block_next_file_or_mark_processed(tmp_path):
     assert entry['state']=='FETCHING' and any('校验' in text for text in logs)
 
 
-def test_changed_remote_version_not_installed(tmp_path):
+def test_changed_remote_content_not_installed(tmp_path):
     t=target(tmp_path);api=FakeDrive();root=tmp_path/'state'
-    api.metadata=lambda identity:{**api.files[0],'version':'2'}
+    api.metadata=lambda identity:cloud_file(content=b'changed'*1000,version='2')
     ingest(root,api).poll(t)
     assert not list(Path(t.account.target_dir).glob('*.mp4'))
 
@@ -277,3 +277,20 @@ def test_disconnect_during_refresh_is_responsive_and_cannot_restore_token(tmp_pa
     assert time.monotonic()-before<.5
     release.set();thread.join(3)
     assert errors and not creds.connected() and not creds.token_path.exists()
+
+
+@pytest.mark.parametrize('reason,expected',[
+    (TimeoutError('secret'), '超时'),
+    (__import__('socket').gaierror(11001,'secret'), 'DNS'),
+    (ConnectionRefusedError(10061,'secret'), '连接被拒绝'),
+])
+def test_transport_errors_explain_category_without_leaking_proxy_text(monkeypatch,reason,expected):
+    from unittest.mock import MagicMock
+    from urllib.error import URLError
+    from src.publisher import google_drive
+    opener=MagicMock()
+    opener.open.side_effect=URLError(reason)
+    monkeypatch.setattr(google_drive,'build_opener',lambda *a:opener)
+    with pytest.raises(google_drive.DriveError) as error:
+        google_drive.request('https://example.invalid/?access_token=secret')
+    assert expected in str(error.value) and 'secret' not in str(error.value)

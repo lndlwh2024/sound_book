@@ -60,7 +60,9 @@ def test_partial_and_corrupt_reports_have_distinct_feedback(tmp_path):
     assert '报告无效' in state.message
 
 
-def test_all_four_platforms_require_the_chosen_accounts_dom(tmp_path):
+def test_missing_builtin_adapter_falls_back_to_chosen_accounts_dom(tmp_path,monkeypatch):
+    from src.publisher import page_structure
+    monkeypatch.setattr(page_structure,'STRUCTURES',{})
     targets=[SimpleNamespace(platform=p,account=SimpleNamespace(account_id='a'*32,account_name=p))
              for p in CHANNELS]
     reason = target_dom_block_reason(targets,tmp_path)

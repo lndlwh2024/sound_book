@@ -65,7 +65,12 @@ EXTRACT_JS = r'''() => {
                 if(nr.width>0 && nr.height>0) notices.push({text:noticeText.slice(0,300), root:path});
             }
             const r = el.getBoundingClientRect(), s = getComputedStyle(el);
-            const semantic=el.matches('input,textarea,button,select,option,a[href],label,[role],[contenteditable="true"],video,progress,canvas,xhs-publish-btn,[class*="progress"],[onclick],[tabindex],[class*="button" i],[class*="btn" i]');
+            const ownHome=/^\/creator-micro\/home\/?$/.test(location.pathname) &&
+                !!el.closest('[class*="user-info"],[class*="userInfo"],[class*="user-profile"],[class*="userProfile"],[class*="account-info"],[class*="creator-info"]');
+            const profileNode=ownHome || !!el.closest('#header-avatar') ||
+                el.matches('[class*="user-info"],[class*="nickname"],[class*="user-name"],[class*="userName"],[class*="user_name"]')
+                && !!el.closest('[role=menu],[role=tooltip],[class*="dropdown-content"],[class*="popover-content"]');
+            const semantic=profileNode || el.matches('input,textarea,button,select,option,a[href],label,[role],[contenteditable="true"],video,progress,canvas,xhs-publish-btn,[class*="progress"],[onclick],[tabindex],[class*="button" i],[class*="btn" i]');
             if (!semantic && !(s.cursor==='pointer' && noticeText.length>0 && noticeText.length<=80)) continue;
             nodes.push({tag:el.tagName.toLowerCase(), id:el.id, name:el.getAttribute('name'),
                 role:el.getAttribute('role'), type:el.getAttribute('type'), accept:el.getAttribute('accept'),
@@ -73,6 +78,8 @@ EXTRACT_JS = r'''() => {
                 ariaLabel:el.getAttribute('aria-label'), ariaValueNow:el.getAttribute('aria-valuenow'),
                 ariaChecked:el.getAttribute('aria-checked'), checked:el.checked===true,
                 ariaSelected:el.getAttribute('aria-selected'), href:el.getAttribute('href'),
+                ariaControls:el.getAttribute('aria-controls'), ariaDescribedby:el.getAttribute('aria-describedby'),
+                ariaOwns:el.getAttribute('aria-owns'), title:el.getAttribute('title'), alt:el.getAttribute('alt'),
                 ariaValueMax:el.getAttribute('aria-valuemax'), className:el.getAttribute('class'),
                 disabled:el.matches(':disabled') || el.getAttribute('aria-disabled')==='true',
                 disabledAttribute:el.hasAttribute('disabled'), ariaDisabled:el.getAttribute('aria-disabled'),
