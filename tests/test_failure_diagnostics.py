@@ -240,8 +240,9 @@ def test_queue_hides_unselected_platform_columns_without_reindexing_or_changing_
         check.setChecked(key in ('douyin', 'youtube'))
     panel.update_selection()
     for p in panel.panels:
-        assert p.table_queue.columnCount() == 9
+        assert p.table_queue.columnCount() == 5+len(panel.channel_checks)
         assert [p.table_queue.isColumnHidden(c) for c in range(5, 9)] == [False, True, True, False]
+        assert p.table_queue.isColumnHidden(9)  # Unselected 微信视频号.
     archive_targets = list(panel.store.archive_targets)
     panel._queue_platforms = {'youtube'}  # the launch dialog may choose fewer than the checked channels
     panel.render_results()

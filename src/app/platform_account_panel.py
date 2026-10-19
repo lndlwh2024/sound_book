@@ -36,7 +36,7 @@ class MediaQueueTable(QTableWidget):
 
     def resizeEvent(self,event):
         super().resizeEvent(event)
-        if self.columnCount()==9:
+        if self.columnCount()==5+len(CHANNELS):
             from .channel_panel import size_queue_columns
             size_queue_columns(self)
 
@@ -279,6 +279,13 @@ class PlatformAccountPanel(QWidget):
                     combo.addItem(text,value)
                 field(label+':',combo)
                 self.youtube_fields[key] = combo
+        elif platform == 'wechat_channels':
+            self.wechat_short_title = QLineEdit()
+            self.wechat_short_title.setPlaceholderText('可选；按页面长度限制填写')
+            self.collection = QLineEdit()
+            self.collection.setPlaceholderText('留空保留网页默认')
+            field('短标题:',self.wechat_short_title,True)
+            field('添加到合集:',self.collection,True)
         else:
             self.description = QPlainTextEdit()
             self.description.setFixedHeight(36)
@@ -293,8 +300,7 @@ class PlatformAccountPanel(QWidget):
                 self.collection = QLineEdit()
                 self.collection.setPlaceholderText('留空使用系列名称')
                 field('合集:',self.collection)
-
-        if platform != 'douyin':
+        if platform not in ('douyin','wechat_channels'):
             self.description.setStyleSheet('QPlainTextEdit {background:#16161E;color:#E2E8F0;'
                                           'border:1px solid #4A4A5A;border-radius:4px;padding:2px;}')
         config_layout.addWidget(self.special)
@@ -547,8 +553,10 @@ class PlatformAccountPanel(QWidget):
             self.description.setPlainText(account.description if account else '')
             combo=self.creator_fields['title_mode']
             combo.setCurrentIndex(max(0,combo.findData(account.title_mode if account else 'series')))
-        if self.platform=='xiaohongshu':
+        if self.platform in ('xiaohongshu','wechat_channels'):
             self.collection.setText(account.collection_name if account else '')
+        if self.platform=='wechat_channels':
+            self.wechat_short_title.setText(account.wechat_short_title if account else '')
         for control in (self.settings_tabs,self.save_button,self.login_button,self.capture_button,self.delete_account_button):
             control.setEnabled(account is not None)
         if hasattr(self,'nickname_button'):
@@ -602,8 +610,10 @@ class PlatformAccountPanel(QWidget):
         if self.platform in ('xiaohongshu','kuaishou'):
             account.description=self.description.toPlainText()
             account.title_mode=self.creator_fields['title_mode'].currentData()
-        if self.platform=='xiaohongshu':
+        if self.platform in ('xiaohongshu','wechat_channels'):
             account.collection_name=self.collection.text().strip()
+        if self.platform=='wechat_channels':
+            account.wechat_short_title=self.wechat_short_title.text().strip()
         try:
             self.repository.save(account)
         except (OSError,ValueError,sqlite3.Error) as error:

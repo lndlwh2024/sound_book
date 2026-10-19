@@ -516,6 +516,9 @@ def test_local_dom_reads_only_own_identity_and_preserves_unknown(platform):
     account_id='UC'+'a'*22
     url='https://'+CHANNELS[platform].host+('/channel/'+account_id+'/videos' if platform=='youtube' else '/publish')
     own='<ytcp-navigation-drawer><div id="entity-name">真实昵称</div></ytcp-navigation-drawer>' if platform=='youtube' else '<header><span class="user-name nickname">真实昵称</span></header>'
+    if platform == 'wechat_channels':
+        url = CHANNELS[platform].url
+        own = '<aside id="side-bar"><div class="side-bar-footer"><div class="account-info"><span class="name">真实昵称</span></div></div></aside>'
     with sync_playwright() as playwright:
         browser=playwright.chromium.launch(headless=True)
         try:

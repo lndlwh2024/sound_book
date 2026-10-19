@@ -36,7 +36,7 @@ def make_event(message, timestamp=None, **context):
     message = redact(message)
     platform = context.get('platform')
     if platform is None:
-        match = re.search(r'(?:\[|\s|→|：)(douyin|xiaohongshu|kuaishou|youtube)(?:[:/\]])', message)
+        match = re.search(r'(?:\[|\s|→|：)(douyin|xiaohongshu|kuaishou|youtube|wechat_channels)(?:[:/\]])', message)
         platform = match.group(1) if match else 'common'
     stage=re.match(r'^\[([^\]]+)\]',message)
     return {'id':uuid.uuid4().hex, 'timestamp':moment.isoformat(),

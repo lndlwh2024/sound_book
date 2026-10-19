@@ -80,7 +80,7 @@ def prerequisite_results(targets, report_root):
             available = False
         if not available:
             problems.append('缺少该账号的浏览器登录目录。请点击“登录 / 获取平台昵称”完成登录。')
-        if target.platform in ('xiaohongshu', 'kuaishou') and not (target.account.platform_nickname or '').strip():
+        if target.platform in ('xiaohongshu', 'kuaishou', 'wechat_channels') and not (target.account.platform_nickname or '').strip():
             problems.append('尚未绑定实际昵称。请点击“登录 / 获取平台昵称”读取并保存本人账号。')
         if target.platform == 'youtube' and not re.fullmatch(r'UC[\w-]{22}', target.account.channel_id):
             problems.append('请登录并保存正确的 YouTube 频道 ID。')
@@ -113,7 +113,8 @@ class AccountPreflight(BrowserPublishWorkflow):
         address = urlsplit(page.url)
         if self.target.platform == 'youtube' and google_login_rejected(page.url):
             raise PlatformRejected('AUTH_REQUIRED', GOOGLE_LOGIN_HELP)
-        if address.hostname != self.channel.host or re.search(r'/(login|signin)(?:/|$)', address.path, re.I):
+        if (address.hostname != self.channel.host or re.search(r'/(login|signin)(?:/|$)', address.path, re.I)
+                or self.target.platform == 'wechat_channels' and not address.path.startswith('/platform/')):
             raise PlatformRejected('AUTH_REQUIRED', '登录已失效或进入登录页，请先完成“登录 / 获取平台昵称”。')
         # Same rejection evidence as the actual publisher, including a banned
         # creator landing page, verification panels and server-busy notices.
@@ -132,7 +133,7 @@ class AccountPreflight(BrowserPublishWorkflow):
         if self.target.platform == 'youtube':
             # Channel ID is the stable identity; remarks/nicknames may differ.
             YouTubeUploader.verify_channel(self, page, self.seconds)
-        elif self.target.platform in ('xiaohongshu', 'kuaishou'):
+        elif self.target.platform in ('xiaohongshu', 'kuaishou', 'wechat_channels'):
             CreatorStudioUploader.verify_identity(self, page)
         else:
             # The current Douyin header hides its name in the avatar menu.

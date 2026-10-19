@@ -8,9 +8,10 @@ from src.publisher import browser_workflow as module
 from src.publisher.creator_studio import XiaohongshuUploader, KuaishouUploader
 from src.publisher.douyin.uploader import DouyinUploader, PublishCancelled
 from src.publisher.youtube import YouTubeUploader, PlatformRejected, UploadStopped
+from src.publisher.wechat_channels import WeChatChannelsUploader
 
 
-ADAPTERS = [DouyinUploader, XiaohongshuUploader, KuaishouUploader, YouTubeUploader]
+ADAPTERS = [DouyinUploader, XiaohongshuUploader, KuaishouUploader, YouTubeUploader, WeChatChannelsUploader]
 
 
 def workflow(cls=module.BrowserPublishWorkflow):

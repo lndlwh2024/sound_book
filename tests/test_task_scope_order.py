@@ -5,6 +5,7 @@ from pathlib import Path
 
 from tests.test_scan_cleanup_quota import app, media, targets, task
 from src.publisher.multi_deploy import MultiTargetLedger
+from src.publisher.platforms import CHANNELS
 from src.publisher.scan_cleanup import ScanCleanupWorker
 from src.publisher.creator_studio import XiaohongshuUploader
 from src.publisher.upload_quota import DailyUploadQuota
@@ -71,10 +72,10 @@ def test_file_then_fixed_platforms_then_local_retry_before_next_file(tmp_path):
             return success,'result',None
     worker=task(tmp_path/'state',list(reversed(group)),lambda t,log:Uploader(t),group)
     worker.run_batch(worker.plan_batch())
-    platforms=['douyin','xiaohongshu','kuaishou','youtube','xiaohongshu']
+    platforms=[*CHANNELS,'xiaohongshu']
     assert calls==[(name,p) for name in ('a.mp4','b.mp4') for p in platforms]
     worker.run_batch(worker.plan_batch())
-    assert len(calls)==10  # No completed copies/targets are transferred again.
+    assert len(calls)==2*len(platforms)  # No completed copies/targets are transferred again.
 
 
 def test_same_content_different_directories_finishes_accounts_before_next_digest(tmp_path):

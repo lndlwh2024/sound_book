@@ -10,6 +10,7 @@ from src.publisher.multi_deploy import MultiTargetLedger, MultiDeployWorker
 from tests.test_google_drive import FakeDrive, cloud_file, ingest, target
 from src.publisher.google_drive import DriveError, DriveClient
 from src.publisher.drive_ingest import canonical_local_path, journal_identity, version_of
+from src.publisher.platforms import CHANNELS
 
 
 def shared_targets(tmp_path):
@@ -76,10 +77,11 @@ def test_account_success_does_not_leak_to_other_account_on_shared_file(tmp_path)
     assert len(api.downloads)==1
 
 
-def test_four_platforms_reuse_one_file_when_cloud_metadata_changes_between_polls(tmp_path):
+@pytest.mark.parametrize('platforms', [('douyin','xiaohongshu','kuaishou','youtube'), tuple(CHANNELS)])
+def test_platforms_reuse_one_file_when_cloud_metadata_changes_between_polls(tmp_path, platforms):
     from dataclasses import replace
     targets=[]
-    for platform in ('douyin','xiaohongshu','kuaishou','youtube'):
+    for platform in platforms:
         item=target(tmp_path,platform)
         account=replace(item.account,platform=platform,target_dir=str(tmp_path/'media'))
         targets.append(type(item)(platform,account,item.profile))
@@ -95,7 +97,7 @@ def test_four_platforms_reuse_one_file_when_cloud_metadata_changes_between_polls
     assert len(list(paths[0].parent.glob('*.mp4')))==1
     journal=DriveJournal(root)
     with journal.connect() as db:
-        assert db.execute('SELECT count(DISTINCT target) FROM files').fetchone()[0]==4
+        assert db.execute('SELECT count(DISTINCT target) FROM files').fetchone()[0]==len(platforms)
         assert db.execute('SELECT count(DISTINCT path) FROM files').fetchone()[0]==1
     api.files=[{**api.files[0],'version':'5'}]
     ingest(root,api).poll(targets[0])  # Same account and a later poll also reuse bytes.

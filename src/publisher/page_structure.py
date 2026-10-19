@@ -21,6 +21,7 @@ STRUCTURES = {
     'xiaohongshu': PageStructure('xiaohongshu', 'creator.xiaohongshu.com'),
     'kuaishou': PageStructure('kuaishou', 'cp.kuaishou.com'),
     'youtube': PageStructure('youtube', 'studio.youtube.com'),
+    'wechat_channels': PageStructure('wechat_channels', 'channels.weixin.qq.com', revision='2026.10.19.4'),
 }
 
 

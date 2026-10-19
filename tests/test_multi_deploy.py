@@ -274,7 +274,7 @@ def test_non_retryable_never_uploads_twice(tmp_path,state):
     assert len(calls)==1 and (directory/'a.mp4').exists()
 
 
-@pytest.mark.parametrize('platform',['douyin','xiaohongshu','kuaishou','youtube'])
+@pytest.mark.parametrize('platform',['douyin','xiaohongshu','kuaishou','youtube','wechat_channels'])
 def test_ignored_target_stays_in_report_and_never_uploads_or_counts_as_failure(tmp_path,platform):
     import hashlib
     directory,targets=setup(tmp_path)
@@ -507,7 +507,7 @@ def test_youtube_unsupported_media_does_not_open_browser_or_retry(tmp_path):
     assert (directory/'audio.mp3').exists()
 
 
-@pytest.mark.parametrize('platform', ['douyin','youtube','xiaohongshu','kuaishou'])
+@pytest.mark.parametrize('platform', ['douyin','youtube','xiaohongshu','kuaishou','wechat_channels'])
 def test_all_platforms_content_hash_survives_rename_restart_and_separates_accounts(tmp_path, platform):
     from dataclasses import replace
     directory, original = setup(tmp_path)

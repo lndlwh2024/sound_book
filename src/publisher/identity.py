@@ -15,6 +15,7 @@ IDENTITY_SELECTORS = {
                 'header [class*="nickname"]', 'header [class*="user-name"]'],
     'youtube': ['ytcp-navigation-drawer #entity-name', 'ytcp-navigation-drawer [id="channel-name"]',
                 'ytcp-channel-identity #channel-name'],
+    'wechat_channels': ['#side-bar .side-bar-footer .account-info .name'],
 }
 
 # The current creator centre shows only #header-avatar until its account menu
@@ -101,6 +102,8 @@ def extract_platform_identity(page, platform):
     address = urlsplit(page.url)
     if address.hostname != CHANNELS[platform].host or re.search(r'/(login|signin)(?:/|$)', address.path):
         return None
+    if platform == 'wechat_channels' and not address.path.startswith('/platform/'):
+        return None  # The official /login.html is on the same host.
     if platform == 'douyin':
         result = page.evaluate(DOUYIN_AVATAR_IDENTITY_JS)
         if isinstance(result, dict) and result.get('ambiguous'):
@@ -184,7 +187,8 @@ def refresh_platform_identity(page, platform, stop_requested=lambda: False, seco
 def identity_read_failure(page, platform):
     """A missing display name does not mean the saved login has expired."""
     address = urlsplit(page.url)
-    if address.hostname != CHANNELS[platform].host or re.search(r'/(login|signin)(?:/|$)', address.path):
+    if (address.hostname != CHANNELS[platform].host or re.search(r'/(login|signin)(?:/|$)', address.path)
+            or platform == 'wechat_channels' and not address.path.startswith('/platform/')):
         return '当前标签页不在已登录的创作者页面；请选择正确页面，确实进入登录页时再完成登录。原昵称与绑定保留。'
     state = page.evaluate(r'''() => {
         const visible=e=>!!(e.getClientRects().length&&getComputedStyle(e).visibility!=='hidden');

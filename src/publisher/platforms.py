@@ -22,6 +22,7 @@ CHANNELS = {
     'xiaohongshu': Channel('xiaohongshu', '小红书', 'https://creator.xiaohongshu.com/publish/publish?source=&published=true', 'creator.xiaohongshu.com', True, True),
     'kuaishou': Channel('kuaishou', '快手', 'https://cp.kuaishou.com/article/publish/video', 'cp.kuaishou.com', True, True),
     'youtube': Channel('youtube', 'YouTube', 'https://studio.youtube.com/', 'studio.youtube.com', True, True),
+    'wechat_channels': Channel('wechat_channels', '微信视频号', 'https://channels.weixin.qq.com/platform/post/create', 'channels.weixin.qq.com', True, True),
 }
 
 
@@ -52,6 +53,7 @@ class ChannelAccount:
     default_tags: list[str] = field(default_factory=lambda: ['#有声书', '#知识分享'])
     daily_upload_limit: int = 10
     drive_binding: dict = field(default_factory=dict)
+    wechat_short_title: str = ''
 
 
 class ChannelAccountStore:

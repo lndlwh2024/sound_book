@@ -34,7 +34,7 @@ from ..publisher.youtube_browser import (launch_youtube_context, start_manual_lo
     google_login_rejected, GOOGLE_LOGIN_HELP, youtube_runtime_summary,
     manual_browser_open, ManualBrowserHandoff)
 
-QUEUE_HEADERS = ['序号', '文件名', '类型', '文件大小', '修改时间', '抖音', '小红书', '快手', 'YouTube']
+QUEUE_HEADERS = ['序号', '文件名', '类型', '文件大小', '修改时间', *(channel.name for channel in CHANNELS.values())]
 
 
 class QueueSnapshotWorker(QThread):
@@ -73,7 +73,7 @@ def size_queue_columns(table):
     header.setDefaultAlignment(Qt.AlignCenter)
     header.setMinimumSectionSize(36)
     metrics = table.fontMetrics()
-    for column in (0,2,3,4,5,6,7,8):
+    for column in (0, *range(2, len(QUEUE_HEADERS))):
         if table.isColumnHidden(column):
             continue
         labels = [QUEUE_HEADERS[column]]
@@ -90,7 +90,7 @@ def size_queue_columns(table):
         if item:
             bounds=metrics.boundingRect(QRect(0,0,max(30,table.columnWidth(1)-12),1000),
                 Qt.TextWordWrap,item.text())
-            accounts=max([len(table.item(row,c).text().split(' / ')) for c in range(5,9)
+            accounts=max([len(table.item(row,c).text().split(' / ')) for c in range(5,len(QUEUE_HEADERS))
                 if not table.isColumnHidden(c) and table.item(row,c)]+[1])
             table.setRowHeight(row,max(30,bounds.height()+10,accounts*26))
 

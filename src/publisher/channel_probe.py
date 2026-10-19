@@ -67,7 +67,7 @@ EXTRACT_JS = r'''() => {
             const r = el.getBoundingClientRect(), s = getComputedStyle(el);
             const ownHome=/^\/creator-micro\/home\/?$/.test(location.pathname) &&
                 !!el.closest('[class*="user-info"],[class*="userInfo"],[class*="user-profile"],[class*="userProfile"],[class*="account-info"],[class*="creator-info"]');
-            const profileNode=ownHome || !!el.closest('#header-avatar') ||
+            const profileNode=ownHome || !!el.closest('#header-avatar,#side-bar .side-bar-footer .account-info') ||
                 el.matches('[class*="user-info"],[class*="nickname"],[class*="user-name"],[class*="userName"],[class*="user_name"]')
                 && !!el.closest('[role=menu],[role=tooltip],[class*="dropdown-content"],[class*="popover-content"]');
             const semantic=profileNode || el.matches('input,textarea,button,select,option,a[href],label,[role],[contenteditable="true"],video,progress,canvas,xhs-publish-btn,[class*="progress"],[onclick],[tabindex],[class*="button" i],[class*="btn" i]');
@@ -171,10 +171,13 @@ class ChannelDOMProbe:
         if active.count() == 1:
             text = active.inner_text().strip()
             return {'详细信息':'标题与正文','视频元素':'视频元素','检查':'检查','公开范围':'发布前'}.get(text,'上传前')
-        published = page.get_by_text(re.compile(r'^(?:视频已发布|(?:笔记|作品|视频)?发布成功[！!。\s]*)$'))
+        published = page.get_by_text(re.compile(r'^(?:视频已发布|(?:笔记|作品|视频)?发布成功[！!。\s]*|发表成功[！!。\s]*)$'))
         if any(published.nth(i).is_visible() for i in range(published.count())):
             return '发布结果'
         if page.locator('[contenteditable=true][aria-label*="标题"]:visible').count():
+            return '标题与正文'
+        if (urlsplit(page.url).hostname == 'channels.weixin.qq.com'
+                and page.locator('.post-desc-box .input-editor[contenteditable]:visible').count()):
             return '标题与正文'
         if page.locator('input[placeholder="填写标题会有更多赞哦"]:visible, #work-description-edit[contenteditable=true]:visible').count():
             busy=page.get_by_text(re.compile(r'^(?:正在上传|上传中|正在转码|转码中)'))

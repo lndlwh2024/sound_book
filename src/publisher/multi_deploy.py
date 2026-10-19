@@ -16,6 +16,7 @@ from .media import selected_extensions, media_type
 from .douyin.uploader import DouyinUploader, compute_file_md5
 from .youtube import YouTubeUploader
 from .creator_studio import XiaohongshuUploader, KuaishouUploader
+from .wechat_channels import WeChatChannelsUploader
 from .status import BLOCKING, RETRYABLE, result_status_text, fresh_result
 from .upload_quota import DailyUploadQuota, DailyQuotaReached
 from .event_log import redact
@@ -24,6 +25,8 @@ CHINA_TIME = timezone(timedelta(hours=8))
 SUCCESS = 'SUCCESS'
 LEGACY_REVIEW_MESSAGE = '发现原抖音成功账本；旧记录缺少本次确认依据，请核对后标记成功或允许重试，避免重复发布'
 LEGACY_FAILED_MESSAGE = '旧未确认投稿按失败处理；新任务允许重试'
+STUDIO_ADAPTERS = {'xiaohongshu': XiaohongshuUploader, 'kuaishou': KuaishouUploader,
+                   'wechat_channels': WeChatChannelsUploader}
 
 
 def legacy_import_needed(previous):
@@ -299,8 +302,8 @@ class MultiDeployWorker(QThread):
         if target.platform == 'youtube':
             return YouTubeUploader(target.account, target.profile, self.root / 'dom_reports',
                                    self.stopping.is_set, log)
-        if target.platform in ('xiaohongshu','kuaishou'):
-            adapter=XiaohongshuUploader if target.platform=='xiaohongshu' else KuaishouUploader
+        if target.platform in STUDIO_ADAPTERS:
+            adapter=STUDIO_ADAPTERS[target.platform]
             return adapter(target.account,target.profile,self.root/'dom_reports',self.stopping.is_set,log)
         raise ValueError('该平台发布执行器尚未实现；DOM 采集状态与发布支持是独立检查项')
 
@@ -518,13 +521,13 @@ class MultiDeployWorker(QThread):
             return previous['status']
         attempts = self.attempts_by_target.setdefault((job['digest'],target.key),[])
         item['attempts'] = attempts
-        # These three adapters can validate captured acknowledgements entirely
+        # These adapters can validate captured acknowledgements entirely
         # locally. This is allowed even at the retry ceiling; no browser opens.
-        if previous.get('info') and target.platform in ('douyin','xiaohongshu','kuaishou'):
+        if previous.get('info') and target.platform in ('douyin', *STUDIO_ADAPTERS):
             if target.platform=='douyin':
                 validator=DeferredDouyinUploader(replace(target.account,auto_archive=False))
             else:
-                adapter=XiaohongshuUploader if target.platform=='xiaohongshu' else KuaishouUploader
+                adapter=STUDIO_ADAPTERS[target.platform]
                 validator=adapter(target.account,target.profile,self.root/'dom_reports')
             if validator.reconcile(previous['info']) is True:
                 item.update(self.ledger.set_result(job['digest'],target.key,SUCCESS,
@@ -593,7 +596,7 @@ class MultiDeployWorker(QThread):
             item.update(status='FILE_CHANGED',message='文件变化、消失或仍被占用，未上传')
             self.save_report()
             return 'FILE_CHANGED'
-        if target.platform in ('youtube','xiaohongshu','kuaishou') and media_type(path)!='video':
+        if target.platform in ('youtube', *STUDIO_ADAPTERS) and media_type(path)!='video':
             item.update(self.ledger.set_result(job['digest'],target.key,'PERMANENT_REJECT','当前自动发布器仅支持视频，保留文件'))
             self.save_report()
             return 'PERMANENT_REJECT'
@@ -677,7 +680,7 @@ class MultiDeployWorker(QThread):
             boundary_info=info
             # These adapters validate saved evidence locally. Do not invoke the
             # YouTube browser reconciliation inside its active upload context.
-            confirmed=(target.platform in ('xiaohongshu','kuaishou')
+            confirmed=(target.platform in STUDIO_ADAPTERS
                 and callable(getattr(uploader,'reconcile',None)) and uploader.reconcile(info) is True)
             state=SUCCESS if confirmed else 'IN_PROGRESS'
             message='平台已确认本次发布成功，回执已保存' if confirmed else '已提交，等待成功证据；中断后按失败处理'
@@ -749,7 +752,7 @@ class MultiDeployWorker(QThread):
             and not (isinstance(retained_info,dict) and retained_info.get('video_id')))
         # An explicit current submission rejection is a known failure, not an
         # unknown acceptance. A challenge/closed page alone remains uncertain.
-        rejected = (target.platform in ('xiaohongshu','kuaishou')
+        rejected = (target.platform in STUDIO_ADAPTERS
             and getattr(uploader,'business_rejected',False) is True)
         confirmation = retained_info.get('confirmation') if isinstance(retained_info,dict) else None
         if target.platform == 'douyin' and isinstance(confirmation,dict) and confirmation.get('code') is not None:

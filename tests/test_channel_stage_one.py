@@ -98,7 +98,7 @@ def test_short_window_shows_account_selector_and_platform_dropdown(app, tmp_path
     manager.add_account('第二个账号')
     monkeypatch.setattr(ui, 'DouyinAccountManager', lambda: manager)
     store = ChannelAccountStore(tmp_path/'new')
-    for platform in ('xiaohongshu','kuaishou','youtube'):
+    for platform in list(CHANNELS)[1:]:
         store.add(platform,'第一个账号')
         store.add(platform,'第二个账号')
     panel = ui.MultiPlatformPublisherPanel(store=store)
@@ -254,7 +254,7 @@ def test_accounts_roundtrip_and_profile_isolation(tmp_path):
     store = ChannelAccountStore(tmp_path / 'new')
     accounts = [store.add(key, '相同昵称') for key in list(CHANNELS)[1:]]
     accounts.append(store.add('youtube', '相同昵称'))
-    assert len({str(store.profile_path(a)) for a in accounts}) == 4
+    assert len({str(store.profile_path(a)) for a in accounts}) == len(accounts)
     accounts[0].identity_note = '平台ID123'
     accounts[0].login_status = 'USER_CONFIRMED'
     store.save()
