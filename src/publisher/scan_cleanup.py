@@ -76,7 +76,7 @@ def cleanup_completed_cloud_copies(targets, root, *, history_targets=None, exclu
                         journal.mark_duplicate(target.key,path,digest)
                     if stopped():
                         return items
-                    item['archived_path'] = str(archive_completed_file(path,signature,log,cloud_root=root))
+                    item['archived_path'] = str(archive_completed_file(path,signature,log,cloud_root=root,stopped=stopped))
                     log(f'[部署后重复归档] {path.name}：本轮所选{len(scope)}个账号均已有成功记录，仅归档、未重新上传')
                 except (OSError,ValueError) as error:
                     item['archive_error'] = str(error)
@@ -282,7 +282,8 @@ class ScanCleanupWorker(QThread):
                                 for key in plan['required']:
                                     if results[key]['status']=='SUCCESS':
                                         journal.mark_duplicate(key,path,digest)
-                            item['archived_path']=str(archive_completed_file(path,signature,self.log.emit,cloud_root=self.root))
+                            item['archived_path']=str(archive_completed_file(path,signature,self.log.emit,cloud_root=self.root,
+                                stopped=lambda:self.stopping.is_set() or self.isInterruptionRequested()))
                             archived+=1
                             self.log.emit(f'[清理归档] {path.name}：本次清理的{len(plan["required"])}个目标全部完成，各账号原状态保留')
                         except (OSError,ValueError) as error:

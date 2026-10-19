@@ -107,7 +107,7 @@ def test_scan_recognizes_renamed_copied_history_per_account(tmp_path,platform):
     result=scanner.items[0]['results']
     assert result[target.key]['status']=='SUCCESS'
     assert result[other.key]['status']=='PENDING'
-    assert not (path.parent/'published').exists()
+    assert not (path.parent/'publiced').exists()
 
 
 def legacy_report(target,content,**changes):
@@ -216,9 +216,9 @@ def test_cleanup_fixed_full_group_ignored_counts_complete_even_auto_archive_off(
     scanner=ScanCleanupWorker(group[:1],group,root)
     scanner.run()
     assert not scanner.error and not path.exists()
-    assert (path.parent/'published'/path.name).exists()
+    assert (path.parent/'publiced'/path.name).exists()
     assert MultiTargetLedger(root).result(digest,group[2].key)['status']=='IGNORED'
-    assert len(MultiTargetLedger(root).data['plans'][digest]['required'])==4
+    assert len(MultiTargetLedger(root).data['plans'][digest]['required'])==len(group)
 
 
 def test_old_failure_ceiling_is_preserved_without_mutating_history_report(tmp_path):
@@ -232,7 +232,7 @@ def test_old_failure_ceiling_is_preserved_without_mutating_history_report(tmp_pa
     (folder/'history.json').write_text(historic)
     scanner=ScanCleanupWorker(group[:1],group,root);scanner.run()
     assert not scanner.error and path.exists()
-    assert [r['status'] for r in scanner.items[0]['results'].values()]==['SUCCESS','FAILED2','PENDING','PENDING']
+    assert [r['status'] for r in scanner.items[0]['results'].values()]==['SUCCESS','FAILED2']+['PENDING']*(len(group)-2)
     assert MultiTargetLedger(root).result(digest,group[2].key)['status']=='FAILED'
     assert (folder/'history.json').read_text()==historic
 
@@ -268,7 +268,7 @@ def test_cleanup_cancel_invalid_root_and_corrupt_ledger_prevent_moves(tmp_path):
 def test_archive_collision_preserves_existing_media_and_subtitle(tmp_path):
     path=media(tmp_path/'media');group=targets(path.parent)[:1];root=tmp_path/'state'
     path.with_suffix('.srt').write_text('new subtitle')
-    published=path.parent/'published';published.mkdir()
+    published=path.parent/'publiced';published.mkdir()
     (published/path.name).write_bytes(b'old')
     (published/path.with_suffix('.srt').name).write_text('old subtitle')
     digest=hashlib.sha256(path.read_bytes()).hexdigest()

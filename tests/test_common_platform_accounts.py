@@ -471,7 +471,7 @@ def test_manual_cleanup_archives_completed_ignored_plan_even_when_auto_archive_d
     scanner=ScanCleanupWorker(group[:1],group,panel.store.root)
     scanner.run()
     assert not scanner.error
-    assert not path.exists() and (tmp_path/'published'/path.name).exists()
+    assert not path.exists() and (tmp_path/'publiced'/path.name).exists()
     assert MultiTargetLedger(panel.store.root).result(digest,group[2].key)['status']=='IGNORED'
 
 

@@ -279,7 +279,7 @@ class DouyinAutoDeployDaemon(QThread):
         pending = []
         try:
             for item in target_dir.iterdir():
-                # 排除 published 子目录及其他子目录
+                # 排除 publiced 归档及其他子目录
                 if item.is_dir():
                     continue
                 if item.suffix.lower() in valid_exts:

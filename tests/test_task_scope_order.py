@@ -24,8 +24,8 @@ def test_selected_success_archives_despite_old_full_plan_and_unselected_failures
         ledger.set_result(digest,t.key,state,'history')
     worker=task(root,selected,lambda *args:(_ for _ in ()).throw(AssertionError('must dedup')),group)
     worker.run_batch(worker.plan_batch())
-    assert not path.exists() and (path.parent/'published'/path.name).exists()
-    assert (path.parent/'published'/path.with_suffix('.srt').name).exists()
+    assert not path.exists() and (path.parent/'publiced'/path.name).exists()
+    assert (path.parent/'publiced'/path.with_suffix('.srt').name).exists()
     assert worker.report['source_success_count']==1
     assert worker.report['target_count']==2 and worker.report['failure_count']==0
     assert worker.report['success_count']==1 and worker.report['ignored_count']==1

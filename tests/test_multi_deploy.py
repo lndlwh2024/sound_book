@@ -129,7 +129,7 @@ def test_deferred_archive_and_only_failed_target_retries(tmp_path):
     job.run_batch(job.plan_batch())
     assert calls == [targets[0].key,targets[1].key,targets[1].key]
     assert not (directory/'a.mp4').exists()
-    assert (directory/'published'/'a.mp4').exists()
+    assert (directory/'publiced'/'a.mp4').exists()
     report = json.loads(job.report_path.read_text(encoding='utf-8'))
     assert report['source_file_count']==1 and report['target_count']==2 and report['success_count']==2
     assert len(report['files'][0]['results'][targets[0].key]['attempts'])==1
@@ -164,7 +164,7 @@ def test_all_targets_pause_after_active_file_then_resume_or_stop(tmp_path,stop_i
         assert job.report['status']=='PAUSED' and len(calls)==1
         time.sleep(.15)
         assert len(calls)==1  # Other account/platform must not start either.
-        assert not (directory/'published').exists()
+        assert not (directory/'publiced').exists()
         if stop_in_pause:
             job.stop()
         else:
@@ -206,7 +206,7 @@ def test_restart_subset_archives_selected_success_without_unselected_failure(tmp
     assert item['results'][targets[0].key]['status']=='SUCCESS'
     assert second.ledger.result(item['sha256'],targets[1].key)['status']=='FAILED2'
     assert second.report['source_success_count']==1
-    assert (directory/'published'/'a.mp4').exists()
+    assert (directory/'publiced'/'a.mp4').exists()
 
 
 def test_quota_blocks_only_one_account_other_files_continue(tmp_path):
@@ -289,7 +289,7 @@ def test_ignored_target_stays_in_report_and_never_uploads_or_counts_as_failure(t
     assert job.report['files'][0]['results'][targets[0].key]['status']=='IGNORED'
     assert job.report['ignored_count']==1 and job.report['failure_count']==0 and job.report['success_count']==0
     assert job.report['platform_counts'][platform]['ignored']==1
-    assert (directory/'a.mp4').exists() and not (directory/'published').exists()
+    assert (directory/'a.mp4').exists() and not (directory/'publiced').exists()
     copied=directory/'copied.mp4'
     copied.write_bytes((directory/'a.mp4').read_bytes())
     os.utime(copied,(time.time()-10,time.time()-10))
@@ -310,7 +310,7 @@ def test_readonly_reconcile_confirms_without_uploading_again(tmp_path):
     job.run_batch(jobs)
     checker.upload_single_video.assert_not_called()
     checker.reconcile.assert_called_once()
-    assert (directory/'published'/'a.mp4').exists()
+    assert (directory/'publiced'/'a.mp4').exists()
 
 
 @pytest.mark.parametrize('other',['SUCCESS','IGNORED','UNCONFIRMED','FAILED'])
@@ -326,7 +326,7 @@ def test_ignored_is_archive_complete_but_original_target_state_persists(tmp_path
     job.ledger.set_result(digest,targets[1].key,other,'fixture')
     job.run_batch(job.plan_batch())
     completed=other in ('SUCCESS','IGNORED')
-    assert (directory/'published'/'a.mp4').exists()==completed
+    assert (directory/'publiced'/'a.mp4').exists()==completed
     assert (directory/'a.mp4').exists()!=completed
     assert MultiTargetLedger(job.root).result(digest,targets[0].key)['status']=='IGNORED'
 
@@ -357,13 +357,13 @@ def test_douyin_adapter_disables_archive_without_mutating_original(tmp_path):
 
 def test_archive_never_overwrites_existing_media(tmp_path):
     directory,targets=setup(tmp_path)
-    (directory/'published').mkdir()
-    (directory/'published'/'a.mp4').write_bytes(b'keep')
+    (directory/'publiced').mkdir()
+    (directory/'publiced'/'a.mp4').write_bytes(b'keep')
     job=worker(tmp_path,targets,lambda *args:MagicMock(upload_single_video=lambda path:(True,'success',None)))
     job.run_batch(job.plan_batch())
-    assert not (directory/'a.mp4').exists() and (directory/'published'/'a.mp4').read_bytes()==b'keep'
+    assert not (directory/'a.mp4').exists() and (directory/'publiced'/'a.mp4').read_bytes()==b'keep'
     destination=Path(job.report['files'][0]['archived_path'])
-    assert destination.name!='a.mp4' and destination.exists()
+    assert destination.name=='a_重复.mp4' and destination.exists()
 
 
 def test_submission_boundary_is_durable_before_platform_click(tmp_path):
@@ -394,7 +394,7 @@ def test_legacy_douyin_success_is_migrated_without_reupload(tmp_path):
     job.run_batch(job.plan_batch())
     factory.assert_not_called()
     assert job.report['files'][0]['results'][targets[0].key]['status']=='SUCCESS'
-    assert (directory/'published'/'a.mp4').exists()
+    assert (directory/'publiced'/'a.mp4').exists()
 
 
 def test_corrupt_legacy_ledger_blocks_its_account_but_other_target_continues(tmp_path):

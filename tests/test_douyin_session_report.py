@@ -100,7 +100,8 @@ def test_single_file_finalize_no_longer_creates_individual_report(tmp_path):
     from src.publisher.douyin.uploader import DouyinUploader
     account = DouyinAccountConfig("test", "test", target_dir=str(tmp_path), profile_dir=str(tmp_path / "profile"))
     video = tmp_path / "video.mp4"
-    video.write_bytes(b"test")
+    video.write_bytes(b"test"*1000)
+    os.utime(video, (1, 1))
     record = DouyinUploader(account)._finalize_publish_archive_and_ledger(video, "合集", 1)
     assert Path(record.archived_path).exists()
     assert not list((tmp_path / "reports").glob("publish_report_*.txt"))

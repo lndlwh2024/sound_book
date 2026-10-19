@@ -9,7 +9,6 @@ import logging
 import math
 import os
 import re
-import shutil
 import subprocess
 import time
 from pathlib import Path
@@ -19,6 +18,7 @@ from urllib.parse import urlsplit
 from playwright.sync_api import sync_playwright, BrowserContext, Page
 
 from ..browser_workflow import BrowserPublishWorkflow
+from ..archive import archive_completed_file
 from .models import DouyinAccountConfig, PublishLedgerRecord
 from .browser import DouyinBrowserManager, DOUYIN_UPLOAD_URL
 
@@ -570,12 +570,10 @@ class DouyinUploader(BrowserPublishWorkflow):
         episode_num: Optional[int]
     ) -> PublishLedgerRecord:
         """
-        物理平移归档至 published/ 目录，并按日生成带时间戳账本与报告。
+        复用统一归档规则写入 publiced/，并按日记录发布账本。
         """
         target_dir = Path(self.account.target_dir) if self.account.target_dir else video_path.parent
-        published_dir = target_dir / "published"
         reports_dir = target_dir / "reports"
-        published_dir.mkdir(parents=True, exist_ok=True)
         reports_dir.mkdir(parents=True, exist_ok=True)
 
         file_hash = compute_file_md5(video_path)
@@ -583,16 +581,11 @@ class DouyinUploader(BrowserPublishWorkflow):
 
         # 1. 物理归档挪动
         if self.account.auto_archive:
-            archived_video = published_dir / video_path.name
-            shutil.move(str(video_path), str(archived_video))
+            info = video_path.stat()
+            signature = info.st_size, info.st_mtime_ns
+            archived_video = archive_completed_file(video_path, signature, self._progress, archive_root=target_dir)
             archived_path = str(archived_video)
             logger.info(f"已将视频物理归档至: {archived_video}")
-
-            # 配套字幕同步归档
-            srt_candidate = video_path.with_suffix(".srt")
-            if srt_candidate.exists():
-                shutil.move(str(srt_candidate), str(published_dir / srt_candidate.name))
-                logger.info(f"已同步归档字幕: {srt_candidate.name}")
 
         # 2. 按日生成带时间戳流水账本: publish_ledger_YYYYMMDD.json
         day_str = time.strftime("%Y%m%d")

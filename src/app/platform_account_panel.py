@@ -222,7 +222,7 @@ class PlatformAccountPanel(QWidget):
         self.auto_archive.setToolTip('本任务所选目标完成后归档；未选择的平台不影响本任务')
         quota_row.addWidget(self.auto_archive)
         parameters_layout.addLayout(quota_row)
-        hint = QLabel('云盘成功移入 publiced；历史重复加“_重复”后归档。本地来源沿用 published。')
+        hint = QLabel('统一归档到 publiced；同名同内容复用，同名不同内容加“_重复”后缀。')
         hint.setWordWrap(True)
         hint.setStyleSheet('color:#90A4BC;font-size:11px;')
         parameters_layout.addWidget(hint)

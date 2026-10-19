@@ -91,8 +91,8 @@ def test_manual_cleanup_from_unselected_view_archives_only_checked_accounts(pane
     select_channels(panel,'xiaohongshu','kuaishou')
     panel.store.archive_targets=[target.key for target in panel.all_targets()]
     panel.douyin.scan_button.click();drain(panel)
-    assert not path.exists() and (tmp_path/'published'/'clip.mp4').exists()
-    assert (tmp_path/'published'/'clip.srt').exists()
+    assert not path.exists() and (tmp_path/'publiced'/'clip.mp4').exists()
+    assert (tmp_path/'publiced'/'clip.srt').exists()
     result=MultiTargetLedger(panel.store.root)
     required=result.data['plans'][digest]['required']
     assert required==[target.key for target in panel.all_targets() if target.platform in ('xiaohongshu','kuaishou')]
@@ -123,7 +123,7 @@ def test_manual_cleanup_does_not_fall_back_to_all_accounts_when_none_selected(pa
     os.utime(path,(time.time()-10,time.time()-10))
     select_channels(panel)
     panel.douyin.scan_button.click();drain(panel)
-    assert path.exists() and not (tmp_path/'published').exists()
+    assert path.exists() and not (tmp_path/'publiced').exists()
     assert panel.worker is None and not (panel.store.root/'target_ledger.json').exists()
     assert '请至少勾选一个平台' in panel.douyin.logs.toPlainText()
 
@@ -150,7 +150,7 @@ def test_manual_cleanup_rejects_disabled_selected_account_without_fallback(panel
     select_channels(panel,'xiaohongshu')
     panel.new_panels[0].enabled.setChecked(False)
     panel.douyin.scan_button.click();drain(panel)
-    assert path.exists() and not (tmp_path/'published').exists()
+    assert path.exists() and not (tmp_path/'publiced').exists()
     assert '请选择并启用本次清理的账号' in panel.douyin.logs.toPlainText()
 
 

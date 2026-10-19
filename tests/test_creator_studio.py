@@ -372,7 +372,7 @@ def test_default_task_factory_runs_both_real_adapters_then_archives_once(tmp_pat
         job.run()  # No uploader_factory override: exercises the production adapter wiring.
     assert records['calls']==['xiaohongshu','kuaishou']
     assert job.report['status']=='COMPLETED' and job.report['success_count']==2
-    assert (tmp_path/'published'/source.name).exists() and not source.exists()
+    assert (tmp_path/'publiced'/source.name).exists() and not source.exists()
     digest=job.report['files'][0]['sha256']
     ledger=MultiTargetLedger(job.root)
     assert all(ledger.result(digest,t.key)['status']=='SUCCESS' for t in targets)
@@ -474,7 +474,7 @@ def test_real_adapters_obey_task_account_limit_and_retry_isolation(tmp_path,monk
     else:
         assert records['calls']==['xiaohongshu','kuaishou','xiaohongshu','xiaohongshu','kuaishou']
         assert job.report['success_count']==4 and job.report['failure_count']==0
-        assert all((tmp_path/'published'/source.name).exists() for source in sources)
+        assert all((tmp_path/'publiced'/source.name).exists() for source in sources)
 
 
 @pytest.mark.parametrize('state',['stale','busy','fresh'])

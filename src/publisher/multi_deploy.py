@@ -1,7 +1,6 @@
 """Serial multi-target publishing with persistent per-target results and deferred archive."""
 import hashlib
 import json
-import shutil
 import threading
 import time
 import uuid
@@ -20,6 +19,7 @@ from .wechat_channels import WeChatChannelsUploader
 from .status import BLOCKING, RETRYABLE, result_status_text, fresh_result
 from .upload_quota import DailyUploadQuota, DailyQuotaReached
 from .event_log import redact
+from .archive import archive_completed_file
 
 CHINA_TIME = timezone(timedelta(hours=8))
 SUCCESS = 'SUCCESS'
@@ -51,34 +51,6 @@ def atomic_json(path, data):
                 raise
             # Windows readers/security scanners can hold the destination briefly.
             time.sleep(.05*(attempt+1))
-
-
-def archive_completed_file(source,signature,log=lambda message:None,cloud_root=None):
-    """Archive without overwriting previous media or subtitles."""
-    source=Path(source)
-    if not is_file_fully_written(source) or (source.stat().st_size,source.stat().st_mtime_ns)!=signature:
-        raise ValueError('目标已完成，但原文件已变化或被占用；保留文件')
-    folder, name = 'published', source.name
-    if cloud_root and (Path(cloud_root)/'drive_ingest.sqlite3').exists():
-        from .drive_ingest import DriveJournal, file_hashes
-        digest, _ = file_hashes(source)
-        origins = DriveJournal(cloud_root).origins(source, digest)
-        if origins:
-            folder = 'publiced'
-            if any(entry['duplicate'] for entry in origins):
-                name = source.stem + '_重复' + source.suffix
-    destination=source.parent/folder/name
-    if destination.exists() or destination.with_suffix('.srt').exists():
-        destination=destination.with_name(destination.stem+'_'+uuid.uuid4().hex[:12]+source.suffix)
-    destination.parent.mkdir(exist_ok=True)
-    shutil.move(str(source),str(destination))
-    subtitle=source.with_suffix('.srt')
-    if subtitle.exists() and not destination.with_suffix('.srt').exists():
-        try:
-            shutil.move(str(subtitle),str(destination.with_suffix('.srt')))
-        except OSError as error:
-            log(f'[字幕归档未完成] 媒体已归档，字幕仍保留：{error}')
-    return destination
 
 
 @dataclass
@@ -797,7 +769,8 @@ class MultiDeployWorker(QThread):
             return
         source = job['path']
         try:
-            destination=archive_completed_file(source,job['signature'],self.emit_log,cloud_root=self.root)
+            destination=archive_completed_file(source,job['signature'],self.emit_log,cloud_root=self.root,
+                                               stopped=self.stopping.is_set)
             item['archived_path'] = str(destination)
             self.emit_log(f'[统一归档] {source.name}：本任务所选{len(required)}个账号已成功或不再跟踪；保留各账号原状态')
         except (OSError,ValueError) as error:

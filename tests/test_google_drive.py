@@ -71,7 +71,7 @@ def test_same_version_skipped_after_restart_and_archive(tmp_path):
     assert api.downloads == ['f1'] and api.dates == [('series','2026-10-16')]*2
 
 
-def test_next_day_copy_dedups_and_archives_with_suffix_without_upload(tmp_path):
+def test_next_day_copy_dedups_and_archives_without_false_suffix_or_upload(tmp_path):
     t = target(tmp_path)
     root = tmp_path/'state'
     digest = hashlib.sha256(b'video'*1000).hexdigest()
@@ -82,7 +82,7 @@ def test_next_day_copy_dedups_and_archives_with_suffix_without_upload(tmp_path):
         uploader_factory=lambda *args:(_ for _ in ()).throw(AssertionError('must not upload')))
     worker.ledger = MultiTargetLedger(root)
     worker.run_batch(worker.plan_batch())
-    archived = Path(t.account.target_dir)/'publiced'/'海星_重复.mp4'
+    archived = Path(t.account.target_dir)/'publiced'/'海星.mp4'
     assert archived.exists()
     ingest(root,api).poll(t)
     assert len(api.downloads) == 1
@@ -108,7 +108,7 @@ def test_new_cloud_file_publishes_via_existing_worker_and_quota(tmp_path):
 
 
 @pytest.mark.parametrize('manual_cleanup',[False,True])
-def test_success_history_restored_after_download_still_gets_duplicate_suffix(tmp_path,manual_cleanup):
+def test_success_history_restored_after_download_does_not_add_false_suffix(tmp_path,manual_cleanup):
     t=target(tmp_path);root=tmp_path/'state';api=FakeDrive()
     ingest(root,api).poll(t)
     digest=hashlib.sha256(b'video'*1000).hexdigest()
@@ -124,7 +124,7 @@ def test_success_history_restored_after_download_still_gets_duplicate_suffix(tmp
             uploader_factory=lambda *args:(_ for _ in ()).throw(AssertionError('duplicate upload')))
         worker.ledger=MultiTargetLedger(root)
         worker.run_batch(worker.plan_batch())
-    assert (Path(t.account.target_dir)/'publiced'/'海星_重复.mp4').exists()
+    assert (Path(t.account.target_dir)/'publiced'/'海星.mp4').exists()
 
 
 def test_partial_cancel_never_enters_queue_and_retries(tmp_path):

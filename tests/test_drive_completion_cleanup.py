@@ -44,7 +44,7 @@ def test_fixed_task_archives_copy_downloaded_during_upload_without_expanding_upl
     assert len(api.downloads)==2 # One cloud version per physical copy, shared by both accounts.
     assert not list(path.parent.glob('*.mp4'))
     archived=list((path.parent/'publiced').glob('*.mp4'))
-    assert len(archived)==2 and sum('_重复' in p.stem for p in archived)==1
+    assert len(archived)==2 and not any('_重复' in p.stem for p in archived)
     assert worker.report['source_file_count']==1 and worker.report['target_count']==2
     assert worker.report['success_count']==2
     cleanup=worker.report['completion_cleanup']
@@ -84,7 +84,7 @@ def test_disabled_archive_is_respected_and_ledger_quota_are_unchanged(tmp_path):
     b.account.auto_archive=True
     items=cleanup_completed_cloud_copies([a,b],root)
     assert not path.exists() and Path(items[0]['archived_path']).exists()
-    assert '_重复' in Path(items[0]['archived_path']).stem
+    assert Path(items[0]['archived_path']).name==path.name
     assert ledger.path.read_bytes()==previous
 
 
@@ -118,3 +118,30 @@ def test_cleanup_failure_keeps_successful_deployment_results(tmp_path):
     worker.cleanup_completed_copies()
     assert path.exists() and worker.report['status']=='COMPLETED'
     assert worker.report['completion_cleanup_error']
+
+
+@pytest.mark.parametrize('identical',[False,True])
+def test_cleanup_collision_uses_content_and_keeps_download_consumption_and_cursor(tmp_path,identical):
+    from src.publisher.drive_ingest import DriveJournal
+    from tests.test_scan_cleanup_quota import media
+    a,b,root,api,path,digest=setup_cloud(tmp_path)
+    existing=media(path.parent/'publiced',path.name,path.read_bytes() if identical else b'old'*1000)
+    journal=DriveJournal(root)
+    with journal.connect() as db:
+        cursor=db.execute('SELECT * FROM scan_cursor ORDER BY target').fetchall()
+        files=db.execute('SELECT identity,path,state,sha256 FROM files ORDER BY identity').fetchall()
+    ledger=MultiTargetLedger(root)
+    for target in (a,b):ledger.set_result(digest,target.key,'SUCCESS','confirmed')
+    previous=ledger.path.read_bytes()
+    items=cleanup_completed_cloud_copies([a,b],root)
+    expected=existing if identical else existing.with_stem(existing.stem+'_重复')
+    assert items[0]['archived_path']==str(expected) and not path.exists()
+    assert expected.read_bytes()==b'video'*1000
+    assert ledger.path.read_bytes()==previous
+    for target in (a,b):
+        ingest(root,api).poll(target)
+        assert DailyUploadQuota(root).snapshot(target.key)['used']==0
+    assert api.downloads==['f1']  # Missing work file after archive is already consumed.
+    with journal.connect() as db:
+        assert db.execute('SELECT * FROM scan_cursor ORDER BY target').fetchall()==cursor
+        assert db.execute('SELECT identity,path,state,sha256 FROM files ORDER BY identity').fetchall()==files
