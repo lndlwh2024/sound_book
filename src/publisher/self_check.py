@@ -44,6 +44,8 @@ def self_check(directory):
         checks['data_writable'] = False
     checks['free_space_10gb'] = shutil.disk_usage(directory).free >= 10*1024**3
     versions = {name: importlib.metadata.version(name) for name in ('PySide6', 'playwright')}
+    from ..version import __version__
+    versions['application'] = __version__
     ffprobe = shutil.which('ffprobe')
     try:
         result = subprocess.run([ffprobe or 'ffprobe', '-version'], capture_output=True,

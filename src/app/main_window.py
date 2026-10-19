@@ -32,6 +32,8 @@ from ..utils.path_utils import sanitize_filename
 from ..utils.model_manager import ModelManager
 from ..audio.audio_preview_controller import AudioPreviewController
 from .channel_panel import MultiPlatformPublisherPanel
+from .publisher_workspace import LockedPublisherSheet
+from ..version import __version__
 
 logger = logging.getLogger(__name__)
 
@@ -437,7 +439,7 @@ class MainWindow(QMainWindow):
     def __init__(self, bridge: Optional[TaskManagerBridge] = None):
         super().__init__()
         self.bridge = bridge or TaskManagerBridge()
-        self.setWindowTitle("书声 (ShuSheng) v3.4.0 - 自动化有声视频生产工具 (小人书 AI 连环画增强版)")
+        self.setWindowTitle(f"书声 (ShuSheng) {__version__} 完整版 - 自动化有声视频生产工具 (小人书 AI 连环画增强版)")
         self._raw_status_text = "空闲就绪 (IDLE)"
         self._is_producing = False
         self._is_dual_mode = False
@@ -914,6 +916,10 @@ class MainWindow(QMainWindow):
         from PySide6.QtWidgets import QTabBar
         self.main_tabs.tabBar().setTabButton(1,QTabBar.RightSide,self.douyin_panel.channel_view)
         self.douyin_panel.channel_view.show()
+
+        # A locked entry only: no second account repository, watcher or uploader.
+        self.independent_publisher_sheet = LockedPublisherSheet(self.main_tabs)
+        self.independent_publisher_sheet.install(self.main_tabs)
 
     def _build_left_config_panel(self) -> QWidget:
         """构建左侧参数配置区（纯净一体化面板，绝无滑动条）"""

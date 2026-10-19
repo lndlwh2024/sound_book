@@ -24,7 +24,7 @@ def run_gui():
     from PySide6.QtWidgets import QApplication
     from PySide6.QtCore import Qt
     from src.app.main_window import MainWindow
-    from src.publisher import __version__ as publisher_version
+    from src.version import __version__ as publisher_version
 
     # 针对 Windows 平台注册专属 AppUserModelID，使任务栏独立呈现书声专属图标，避免显示 Python 默认图标
     if sys.platform == "win32":

@@ -64,3 +64,6 @@ data/
 artifacts/
 Googledrive/
 
+# Local standalone publisher archives belong in releases, not source commits.
+/ShuShengPublisher-win-*.zip
+

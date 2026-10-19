@@ -12,6 +12,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from src.version import __version__
+from src.edition import PUBLISHER_EDITION
 
 
 def run(*arguments, env=None):
@@ -71,6 +74,7 @@ def main():
                    'docs/YOUTUBE_LOGIN_DIFFERENCES_20261018.md',
                    'docs/YOUTUBE_LOGIN_HANDOFF_20261019.md',
                    'docs/PUBLISHER_FAILURES_AND_TRAY_20261019.md',
+                   'docs/EDITION_UNIFICATION_20261019.md',
                    'requirements-publisher.txt', 'requirements-publisher-lock.txt'):
         shutil.copy2(ROOT/source, output/Path(source).name)
     (output/'自检.cmd').write_text('@echo off\r\ncd /d "%~dp0"\r\nstart /wait "" ShuShengPublisher.exe --self-check --output "%~dp0self-check.json"\r\nnotepad "%~dp0self-check.json"\r\n', encoding='utf-8')
@@ -80,7 +84,8 @@ def main():
     source_files = [ROOT/'publisher_app.py', *ROOT.glob('requirements-publisher*.txt'),
                     *ROOT.glob('src/**/*.py'), *ROOT.glob('tools/*.py')]
     manifest = {'status':'candidate-not-qualified-on-win10', 'git_base':git,
-        'publisher_component_version':'2026.10.19.2', 'media_browser':media_source,
+        'app_version':__version__, 'edition':PUBLISHER_EDITION.key,
+        'publisher_component_version':__version__, 'media_browser':media_source,
         'source_sha256':{p.relative_to(ROOT).as_posix():hashlib.sha256(p.read_bytes()).hexdigest()
                          for p in source_files},
         'built_at':datetime.now(timezone.utc).isoformat(), 'python':platform.python_version(),
