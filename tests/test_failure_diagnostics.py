@@ -13,6 +13,7 @@ from src.publisher.failure_diagnostics import TaskFailureDiagnostics
 from src.publisher.event_log import PublishEventLog, make_event
 from src.publisher.multi_deploy import MultiDeployWorker
 from src.publisher.youtube import YouTubeUploader, PlatformRejected
+from src.publisher.platforms import CHANNELS, PUBLISH_ORDER
 from tests.test_youtube_publisher import account, CHANNEL_ID, VIDEO_ID
 from tests.test_multi_deploy import setup
 from tests.test_scan_cleanup_ui import panel
@@ -240,12 +241,12 @@ def test_queue_hides_unselected_platform_columns_without_reindexing_or_changing_
         check.setChecked(key in ('douyin', 'youtube'))
     panel.update_selection()
     for p in panel.panels:
-        assert p.table_queue.columnCount() == 5+len(panel.channel_checks)
-        assert [p.table_queue.isColumnHidden(c) for c in range(5, 9)] == [False, True, True, False]
-        assert p.table_queue.isColumnHidden(9)  # Unselected 微信视频号.
+        assert p.table_queue.columnCount() == 5+len(CHANNELS)
+        assert [key for key in PUBLISH_ORDER if not p.table_queue.isColumnHidden(5+PUBLISH_ORDER.index(key))] == ['douyin','youtube']
+        assert p.table_queue.isColumnHidden(5+PUBLISH_ORDER.index('wechat_channels'))
     archive_targets = list(panel.store.archive_targets)
     panel._queue_platforms = {'youtube'}  # the launch dialog may choose fewer than the checked channels
     panel.render_results()
     for p in panel.panels:
-        assert [p.table_queue.isColumnHidden(c) for c in range(5, 9)] == [True, True, True, False]
+        assert [key for key in PUBLISH_ORDER if not p.table_queue.isColumnHidden(5+PUBLISH_ORDER.index(key))] == ['youtube']
     assert panel.store.archive_targets == archive_targets
