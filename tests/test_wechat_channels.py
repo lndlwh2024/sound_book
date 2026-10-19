@@ -11,7 +11,7 @@ from playwright.sync_api import sync_playwright
 from src.publisher import creator_studio
 from src.publisher.identity import extract_platform_identity
 from src.publisher.multi_deploy import MultiDeployWorker, MultiTargetLedger, PublishTarget
-from src.publisher.platforms import CHANNELS, ChannelAccount, ChannelAccountStore
+from src.publisher.platforms import CHANNELS, PUBLISH_ORDER, ChannelAccount, ChannelAccountStore
 from src.publisher.wechat_channels import (PUBLISH_PATH, WeChatChannelsUploader,
                                           acknowledgement, publish_endpoint)
 
@@ -315,11 +315,12 @@ def test_both_editions_offer_only_two_wechat_parameters(tmp_path, standalone):
         panel = next(p for p in controller.panels if p.platform == 'wechat_channels')
         panel.settings_tabs.setCurrentIndex(1)
         app.processEvents()
-        assert [title.text() for title, _, _ in panel._field_specs] == ['短标题:', '添加到合集:']
+        assert [title.text() for title, _, _ in panel._field_specs] == ['短标题来源:', '添加到合集:']
         assert not hasattr(panel, 'description') and not hasattr(panel, 'wechat_video_label')
         assert not panel.findChildren(QScrollArea)
         assert not controller.channel_checks['wechat_channels'].isChecked()
-        assert QUEUE_HEADERS[-1] == '微信视频号' and panel.table_queue.columnCount() == 10
+        assert QUEUE_HEADERS[5+PUBLISH_ORDER.index('wechat_channels')] == '微信视频号' and panel.table_queue.columnCount() == 10
+        panel.title_source.setCurrentIndex(panel.title_source.findData('custom'))
         panel.wechat_short_title.setText('测试短标题')
         panel.collection.setText('测试合集')
         assert panel.save_current()

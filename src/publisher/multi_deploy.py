@@ -9,7 +9,7 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 from PySide6.QtCore import QThread, Signal
-from .platforms import ROOT, CHANNELS
+from .platforms import ROOT, CHANNELS, PUBLISH_ORDER
 from .douyin.daemon import is_file_fully_written
 from .media import selected_extensions, media_type
 from .douyin.uploader import DouyinUploader, compute_file_md5
@@ -176,7 +176,7 @@ class MultiDeployWorker(QThread):
     def __init__(self, targets, root=None, parent=None, uploader_factory=None, poll_seconds=300, interval_seconds=30, file_paths=None, archive_targets=None, deferred_preflight=None, history_targets=None, strict_recovery=False, task_id=None):
         super().__init__(parent)
         self.targets = [PublishTarget(t.platform, replace(t.account), t.profile)
-            for t in sorted(targets,key=lambda t:(list(CHANNELS).index(t.platform),t.account.account_id))]
+            for t in sorted(targets,key=lambda t:(PUBLISH_ORDER.index(t.platform),t.account.account_id))]
         self.root = Path(root) if root else ROOT / 'data' / 'multi_platform'
         self.strict_recovery = strict_recovery
         from .event_log import event_log

@@ -370,7 +370,7 @@ def test_default_task_factory_runs_both_real_adapters_then_archives_once(tmp_pat
     with sync_playwright() as playwright:
         records=install_local_browser(monkeypatch,playwright)
         job.run()  # No uploader_factory override: exercises the production adapter wiring.
-    assert records['calls']==['xiaohongshu','kuaishou']
+    assert records['calls']==['kuaishou','xiaohongshu']
     assert job.report['status']=='COMPLETED' and job.report['success_count']==2
     assert (tmp_path/'publiced'/source.name).exists() and not source.exists()
     digest=job.report['files'][0]['sha256']

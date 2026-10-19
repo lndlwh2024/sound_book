@@ -1,7 +1,7 @@
 """Publishing console with platform tabs below the log, and bounded UI history."""
 from PySide6.QtWidgets import QWidget,QVBoxLayout,QHBoxLayout,QPlainTextEdit,QTabBar,QStackedWidget,QPushButton
 from PySide6.QtGui import QSyntaxHighlighter,QColor,QTextCharFormat
-from ..publisher.platforms import CHANNELS
+from ..publisher.platforms import VISIBLE_CHANNELS
 from ..publisher.event_log import display_event
 
 
@@ -27,7 +27,7 @@ class PublishLogView(QWidget):
             'QTabBar::tab:selected {background:#305F88;color:white;border-color:#58A9EA;}')
         self.views={}
         self.highlighters=[]
-        for key,name in [('all','全部'),('common','公共/云盘'),*((k,c.name) for k,c in CHANNELS.items())]:
+        for key,name in [('all','全部'),('common','公共/云盘'),*((k,c.name) for k,c in VISIBLE_CHANNELS.items())]:
             self.tabs.addTab(name)
             text=QPlainTextEdit()
             text.setReadOnly(True)

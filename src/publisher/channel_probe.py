@@ -67,7 +67,8 @@ EXTRACT_JS = r'''() => {
             const r = el.getBoundingClientRect(), s = getComputedStyle(el);
             const ownHome=/^\/creator-micro\/home\/?$/.test(location.pathname) &&
                 !!el.closest('[class*="user-info"],[class*="userInfo"],[class*="user-profile"],[class*="userProfile"],[class*="account-info"],[class*="creator-info"]');
-            const profileNode=ownHome || !!el.closest('#header-avatar,#side-bar .side-bar-footer .account-info') ||
+            const ownWechat=!!el.closest('#side-bar .account-info,.side-bar-footer .account-info,.common-menu-item.account-info,aside .account-info');
+            const profileNode=ownHome || ownWechat || !!el.closest('#header-avatar,#side-bar .side-bar-footer .account-info') ||
                 el.matches('[class*="user-info"],[class*="nickname"],[class*="user-name"],[class*="userName"],[class*="user_name"]')
                 && !!el.closest('[role=menu],[role=tooltip],[class*="dropdown-content"],[class*="popover-content"]');
             const semantic=profileNode || el.matches('input,textarea,button,select,option,a[href],label,[role],[contenteditable="true"],video,progress,canvas,xhs-publish-btn,[class*="progress"],[onclick],[tabindex],[class*="button" i],[class*="btn" i]');
@@ -80,6 +81,9 @@ EXTRACT_JS = r'''() => {
                 ariaSelected:el.getAttribute('aria-selected'), href:el.getAttribute('href'),
                 ariaControls:el.getAttribute('aria-controls'), ariaDescribedby:el.getAttribute('aria-describedby'),
                 ariaOwns:el.getAttribute('aria-owns'), title:el.getAttribute('title'), alt:el.getAttribute('alt'),
+                ownAccountLabel:ownWechat ? {text:el.textContent?.trim().slice(0,200),
+                    nickname:el.getAttribute('data-nickname'),before:getComputedStyle(el,'::before').content,
+                    after:getComputedStyle(el,'::after').content} : null,
                 ariaValueMax:el.getAttribute('aria-valuemax'), className:el.getAttribute('class'),
                 disabled:el.matches(':disabled') || el.getAttribute('aria-disabled')==='true',
                 disabledAttribute:el.hasAttribute('disabled'), ariaDisabled:el.getAttribute('aria-disabled'),

@@ -42,6 +42,13 @@ def panel(tmp_path,monkeypatch):
     QCoreApplication.sendPostedEvents(None,QEvent.DeferredDelete)
 
 
+@pytest.fixture
+def all_platforms_panel(tmp_path,monkeypatch):
+    # The hidden adapter must still work when presentation is restored.
+    monkeypatch.setattr(ui,'VISIBLE_CHANNELS',CHANNELS)
+    yield from panel.__wrapped__(tmp_path,monkeypatch)
+
+
 def finish_cleanup(panel):
     deadline=time.monotonic()+5
     while panel.cleanup_worker and time.monotonic()<deadline:
@@ -162,7 +169,8 @@ def test_same_form_saves_and_reloads_common_fields(panel,index):
     assert restored.account_id==original_id and loaded.profile(restored)==original_profile
 
 
-def test_xiaohongshu_collection_uses_shared_field_and_preserves_identity(panel):
+def test_xiaohongshu_collection_uses_shared_field_and_preserves_identity(all_platforms_panel):
+    panel=all_platforms_panel
     current=panel.panels[1]
     owner=current.current()
     old_id,old_profile=owner.account_id,panel.repository.profile(owner)
@@ -237,7 +245,8 @@ def test_capture_button_is_beside_login_and_all_platforms_share_pause_controls(p
 
 
 @pytest.mark.parametrize('platform',['xiaohongshu','kuaishou'])
-def test_captured_dom_updates_form_without_bypassing_login_preflight(panel,platform,monkeypatch):
+def test_captured_dom_updates_form_without_bypassing_login_preflight(all_platforms_panel,platform,monkeypatch):
+    panel=all_platforms_panel
     import json
     from src.publisher.platforms import CHANNELS
     current=next(p for p in panel.panels if p.platform==platform)
@@ -289,10 +298,11 @@ def test_captured_dom_updates_form_without_bypassing_login_preflight(panel,platf
 
 
 @pytest.mark.parametrize('index',[1,2])
-def test_creator_title_rule_and_description_save_in_shared_account_model(panel,index):
+def test_creator_title_rule_and_description_save_in_shared_account_model(all_platforms_panel,index):
+    panel=all_platforms_panel
     current=panel.panels[index]
     current.description.setPlainText('用户配置的正文')
-    current.creator_fields['title_mode'].setCurrentIndex(1)
+    current.creator_fields['title_mode'].setCurrentIndex(current.creator_fields['title_mode'].findData('filename'))
     assert current.save_current()
     current.reload()
     assert current.current().description=='用户配置的正文'
@@ -472,7 +482,7 @@ def test_manual_cleanup_archives_completed_ignored_plan_even_when_auto_archive_d
     scanner.run()
     assert not scanner.error
     assert not path.exists() and (tmp_path/'publiced'/path.name).exists()
-    assert MultiTargetLedger(panel.store.root).result(digest,group[2].key)['status']=='IGNORED'
+    assert MultiTargetLedger(panel.store.root).result(digest,next(t for t in group if t.platform=='kuaishou').key)['status']=='IGNORED'
 
 
 

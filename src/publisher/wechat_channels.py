@@ -9,6 +9,7 @@ from urllib.parse import urlsplit
 from .channel_probe import CREATOR_NOTICES_JS, safe_url
 from .creator_studio import CreatorStudioUploader, rejection
 from .youtube import PlatformRejected
+from .titles import resolve_title
 
 
 PUBLISH_PATH = '/cgi-bin/mmfinderassistant-bin/post/post_create'
@@ -90,18 +91,20 @@ class WeChatChannelsUploader(CreatorStudioUploader):
         return button if button and self.control_usable(self.control_details(button)) else None
 
     def fill_details(self, page, video):
-        self.title = self.account.wechat_short_title.strip() or video.stem
+        try:
+            self.title = resolve_title(self.account,video.name)
+        except ValueError as error:
+            raise PlatformRejected('CONFIG_REQUIRED',str(error)) from error
         editor = self.wait(page, '等待微信视频号描述编辑区',
                            lambda: self.one_visible(page.locator(self.title_selector)), self.upload_seconds)
         # This platform deliberately has no description/title-rule setting.
         # Clear a restored form value as well, instead of posting stale content.
         self.fill_and_verify(page, editor, '', '视频描述')
-        short = self.account.wechat_short_title.strip()
-        if short:
-            control = self.wait(page, '等待微信视频号短标题', lambda: self.one_visible(
-                page.locator('input[placeholder*="短标题"]')), self.control_seconds)
-            self.fill_and_verify(page, control, short, '短标题')
-        self.log('[内容填写] 视频描述留空；短标题='+('使用已配置内容' if short else '未指定，保留平台默认'))
+        short = self.title
+        control = self.wait(page, '等待微信视频号短标题', lambda: self.one_visible(
+            page.locator('input[placeholder*="短标题"]')), self.control_seconds)
+        self.fill_and_verify(page, control, short, '短标题')
+        self.log('[内容填写] 视频描述留空；短标题='+ (short or '留空，不自动补入文件名'))
 
     def fill_and_verify(self, page, control, value, label):
         limit = control.get_attribute('maxlength')

@@ -19,6 +19,7 @@ from playwright.sync_api import sync_playwright, BrowserContext, Page
 
 from ..browser_workflow import BrowserPublishWorkflow
 from ..archive import archive_completed_file
+from ..titles import resolve_title, resolve_series
 from .models import DouyinAccountConfig, PublishLedgerRecord
 from .browser import DouyinBrowserManager, DOUYIN_UPLOAD_URL
 
@@ -82,8 +83,7 @@ def parse_video_title_and_episode(file_name: str) -> Tuple[str, str, Optional[in
 
 def resolve_publish_series(file_name: str) -> str:
     """Strip the product prefix, date and episode from the displayed series title."""
-    stem = re.sub(r'^书声[_—-]+', '', Path(file_name).stem)
-    return stem.split('_')[0].replace('《', '').replace('》', '').strip()
+    return resolve_series(file_name)
 
 
 class DouyinUploader(BrowserPublishWorkflow):
@@ -259,7 +259,11 @@ class DouyinUploader(BrowserPublishWorkflow):
 
         book_name, title, episode_num = parse_video_title_and_episode(video_path.name)
         book_name = resolve_publish_series(video_path.name)
-        title = book_name
+        try:
+            title = resolve_title(self.account, video_path.name, 'douyin')
+        except ValueError as error:
+            self.last_outcome = 'CONFIG_REQUIRED'
+            return False, str(error), None
         # 当前发布模式只填写独立标题；正文与话题保持空白。
         publish_submitted = False
         self.last_outcome = "FAILED"

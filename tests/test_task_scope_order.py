@@ -5,7 +5,7 @@ from pathlib import Path
 
 from tests.test_scan_cleanup_quota import app, media, targets, task
 from src.publisher.multi_deploy import MultiTargetLedger
-from src.publisher.platforms import CHANNELS
+from src.publisher.platforms import CHANNELS,PUBLISH_ORDER
 from src.publisher.scan_cleanup import ScanCleanupWorker
 from src.publisher.creator_studio import XiaohongshuUploader
 from src.publisher.upload_quota import DailyUploadQuota
@@ -29,7 +29,7 @@ def test_selected_success_archives_despite_old_full_plan_and_unselected_failures
     assert worker.report['source_success_count']==1
     assert worker.report['target_count']==2 and worker.report['failure_count']==0
     assert worker.report['success_count']==1 and worker.report['ignored_count']==1
-    assert worker.ledger.data['plans'][digest]['required']==[t.key for t in selected]
+    assert worker.ledger.data['plans'][digest]['required']==[t.key for t in worker.targets]
     assert worker.ledger.result(digest,group[2].key)['status']=='IGNORED'
     assert worker.ledger.result(digest,group[0].key)['status']=='FAILED2'
 
@@ -72,7 +72,7 @@ def test_file_then_fixed_platforms_then_local_retry_before_next_file(tmp_path):
             return success,'result',None
     worker=task(tmp_path/'state',list(reversed(group)),lambda t,log:Uploader(t),group)
     worker.run_batch(worker.plan_batch())
-    platforms=[*CHANNELS,'xiaohongshu']
+    platforms=[*PUBLISH_ORDER,'xiaohongshu']
     assert calls==[(name,p) for name in ('a.mp4','b.mp4') for p in platforms]
     worker.run_batch(worker.plan_batch())
     assert len(calls)==2*len(platforms)  # No completed copies/targets are transferred again.
@@ -93,7 +93,7 @@ def test_same_content_different_directories_finishes_accounts_before_next_digest
             return True,'result',None
     worker=task(tmp_path/'state',group,lambda t,log:Uploader(t))
     worker.run_batch(worker.plan_batch())
-    assert calls==[(ord(content),p) for content in ('a','z') for p in ('xiaohongshu','kuaishou')]
+    assert calls==[(ord(content),p) for content in ('a','z') for p in ('kuaishou','xiaohongshu')]
     assert len(worker.report['files'])==4
 
 

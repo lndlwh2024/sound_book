@@ -8,6 +8,7 @@ from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeo
 from .browser_workflow import BrowserPublishWorkflow
 from .channel_probe import ChannelDOMProbe
 from .douyin.uploader import resolve_publish_series
+from .titles import resolve_title
 from .youtube_browser import launch_youtube_context, google_login_rejected, GOOGLE_LOGIN_HELP, youtube_runtime_summary
 
 
@@ -203,7 +204,7 @@ class YouTubeUploader(BrowserPublishWorkflow):
         return page.locator('ytcp-uploads-dialog [role=dialog]:visible').first
 
     def fill_details(self, page, video):
-        title = resolve_publish_series(video.name) if self.account.title_mode == 'series' else video.stem
+        title = resolve_title(self.account, video.name)
         title = title[:100]
         dialog = self.dialog(page)
         # Both editors share id=textbox. Scope to the active upload dialog and accessible label.
@@ -586,7 +587,11 @@ class YouTubeUploader(BrowserPublishWorkflow):
         self.is_short=False
         self._video_selected,self._publish_armed,self._upload_activity_seen=False,False,False
         self._checkpoint_video_id=''
-        self.title=(resolve_publish_series(video.name) if self.account.title_mode=='series' else video.stem)[:100]
+        try:
+            self.title=resolve_title(self.account,video.name)[:100]
+        except ValueError as error:
+            self.last_outcome='CONFIG_REQUIRED'
+            return False,str(error),None
         try:
             self.stop_check()
             self.log('[YouTube流程 20261018.6] '+('恢复既有草稿' if self.resume_info else '上传新文件')+

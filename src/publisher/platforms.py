@@ -25,6 +25,12 @@ CHANNELS = {
     'wechat_channels': Channel('wechat_channels', '微信视频号', 'https://channels.weixin.qq.com/platform/post/create', 'channels.weixin.qq.com', True, True),
 }
 
+# Presentation and automatic entry points only. All adapters, data and history
+# continue to use CHANNELS; restoring a hidden platform needs only this setting.
+HIDDEN_CHANNELS = frozenset({'xiaohongshu'})
+PUBLISH_ORDER = ('douyin','kuaishou','wechat_channels','youtube','xiaohongshu')
+VISIBLE_CHANNELS = {key: CHANNELS[key] for key in PUBLISH_ORDER if key not in HIDDEN_CHANNELS}
+
 
 @dataclass
 class ChannelAccount:
@@ -54,6 +60,8 @@ class ChannelAccount:
     daily_upload_limit: int = 10
     drive_binding: dict = field(default_factory=dict)
     wechat_short_title: str = ''
+    title_source: str = ''
+    custom_title: str = ''
 
 
 class ChannelAccountStore:

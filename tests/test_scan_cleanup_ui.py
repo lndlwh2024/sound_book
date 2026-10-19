@@ -10,7 +10,7 @@ import pytest
 from PySide6.QtWidgets import QApplication
 from PySide6.QtCore import QTimer
 from src.app import channel_panel as ui
-from src.publisher.platforms import ChannelAccountStore
+from src.publisher.platforms import ChannelAccountStore,CHANNELS
 from src.publisher.douyin.config import DouyinAccountManager
 from src.publisher.multi_deploy import PublishTarget,MultiTargetLedger
 from src.publisher.preflight import PreflightResult
@@ -19,6 +19,9 @@ from src.publisher.upload_quota import DailyUploadQuota
 
 @pytest.fixture
 def panel(tmp_path,monkeypatch):
+    # Keep exercising the hidden adapter when its presentation is restored;
+    # current default visibility has separate coverage in publishing_options.
+    monkeypatch.setattr(ui,'VISIBLE_CHANNELS',{k:CHANNELS[k] for k in ('douyin','xiaohongshu','kuaishou','youtube')})
     app=QApplication.instance() or QApplication([])
     manager=DouyinAccountManager(tmp_path/'douyin.json',tmp_path/'profiles')
     manager.add_account('A',target_dir=str(tmp_path))

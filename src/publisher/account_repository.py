@@ -21,7 +21,8 @@ class PlatformAccountRepository:
             login_status={'AUTHORIZED':'AUTHORIZED','UNAUTHORIZED':'UNCONFIRMED'}.get(a.status,a.status),
             last_auth_time=a.last_auth_time, platform_nickname=a.platform_nickname,
             platform_uid=a.platform_uid, identity_note=a.identity_note,
-            daily_upload_limit=a.daily_upload_limit, drive_binding=dict(a.drive_binding)) for a in self.douyin_manager.get_accounts()]
+            daily_upload_limit=a.daily_upload_limit, drive_binding=dict(a.drive_binding),
+            title_source=a.title_source, custom_title=a.custom_title) for a in self.douyin_manager.get_accounts()]
 
     def profile(self, account):
         return account.profile_dir if account.platform == 'douyin' else str(self.store.profile_path(account))
@@ -46,7 +47,7 @@ class PlatformAccountRepository:
         if original is None:
             raise ValueError('账号已移除，不能保存到其他账号')
         for field in ('account_name','target_dir','media_types','enabled','auto_archive',
-                      'collection_name','default_tags','platform_nickname','platform_uid','last_auth_time','identity_note','daily_upload_limit','drive_binding'):
+                      'collection_name','default_tags','platform_nickname','platform_uid','last_auth_time','identity_note','daily_upload_limit','drive_binding','title_source','custom_title'):
             setattr(original, field, getattr(account, field))
         original.status = {'AUTHORIZED':'AUTHORIZED','USER_CONFIRMED':'USER_CONFIRMED',
                            'UNCONFIRMED':'UNAUTHORIZED'}.get(account.login_status, account.login_status)
@@ -71,4 +72,5 @@ class PlatformAccountRepository:
             status='AUTHORIZED' if account.login_status in ('AUTHORIZED','USER_CONFIRMED') else 'UNAUTHORIZED',
             platform_nickname=account.platform_nickname, platform_uid=account.platform_uid,
             last_auth_time=account.last_auth_time, identity_note=account.identity_note,
-            daily_upload_limit=account.daily_upload_limit, drive_binding=dict(account.drive_binding))
+            daily_upload_limit=account.daily_upload_limit, drive_binding=dict(account.drive_binding),
+            title_source=account.title_source, custom_title=account.custom_title)

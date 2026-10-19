@@ -43,6 +43,7 @@ class PreflightResult:
     name: str
     status: str
     message: str
+    identity: dict | None = None
 
     @property
     def passed(self):
@@ -80,8 +81,13 @@ def prerequisite_results(targets, report_root):
             available = False
         if not available:
             problems.append('缺少该账号的浏览器登录目录。请点击“登录 / 获取平台昵称”完成登录。')
-        if target.platform in ('xiaohongshu', 'kuaishou', 'wechat_channels') and not (target.account.platform_nickname or '').strip():
+        if target.platform in ('xiaohongshu', 'kuaishou') and not (target.account.platform_nickname or '').strip():
             problems.append('尚未绑定实际昵称。请点击“登录 / 获取平台昵称”读取并保存本人账号。')
+        try:
+            from .titles import resolve_title
+            resolve_title(target.account,'配置校验.mp4',target.platform)
+        except ValueError as error:
+            problems.append(str(error))
         if target.platform == 'youtube' and not re.fullmatch(r'UC[\w-]{22}', target.account.channel_id):
             problems.append('请登录并保存正确的 YouTube 频道 ID。')
         if problems:
@@ -133,7 +139,17 @@ class AccountPreflight(BrowserPublishWorkflow):
         if self.target.platform == 'youtube':
             # Channel ID is the stable identity; remarks/nicknames may differ.
             YouTubeUploader.verify_channel(self, page, self.seconds)
-        elif self.target.platform in ('xiaohongshu', 'kuaishou', 'wechat_channels'):
+        elif self.target.platform == 'wechat_channels':
+            identity=self.wait(page,'读取微信视频号左下角本人账号',
+                lambda:extract_platform_identity(page,'wechat_channels'),self.seconds)
+            if not self.account.platform_nickname:
+                self.account.platform_nickname=identity['nickname']
+                self.account.account_name=identity['nickname']
+                self.account.login_status='AUTHORIZED'
+                self.found_identity=identity
+                self.log('[账号识别] 已从当前独立登录会话读取本人昵称：'+identity['nickname']+'；未选择或上传文件')
+            CreatorStudioUploader.verify_identity(self,page)
+        elif self.target.platform in ('xiaohongshu', 'kuaishou'):
             CreatorStudioUploader.verify_identity(self, page)
         else:
             # The current Douyin header hides its name in the avatar menu.
@@ -194,7 +210,8 @@ class AccountPreflight(BrowserPublishWorkflow):
             self.verify_page(page)
             self._check_stop()
             passed = True
-            return PreflightResult(self.target.key, target_name(self.target), 'SUCCESS', '当前登录与发布页访问检查通过')
+            return PreflightResult(self.target.key, target_name(self.target), 'SUCCESS', '当前登录与发布页访问检查通过',
+                                   getattr(self,'found_identity',None))
         except PlatformRejected as error:
             return PreflightResult(self.target.key, target_name(self.target), error.status, str(error))
         except UploadStopped:

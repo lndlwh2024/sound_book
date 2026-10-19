@@ -18,6 +18,74 @@ IDENTITY_SELECTORS = {
     'wechat_channels': ['#side-bar .side-bar-footer .account-info .name'],
 }
 
+# Read only the signed-in sidebar card. The current shell also uses a common
+# menu account card; text can be painted by display:contents or CSS content.
+WECHAT_IDENTITY_JS = r'''() => {
+    const prohibited=e=>!!e.closest('article,main,[contenteditable=true],'
+        +'[class*="share-video"],[class*="changeAccount"],[role=dialog]');
+    const visible=e=>{
+        for(let n=e;n;n=n.parentElement||n.getRootNode()?.host){
+            const s=getComputedStyle(n);
+            if(s.display==='none'||s.visibility==='hidden'||n.getAttribute('aria-hidden')==='true')return false;
+        }
+        if([...e.getClientRects()].some(r=>r.width>0&&r.height>0))return true;
+        const range=document.createRange();range.selectNodeContents(e);
+        return [...range.getClientRects()].some(r=>r.width>0&&r.height>0);
+    };
+    if([...document.querySelectorAll('input[type=password]')].some(visible))return null;
+    const selectors=['#side-bar .side-bar-footer .account-info',
+        '#side-bar .account-info','.side-bar-footer .account-info',
+        '.common-menu-item.account-info','aside .account-info'];
+    const roots=[...new Set(selectors.flatMap(s=>[...document.querySelectorAll(s)]))]
+        .filter(e=>!prohibited(e)&&visible(e));
+    const clean=t=>(t||'').trim();
+    const valid=t=>t&&t.length<=60&&!t.includes('\n')&&/[\p{L}\p{N}]/u.test(t)
+        &&!(/^(?:切换视频号|取消切换|切换|取消|登录|扫码登录|退出登录|账号设置|视频号.*助手|[>›»])$/.test(t));
+    const pseudo=(e,p)=>{
+        const content=getComputedStyle(e,p).content;
+        if(!content||content==='none'||content==='normal')return '';
+        try{return JSON.parse(content)}catch{return ''}
+    };
+    const names=[];
+    for(const root of roots){
+        const rect=root.getBoundingClientRect();
+        const legacy=!!root.closest('#side-bar .side-bar-footer');
+        if(!legacy&&(![...root.querySelectorAll('img')].some(visible)
+            ||rect.left>Math.min(450,innerWidth*.4)||rect.width>500))continue;
+        const candidates=[...root.querySelectorAll('.name,.nickname,.account-name,.user-name,'
+            +'[class*="nick-name"],[class*="nickname"],[class*="account-name"],'
+            +'[class*="user-name"],[data-nickname]')].filter(e=>!prohibited(e)&&visible(e));
+        let found=[];
+        for(const e of candidates){
+            const values=[clean(e.innerText)||clean(e.textContent),pseudo(e,'::before'),pseudo(e,'::after'),
+                e.getAttribute('data-nickname'),e.getAttribute('title'),e.getAttribute('aria-label')]
+                .map(clean).filter(valid);
+            found.push(...values);
+        }
+        if(!found.length){
+            // Direct visible text in the avatar card, excluding account-switch
+            // dialogs and nested author/editor areas, never the entire sidebar.
+            const walker=document.createTreeWalker(root,NodeFilter.SHOW_TEXT);
+            for(const e of root.querySelectorAll('*')){
+                if(prohibited(e)||!visible(e)||e.matches('img,svg,[class*="icon"]'))continue;
+                for(const text of [pseudo(e,'::before'),pseudo(e,'::after')].map(clean)){
+                    if(valid(text))found.push(text);
+                }
+            }
+            for(let node=walker.nextNode();node;node=walker.nextNode()){
+                const owner=node.parentElement;
+                if(owner&&!prohibited(owner)&&visible(owner)){
+                    const text=clean(node.textContent);if(valid(text))found.push(text);
+                }
+            }
+        }
+        names.push(...found);
+    }
+    const unique=[...new Set(names)];
+    return unique.length===1?{nickname:unique[0],source:'wechat-sidebar-own-account'}:
+        unique.length>1?{ambiguous:true}:null;
+}'''
+
 # The current creator centre shows only #header-avatar until its account menu
 # is hovered. Read only that menu (including a portal explicitly owned by it).
 DOUYIN_AVATAR_IDENTITY_JS = r'''() => {
@@ -104,6 +172,8 @@ def extract_platform_identity(page, platform):
         return None
     if platform == 'wechat_channels' and not address.path.startswith('/platform/'):
         return None  # The official /login.html is on the same host.
+    if platform == 'wechat_channels':
+        return _identity(page.evaluate(WECHAT_IDENTITY_JS),page,platform)
     if platform == 'douyin':
         result = page.evaluate(DOUYIN_AVATAR_IDENTITY_JS)
         if isinstance(result, dict) and result.get('ambiguous'):

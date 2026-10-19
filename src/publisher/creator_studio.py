@@ -13,6 +13,7 @@ from .douyin.uploader import resolve_publish_series
 from .identity import extract_platform_identity
 from .media import media_type
 from .platforms import CHANNELS
+from .titles import resolve_title
 from .status import ACCOUNT_RESTRICTION
 from .youtube import UploadStopped, PlatformRejected
 
@@ -354,7 +355,10 @@ class CreatorStudioUploader(BrowserPublishWorkflow):
         return self.wait(page,'等待视频上传入口',find)
 
     def fill_details(self,page,video):
-        self.title=video.stem if self.account.title_mode=='filename' else resolve_publish_series(video.name)
+        try:
+            self.title=resolve_title(self.account,video.name)
+        except ValueError as error:
+            raise PlatformRejected('CONFIG_REQUIRED',str(error)) from error
         title=self.wait(page,'等待作品编辑区',lambda:self.one_visible(page.locator(self.title_selector)),self.upload_seconds)
         content=self.title+('\n'+self.account.description if self.combined_description and self.account.description else '')
         limit=title.get_attribute('maxlength')

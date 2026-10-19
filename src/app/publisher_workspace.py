@@ -9,7 +9,7 @@ from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, Q
     QPushButton, QDialog, QCheckBox, QDialogButtonBox, QMessageBox, QComboBox,
     QTabWidget, QGridLayout, QGroupBox, QSpinBox, QSystemTrayIcon, QMenu, QStyle)
 from .channel_panel import MultiPlatformPublisherPanel
-from ..publisher.platforms import ChannelAccountStore, CHANNELS
+from ..publisher.platforms import ChannelAccountStore, CHANNELS, VISIBLE_CHANNELS
 from ..publisher.douyin.config import DouyinAccountManager
 from ..publisher.portable import RunState, StorageBudget
 from ..publisher.multi_deploy import MultiTargetLedger
@@ -339,6 +339,9 @@ class PublisherPanel(MultiPlatformPublisherPanel):
             return
         if any(panel.dialog and panel.dialog.worker.isRunning() for panel in self.panels):
             self.schedule_retry()
+            return
+        if any(key.split(':',1)[0] not in VISIBLE_CHANNELS for key in self.state.targets):
+            self.show_status('原任务含已隐藏的平台，自动恢复已暂停；请重新选择当前可见平台后启动部署')
             return
         targets = {t.key: t for t in self.all_targets()}
         if any(key not in targets for key in self.state.targets):

@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QCheck
     QPlainTextEdit, QGroupBox, QSplitter, QTableWidget, QTableWidgetItem,
     QGridLayout, QSpinBox, QTabWidget, QButtonGroup,QStyledItemDelegate)
 from ..publisher.platforms import CHANNELS
+from ..publisher.titles import TITLE_SOURCES, title_source, custom_title
 from ..publisher.media import MEDIA_TYPES, media_type
 from ..publisher.dom_readiness import publishing_dom_state as account_dom_state
 
@@ -253,13 +254,31 @@ class PlatformAccountPanel(QWidget):
             field('频道 ID:',self.channel_id,True)
         self.youtube_fields = {}
         self.creator_fields = {}
+        def title_control():
+            row=QWidget()
+            layout=QHBoxLayout(row)
+            layout.setContentsMargins(0,0,0,0)
+            layout.setSpacing(5)
+            self.title_source=QComboBox()
+            for label,value in TITLE_SOURCES:
+                self.title_source.addItem(label,value)
+            self.title_source.setToolTip('空：清空标题，不自动补入文件名；平台要求必填时会提示配置未完成')
+            self.custom_title=QLineEdit()
+            self.custom_title.setPlaceholderText('填写自定义标题')
+            self.title_source.currentIndexChanged.connect(
+                lambda _:self.custom_title.setVisible(self.title_source.currentData()=='custom'))
+            layout.addWidget(self.title_source,1)
+            layout.addWidget(self.custom_title,2)
+            self.custom_title.hide()
+            return row
         if platform == 'douyin':
             self.collection = QLineEdit()
-            self.tags = QLineEdit()
+            self.tags = QLineEdit(self)
             self.collection.setPlaceholderText('留空使用系列名称')
             self.tags.setToolTip('当前仅标题发布，不自动填写正文')
             field('合集:',self.collection)
-            field('话题标签:',self.tags)
+            self.tags.hide()  # Retain stored tags; the current uploader does not fill topics.
+            field('标题来源:',title_control(),True)
         elif platform == 'youtube':
             self.playlist = QLineEdit()
             self.description = QPlainTextEdit()
@@ -269,33 +288,33 @@ class PlatformAccountPanel(QWidget):
             field('说明:',self.description,True)
             field('播放列表:',self.playlist,True)
             for key,label,options in [
-                ('title_mode','标题规则',[('系列名称','series'),('文件名称','filename')]),
+                ('title_mode','标题来源',TITLE_SOURCES),
                 ('visibility','公开范围',[('公开','public'),('不公开列出','unlisted'),('私享','private')]),
                 ('made_for_kids','是否面向儿童',[('请选择',None),('不面向儿童',False),('面向儿童',True)]),
                 ('altered_content','AI内容声明',[('默认使用AI',None),('是，使用了AI',True),('否，未使用AI',False)]),
                 ('thumbnail_mode','缩略图',[('平台默认','platform_default'),('视频内置帧','video_frame')])]:
+                if key=='title_mode':
+                    field(label+':',title_control(),True)
+                    self.youtube_fields[key]=self.title_source
+                    continue
                 combo = QComboBox()
                 for text,value in options:
                     combo.addItem(text,value)
                 field(label+':',combo)
                 self.youtube_fields[key] = combo
         elif platform == 'wechat_channels':
-            self.wechat_short_title = QLineEdit()
-            self.wechat_short_title.setPlaceholderText('可选；按页面长度限制填写')
             self.collection = QLineEdit()
             self.collection.setPlaceholderText('留空保留网页默认')
-            field('短标题:',self.wechat_short_title,True)
+            field('短标题来源:',title_control(),True)
+            self.wechat_short_title=self.custom_title
             field('添加到合集:',self.collection,True)
         else:
             self.description = QPlainTextEdit()
             self.description.setFixedHeight(36)
             self.description.setPlaceholderText('留空不自动填写')
             field('正文:',self.description,True)
-            title_mode = QComboBox()
-            title_mode.addItem('系列名称','series')
-            title_mode.addItem('文件名称','filename')
-            self.creator_fields['title_mode'] = title_mode
-            field('标题规则:',title_mode)
+            field('标题来源:',title_control(),True)
+            self.creator_fields['title_mode'] = self.title_source
             if platform == 'xiaohongshu':
                 self.collection = QLineEdit()
                 self.collection.setPlaceholderText('留空使用系列名称')
@@ -556,7 +575,11 @@ class PlatformAccountPanel(QWidget):
         if self.platform in ('xiaohongshu','wechat_channels'):
             self.collection.setText(account.collection_name if account else '')
         if self.platform=='wechat_channels':
-            self.wechat_short_title.setText(account.wechat_short_title if account else '')
+            self.wechat_short_title.setText(custom_title(account) if account else '')
+        mode=title_source(account,self.platform) if account else ('empty' if self.platform=='wechat_channels' else 'series')
+        self.title_source.setCurrentIndex(max(0,self.title_source.findData(mode)))
+        self.custom_title.setText(custom_title(account) if account else '')
+        self.custom_title.setVisible(mode=='custom')
         for control in (self.settings_tabs,self.save_button,self.login_button,self.capture_button,self.delete_account_button):
             control.setEnabled(account is not None)
         if hasattr(self,'nickname_button'):
@@ -600,6 +623,8 @@ class PlatformAccountPanel(QWidget):
         account.enabled,account.auto_archive = self.enabled.isChecked(),self.auto_archive.isChecked()
         account.daily_upload_limit=self.daily_limit.value()
         account.drive_binding=self.drive.value()
+        account.title_source=self.title_source.currentData()
+        account.custom_title=self.custom_title.text().strip()
         if self.platform=='douyin':
             account.collection_name,account.default_tags = self.collection.text().strip(),self.tags.text().split()
         if self.platform=='youtube':
@@ -767,10 +792,10 @@ class PlatformAccountPanel(QWidget):
         uid = identity.get('channel_id') or identity.get('platform_uid','')
         if self.platform=='youtube' and not re.fullmatch(r'UC[\w-]{22}',uid):
             self.logs.appendPlainText('尚未读到实际 YouTube 频道ID；未保存为已登录，请先进入正确频道再读取昵称')
-            return
+            return False
         if self.platform=='youtube' and account.channel_id and uid and account.channel_id!=uid:
             self.logs.appendPlainText('实际频道与已绑定ID不同，未覆盖账号身份，请手工核对')
-            return
+            return False
         account.platform_nickname = identity['nickname']
         account.account_name = identity['nickname']
         account.platform_uid = uid or account.platform_uid
@@ -782,13 +807,14 @@ class PlatformAccountPanel(QWidget):
             self.repository.save(account)
         except (OSError,ValueError) as error:
             self.logs.appendPlainText(f'昵称已识别但保存失败：{error}')
-            return
+            return False
         index=self.accounts.findData(account.account_id)
         if index>=0: self.accounts.setItemText(index,self.account_label(account))
         self._accounts = [account if a.account_id==account.account_id else a for a in self._accounts]
         self.logs.appendPlainText(f'[平台昵称] 已获取：{identity["nickname"]}；账号ID与浏览器目录保持原值')
         if self.current() and self.current().account_id==account.account_id:
             self.load_current()
+        return True
 
     def open_probe(self):
         from .channel_panel import ChannelProbeDialog

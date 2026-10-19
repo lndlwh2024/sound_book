@@ -20,7 +20,7 @@ from playwright._impl._errors import TargetClosedError
 
 from .platform_account_panel import PlatformAccountPanel as ChannelAccountPanel
 from ..publisher.account_repository import PlatformAccountRepository
-from ..publisher.platforms import CHANNELS, ChannelAccountStore, deployment_block_reason
+from ..publisher.platforms import CHANNELS, VISIBLE_CHANNELS, PUBLISH_ORDER, ChannelAccountStore, deployment_block_reason
 from ..publisher.channel_probe import ChannelDOMProbe, STAGES, safe_url
 from ..publisher.multi_deploy import PublishTarget, MultiDeployWorker
 from ..publisher.identity import extract_platform_identity, refresh_platform_identity, identity_read_failure, read_homepage_identity
@@ -34,7 +34,7 @@ from ..publisher.youtube_browser import (launch_youtube_context, start_manual_lo
     google_login_rejected, GOOGLE_LOGIN_HELP, youtube_runtime_summary,
     manual_browser_open, ManualBrowserHandoff)
 
-QUEUE_HEADERS = ['序号', '文件名', '类型', '文件大小', '修改时间', *(channel.name for channel in CHANNELS.values())]
+QUEUE_HEADERS = ['序号', '文件名', '类型', '文件大小', '修改时间', *(CHANNELS[key].name for key in PUBLISH_ORDER)]
 
 
 class QueueSnapshotWorker(QThread):
@@ -531,7 +531,7 @@ class MultiPlatformPublisherPanel(QWidget):
         channel_layout.setContentsMargins(0, 0, 0, 0)
         channel_row = QHBoxLayout()
         self.channel_checks = {}
-        for key, channel in CHANNELS.items():
+        for key, channel in VISIBLE_CHANNELS.items():
             check = QCheckBox(channel.name)
             check.setChecked(key in self.store.selected_channels)
             check.toggled.connect(self.update_selection)
@@ -539,7 +539,7 @@ class MultiPlatformPublisherPanel(QWidget):
             channel_row.addWidget(check)
         channel_layout.addLayout(channel_row)
         self.channel_view = QComboBox()
-        for key, channel in CHANNELS.items():
+        for key, channel in VISIBLE_CHANNELS.items():
             self.channel_view.addItem(channel.name, key)
         self.channel_view.setToolTip('切换平台配置；发布渠道由下方复选框选择')
         self.channel_view.hide()
@@ -551,7 +551,7 @@ class MultiPlatformPublisherPanel(QWidget):
         self.douyin = ChannelAccountPanel('douyin', self.store, self)
         self.stack.addWidget(self.douyin)
         self.new_panels = []
-        for key in list(CHANNELS)[1:]:
+        for key in list(VISIBLE_CHANNELS)[1:]:
             panel = ChannelAccountPanel(key, self.store, self)
             self.new_panels.append(panel)
             self.stack.addWidget(panel)
@@ -794,7 +794,7 @@ class MultiPlatformPublisherPanel(QWidget):
         self._queue_platforms = set(selected)
         self.render_results()
         if selected != self.store.selected_channels and not self.store.load_error:
-            self.store.selected_channels = selected
+            self.store.selected_channels = [*selected,*(k for k in self.store.selected_channels if k not in VISIBLE_CHANNELS)]
             try:
                 self.store.save()
             except Exception as error:
@@ -955,7 +955,7 @@ class MultiPlatformPublisherPanel(QWidget):
 
     def all_targets(self):
         return [PublishTarget(key,self.repository.publish_account(account),self.repository.profile(account))
-            for key in CHANNELS for account in self.repository.accounts(key) if account.enabled and account.target_dir]
+            for key in VISIBLE_CHANNELS for account in self.repository.accounts(key) if account.enabled and account.target_dir]
 
     def archive_group(self):
         selected=self.selected_channels()
@@ -1110,6 +1110,21 @@ class MultiPlatformPublisherPanel(QWidget):
             self.show_status('部署前检查已取消；未启动部署、未上传文件')
             self.refresh_queues()
             return
+        for result in results:
+            if not result.passed or not result.identity:
+                continue
+            target=next((t for t in targets if t.key==result.key),None)
+            panel=next((p for p in self.panels if target and p.platform==target.platform),None)
+            account=next((a for a in self.repository.accounts(target.platform)
+                          if a.account_id==target.account.account_id),None) if target else None
+            if not panel or not account or not panel.apply_identity(account,result.identity):
+                self.show_status('昵称读取成功但未能保存到原账号，部署未启动；请检查配置')
+                return
+            for planned in getattr(self,'_all_deployment_targets',targets):
+                if planned.key==target.key:
+                    planned.account.platform_nickname=account.platform_nickname
+                    planned.account.account_name=account.account_name
+                    planned.account.login_status=account.login_status
         reason = failure_message(results)
         if not reason and {r.key for r in results if r.passed} != {t.key for t in targets}:
             reason = '部署前检查未全部完成，请检查网络与浏览器会话后重试；本次部署未启动。'
@@ -1336,8 +1351,8 @@ class MultiPlatformPublisherPanel(QWidget):
         if not hasattr(self,'panels'):
             return
         for panel in self.panels:
-            for column, platform in enumerate(CHANNELS, 5):
-                panel.table_queue.setColumnHidden(column, platform not in getattr(self, '_queue_platforms', self.selected_channels()))
+            for column, platform in enumerate(PUBLISH_ORDER, 5):
+                panel.table_queue.setColumnHidden(column, platform not in VISIBLE_CHANNELS or platform not in getattr(self, '_queue_platforms', self.selected_channels()))
             account=panel.current()
             if not account:
                 continue
@@ -1350,7 +1365,7 @@ class MultiPlatformPublisherPanel(QWidget):
                 signature=name.data(Qt.UserRole+1)
                 if result and signature and (result.get('size_bytes')!=signature[0] or result.get('mtime_ns') not in (None,signature[1])):
                     result={}
-                for column,platform in enumerate(CHANNELS,5):
+                for column,platform in enumerate(PUBLISH_ORDER,5):
                     selected=next((p.current() for p in self.panels if p.platform==platform),None)
                     key=platform+':'+selected.account_id if selected else ''
                     entry=result.get('results',{}).get(key,{})
