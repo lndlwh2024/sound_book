@@ -110,7 +110,7 @@ def test_success_words_in_description_or_list_are_not_receipts(browser_page, tmp
     assert instance.success_notice(browser_page) is not None
 
 
-def install_browser(monkeypatch, playwright, records, mode):
+def install_browser(monkeypatch, playwright, records, mode, avatar_only=False):
     manager = MagicMock()
     manager.__enter__.return_value = playwright
     monkeypatch.setattr(creator_studio, 'sync_playwright', lambda: manager)
@@ -130,6 +130,9 @@ def install_browser(monkeypatch, playwright, records, mode):
                                      else {'errCode': 17, 'message': '发表失败，服务异常'} if mode == 'reject' else {}))
             else:
                 body = HTML.replace('本人视频号</span>', '错误视频号</span>') if mode == 'identity' else HTML
+                if avatar_only:
+                    body=body.replace('<img><span class="name">本人视频号</span>',
+                        '<img class="avatar" style="width:32px;height:32px">')
                 request.fulfill(body=body, content_type='text/html; charset=utf-8')
         context.route('**/*', route)
         return context
@@ -242,9 +245,13 @@ def test_saved_proof_bound_to_account_and_official_submission(tmp_path):
 
 
 @pytest.mark.parametrize('mode', ['success', 'unknown'])
-def test_worker_restart_never_reuploads_success_or_unknown_submission(tmp_path, monkeypatch, mode):
+@pytest.mark.parametrize('custom',[False,True])
+def test_worker_restart_never_reuploads_success_or_unknown_submission(tmp_path, monkeypatch, mode, custom):
     records = []
     account = owner()
+    if custom:
+        account.platform_nickname=''
+        account.custom_nickname='本地显示名'
     directory = tmp_path/'media'
     directory.mkdir()
     video = directory/'test.mp4'
@@ -253,7 +260,7 @@ def test_worker_restart_never_reuploads_success_or_unknown_submission(tmp_path, 
     account.target_dir = str(directory)
     target = PublishTarget(account.platform, account, str(tmp_path/'profile'))
     with sync_playwright() as playwright:
-        install_browser(monkeypatch, playwright, records, mode)
+        install_browser(monkeypatch, playwright, records, mode, avatar_only=custom)
         def factory(target, log):
             instance = adapter(target.account, tmp_path)
             instance.log = log

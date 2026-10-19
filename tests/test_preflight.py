@@ -165,6 +165,7 @@ def test_preflight_closes_each_profile_before_producing_a_result(tmp_path,monkey
     checker = preflight.AccountPreflight(chosen)
     playwright = MagicMock()
     context = playwright.chromium.launch_persistent_context.return_value
+    context.browser.is_connected.return_value=False
     context.pages = [MagicMock()]
     monkeypatch.setattr(checker,'verify_page',lambda page:None)
     result = checker.check(playwright)
@@ -178,6 +179,7 @@ def test_missing_media_codecs_blocks_before_navigation_or_upload(tmp_path,monkey
     checker=preflight.AccountPreflight(target(tmp_path))
     playwright=MagicMock()
     context=playwright.chromium.launch_persistent_context.return_value
+    context.browser.is_connected.return_value=False
     page=MagicMock();page.evaluate.return_value=dict(h264=False,aac=False)
     context.pages=[page]
     verify=MagicMock();monkeypatch.setattr(checker,'verify_page',verify)
@@ -203,7 +205,7 @@ def test_missing_prerequisites_never_launches_browser_or_creates_task_state(tmp_
     assert not (tmp_path/'publish_reports').exists()
 
 
-def test_all_selected_accounts_checked_and_one_failure_blocks_the_whole_plan(tmp_path,monkeypatch):
+def test_one_failure_blocks_whole_plan_without_opening_later_platforms(tmp_path,monkeypatch):
     chosen = [target(tmp_path,p) for p in CHANNELS]
     for t in chosen:
         capture(tmp_path,t)
@@ -217,7 +219,7 @@ def test_all_selected_accounts_checked_and_one_failure_blocks_the_whole_plan(tmp
     worker = preflight.DeploymentPreflightWorker(chosen,tmp_path)
     chosen[0].account.account_name='检查中改备注'
     worker.run()
-    assert calls == [t.key for t in chosen]
+    assert calls == [t.key for t in chosen[:3]]
     assert '快手 / 备注' in preflight.failure_message(worker.results)
     assert worker.targets[0].account.account_name=='备注'
     assert not (tmp_path/'target_ledger.json').exists()

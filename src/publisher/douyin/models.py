@@ -29,6 +29,7 @@ class DouyinAccountConfig:
     created_at: str = field(default_factory=lambda: time.strftime("%Y-%m-%d %H:%M:%S"))
     collection_name: str = ""
     platform_nickname: str = ""
+    custom_nickname: str = ""
     platform_uid: str = ""
     identity_note: str = ""
     daily_upload_limit: int = 10
@@ -55,6 +56,7 @@ class DouyinAccountConfig:
             created_at=data.get("created_at", time.strftime("%Y-%m-%d %H:%M:%S")),
             collection_name=data.get("collection_name", ""),
             platform_nickname=data.get("platform_nickname", ""),
+            custom_nickname=data.get("custom_nickname", ""),
             platform_uid=data.get("platform_uid", ""),
             identity_note=data.get("identity_note", ""),
             daily_upload_limit=data.get("daily_upload_limit", 10),

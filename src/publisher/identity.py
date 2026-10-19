@@ -4,6 +4,61 @@ import time
 from urllib.parse import urlsplit
 from .platforms import CHANNELS
 
+
+def validated_custom_nickname(value):
+    value = str(value).strip()
+    if not value or len(value) > 60 or any(ord(c) < 32 or ord(c) == 127 for c in value):
+        raise ValueError('请输入 1–60 个字符的昵称，不包含换行或控制字符')
+    return value
+
+
+def protected_upload_access(page, platform):
+    """Read-only proof of a live upload form in this account's isolated profile.
+
+    A user label is not an authentication credential. Hidden file inputs are
+    normal; the enabled video control plus the visible platform form must exist.
+    Prefer the main page, which already pierces open shadow roots in Wujie.
+    """
+    address = urlsplit(page.url)
+    channel = CHANNELS[platform]
+    if (address.scheme != 'https' or address.hostname != channel.host
+            or re.search(r'/(?:login|signin)(?:/|$)', address.path, re.I)):
+        return False
+    if platform == 'wechat_channels' and address.path.rstrip('/') != '/platform/post/create':
+        return False
+    selector = 'input[type=file][accept*="video"], input[type=file][accept*=".mp4"]'
+    scopes = [page]
+    if not page.locator(selector).count():
+        scopes += [frame for frame in page.frames if frame != page.main_frame
+                   and urlsplit(frame.url).hostname == channel.host]
+    for scope in scopes:
+        if scope.locator('input[type=password]:visible').count():
+            return False
+        prompts=scope.get_by_text(re.compile(r'^(?:立即登录|扫码登录|请先登录|登录创作者中心|Sign in)$'))
+        if any(prompts.nth(i).is_visible() for i in range(prompts.count())):
+            return False
+        inputs = scope.locator(selector)
+        if inputs.count() != 1 or not inputs.is_enabled() or not inputs.evaluate(
+                "e=>e.isConnected&&!e.closest('[aria-disabled=true]')"):
+            continue
+        if platform == 'wechat_channels':
+            editor = scope.locator('input[placeholder*="短标题"]:visible')
+            avatar = page.locator('.common-menu-item.account-info img.avatar:visible, #side-bar .side-bar-footer .account-info img:visible')
+            if not avatar.count():
+                continue
+        elif platform in ('kuaishou','xiaohongshu'):
+            # Their title editors appear only after choosing a video. Login
+            # checks must stay read-only and must not wait for that later form.
+            own_avatar=page.locator('header [class*="avatar"]:visible, '
+                '[class*="user-info"] img:visible, [class*="userInfo"] img:visible')
+            return bool(address.path.rstrip('/') == urlsplit(channel.url).path.rstrip('/')
+                        and (extract_platform_identity(page,platform) or own_avatar.count()))
+        else:
+            return address.path.rstrip('/') == urlsplit(channel.url).path.rstrip('/')
+        if editor.count() == 1 and editor.is_enabled():
+            return True
+    return False
+
 IDENTITY_SELECTORS = {
     'douyin': ['#header-avatar [class*="nickname"]', '#header-avatar [class*="user-name"]',
                '#header-avatar [class*="userName"]', '#header-avatar [class*="user_name"]',
@@ -21,8 +76,18 @@ IDENTITY_SELECTORS = {
 # Read only the signed-in sidebar card. The current shell also uses a common
 # menu account card; text can be painted by display:contents or CSS content.
 WECHAT_IDENTITY_JS = r'''() => {
-    const prohibited=e=>!!e.closest('article,main,[contenteditable=true],'
-        +'[class*="share-video"],[class*="changeAccount"],[role=dialog]');
+    const scopes=[document];
+    for(const scope of scopes)for(const e of scope.querySelectorAll('*')){
+        if(e.shadowRoot)scopes.push(e.shadowRoot);
+    }
+    const query=selector=>scopes.flatMap(scope=>[...scope.querySelectorAll(selector)]);
+    const prohibited=e=>{
+        for(let n=e;n;n=n.getRootNode()?.host){
+            if(n.closest('article,main,[contenteditable=true],'
+                +'[class*="share-video"],[class*="changeAccount"],[role=dialog]'))return true;
+        }
+        return false;
+    };
     const visible=e=>{
         for(let n=e;n;n=n.parentElement||n.getRootNode()?.host){
             const s=getComputedStyle(n);
@@ -32,11 +97,11 @@ WECHAT_IDENTITY_JS = r'''() => {
         const range=document.createRange();range.selectNodeContents(e);
         return [...range.getClientRects()].some(r=>r.width>0&&r.height>0);
     };
-    if([...document.querySelectorAll('input[type=password]')].some(visible))return null;
+    if(query('input[type=password]').some(visible))return null;
     const selectors=['#side-bar .side-bar-footer .account-info',
         '#side-bar .account-info','.side-bar-footer .account-info',
         '.common-menu-item.account-info','aside .account-info'];
-    const roots=[...new Set(selectors.flatMap(s=>[...document.querySelectorAll(s)]))]
+    const roots=[...new Set(selectors.flatMap(query))]
         .filter(e=>!prohibited(e)&&visible(e));
     const clean=t=>(t||'').trim();
     const valid=t=>t&&t.length<=60&&!t.includes('\n')&&/[\p{L}\p{N}]/u.test(t)

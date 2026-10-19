@@ -62,6 +62,7 @@ class ChannelAccount:
     wechat_short_title: str = ''
     title_source: str = ''
     custom_title: str = ''
+    custom_nickname: str = ''
 
 
 class ChannelAccountStore:

@@ -7,7 +7,7 @@ from pathlib import Path
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QColor,QPalette
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QCheckBox, QComboBox,
-    QLineEdit, QPushButton, QFileDialog, QMessageBox,
+    QLineEdit, QPushButton, QFileDialog, QMessageBox, QInputDialog, QDialog,
     QPlainTextEdit, QGroupBox, QSplitter, QTableWidget, QTableWidgetItem,
     QGridLayout, QSpinBox, QTabWidget, QButtonGroup,QStyledItemDelegate)
 from ..publisher.platforms import CHANNELS
@@ -109,11 +109,12 @@ class PlatformAccountPanel(QWidget):
         self.account_status.setWordWrap(True)
         listing_layout.addWidget(self.account_status)
         buttons = QHBoxLayout()
-        for label, callback in [('添加账号',self.add_account),('删除账号',self.delete_account)]:
+        for label, callback in [('添加账号',self.add_account),('删除账号',self.delete_account),('自定义昵称',self.set_custom_nickname)]:
             button = QPushButton(label)
             button.clicked.connect(callback)
             button.setEnabled(not self.repository.error(platform))
             if label=='删除账号': self.delete_account_button=button
+            if label=='自定义昵称': self.custom_nickname_button=button
             buttons.addWidget(button)
         listing_layout.addLayout(buttons)
         account_layout.addWidget(listing)
@@ -452,7 +453,9 @@ class PlatformAccountPanel(QWidget):
 
     def account_label(self, account):
         state = '已登录' if account.login_status=='AUTHORIZED' else '登录已确认' if account.login_status=='USER_CONFIRMED' else '未核对'
-        name = account.platform_nickname or account.account_name
+        name = account.custom_nickname or account.platform_nickname or account.account_name
+        if account.custom_nickname:
+            name += '（自定义）'
         if not account.platform_nickname and name in ('新账号（待登录）','新账号(待登录)','新账号'):
             name = '新账号 · 昵称待读取' if account.login_status in ('AUTHORIZED','USER_CONFIRMED') else '新账号'
         return f'{name} [{state}]'+(' · 已关闭' if not account.enabled else '')
@@ -540,7 +543,8 @@ class PlatformAccountPanel(QWidget):
         self.directory.setText(account.target_dir if account else '')
         self.directory.blockSignals(blocked)
         self.identity.setText(account.identity_note or account.platform_uid if account else '')
-        self.nickname.setText('平台昵称：'+(account.platform_nickname or '尚未获取') if account else '平台昵称：尚未获取')
+        self.nickname.setText(('自定义昵称：'+account.custom_nickname if account.custom_nickname else
+            '平台昵称：'+(account.platform_nickname or '尚未获取')) if account else '平台昵称：尚未获取')
         self.state.setText('登录状态：'+({'AUTHORIZED':'已登录','USER_CONFIRMED':'登录已确认'}.get(account.login_status,'尚未核对') if account else '尚未登录'))
         self.state.setStyleSheet('color:#38A169;' if account and account.login_status in ('AUTHORIZED','USER_CONFIRMED') else 'color:#E53E3E;')
         self.enabled.setChecked(account.enabled if account else True)
@@ -580,7 +584,7 @@ class PlatformAccountPanel(QWidget):
         self.title_source.setCurrentIndex(max(0,self.title_source.findData(mode)))
         self.custom_title.setText(custom_title(account) if account else '')
         self.custom_title.setVisible(mode=='custom')
-        for control in (self.settings_tabs,self.save_button,self.login_button,self.capture_button,self.delete_account_button):
+        for control in (self.settings_tabs,self.save_button,self.login_button,self.capture_button,self.delete_account_button,self.custom_nickname_button):
             control.setEnabled(account is not None)
         if hasattr(self,'nickname_button'):
             self.nickname_button.setEnabled(account is not None)
@@ -797,7 +801,7 @@ class PlatformAccountPanel(QWidget):
             self.logs.appendPlainText('实际频道与已绑定ID不同，未覆盖账号身份，请手工核对')
             return False
         account.platform_nickname = identity['nickname']
-        account.account_name = identity['nickname']
+        account.account_name = account.custom_nickname or identity['nickname']
         account.platform_uid = uid or account.platform_uid
         if self.platform=='youtube' and uid:
             account.channel_id = uid
@@ -814,6 +818,48 @@ class PlatformAccountPanel(QWidget):
         self.logs.appendPlainText(f'[平台昵称] 已获取：{identity["nickname"]}；账号ID与浏览器目录保持原值')
         if self.current() and self.current().account_id==account.account_id:
             self.load_current()
+        return True
+
+    def set_custom_nickname(self, checked=False, *, account=None, value=None):
+        account = account or self.current()
+        if not account:
+            return False
+        if self.controller.busy():
+            QMessageBox.information(self,'自定义昵称','请先停止当前发布任务，再修改账号显示名')
+            return False
+        from ..publisher.identity import validated_custom_nickname
+        if value is None:
+            dialog = QInputDialog(self)
+            dialog.setWindowTitle('自定义昵称 · '+CHANNELS[self.platform].name)
+            dialog.setLabelText('页面仅显示头像或无法读取昵称时，可设置本地显示名。\n'
+                '这不会代替登录验证；发布时仍检查本账号独立会话的上传入口。')
+            dialog.setTextValue(account.custom_nickname or account.platform_nickname)
+            dialog.setOkButtonText('保存昵称')
+            dialog.setCancelButtonText('取消')
+            dialog.setStyleSheet('QDialog{background:#1A202C;color:#E2E8F0} QLabel{color:#E2E8F0}'
+                'QLineEdit{background:#111827;color:#F1F5F9;padding:8px;border:1px solid #506174}'
+                'QPushButton{background:#315C85;color:white;padding:7px 18px}')
+            dialog.resize(550,190)
+            if dialog.exec()!=QDialog.Accepted:
+                return False
+            value=dialog.textValue()
+        old=(account.custom_nickname,account.account_name)
+        try:
+            name=validated_custom_nickname(value)
+            account.custom_nickname=name
+            account.account_name=name
+            self.repository.save(account)
+        except (OSError,ValueError,sqlite3.Error) as error:
+            account.custom_nickname,account.account_name=old
+            QMessageBox.warning(self,'保存自定义昵称',str(error))
+            return False
+        self._accounts=[account if a.account_id==account.account_id else a for a in self._accounts]
+        index=self.accounts.findData(account.account_id)
+        if index>=0:
+            self.accounts.setItemText(index,self.account_label(account))
+        if self.current() and self.current().account_id==account.account_id:
+            self.load_current()
+        self.logs.appendPlainText('[自定义昵称已保存] '+name+'；登录状态、账号ID、浏览器目录与发布历史保持原值')
         return True
 
     def open_probe(self):
@@ -835,6 +881,7 @@ class PlatformAccountPanel(QWidget):
         account = self.current()
         self.dialog = ChannelProbeDialog(account,self.repository.profile(account),self.store.root/'dom_reports',self)
         self.dialog.identity_found.connect(lambda result:self.apply_identity(account,result))
+        self.dialog.custom_nickname_requested.connect(lambda:self.set_custom_nickname(account=account))
         self.dialog.worker.captured.connect(self.refresh_dom_state)
         self.dialog.finished.connect(self.refresh_dom_state)
         def confirmed():

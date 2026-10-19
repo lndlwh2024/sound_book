@@ -228,8 +228,12 @@ class WeChatChannelsUploader(CreatorStudioUploader):
 
     def reconcile(self, info):
         if (not isinstance(info, dict) or info.get('platform') != 'wechat_channels'
-                or info.get('account_id') != self.account.account_id or info.get('submitted') is not True
-                or info.get('nickname') != self.account.platform_nickname or not self.account.platform_nickname):
+                or info.get('account_id') != self.account.account_id or info.get('submitted') is not True):
+            return False
+        actual_bound = bool(self.account.platform_nickname and info.get('nickname') == self.account.platform_nickname)
+        profile_bound = bool(not self.account.platform_nickname and not info.get('nickname')
+            and self.account.custom_nickname and info.get('profile_id') == self.account.account_id)
+        if not (actual_bound or profile_bound):
             return False
         proof = info.get('confirmation')
         if not isinstance(proof, dict):

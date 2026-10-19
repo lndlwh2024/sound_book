@@ -332,6 +332,7 @@ class ChannelProbeWorker(QThread):
 class ChannelProbeDialog(QDialog):
     login_confirmed = Signal()
     identity_found = Signal(dict)
+    custom_nickname_requested = Signal()
 
     def __init__(self, account, profile, output, parent=None):
         super().__init__(parent)
@@ -380,6 +381,10 @@ class ChannelProbeDialog(QDialog):
         self.nickname_button = nickname
         nickname.clicked.connect(lambda:self.worker.request_identity(self.tabs.currentData()))
         row.addWidget(nickname)
+        self.custom_nickname_button=QPushButton('自定义昵称')
+        self.custom_nickname_button.setToolTip('读取不到平台昵称时，设置本地显示名；登录仍由实际页面校验')
+        self.custom_nickname_button.clicked.connect(lambda:self.custom_nickname_requested.emit())
+        row.addWidget(self.custom_nickname_button)
         self.folder_button = QPushButton('打开采集报告')
         self.folder_button.setEnabled(False)
         self.folder_button.clicked.connect(lambda: os.startfile(str(Path(self.last_report).parent)))
@@ -453,6 +458,8 @@ class ChannelProbeDialog(QDialog):
 
     def on_error(self, error):
         self.logs.appendPlainText(error)
+        if error.startswith('昵称读取失败'):
+            self.logs.appendPlainText('若页面只显示头像，可点击“自定义昵称”；无需反复登录或采集 DOM。')
         self.capture_button.setEnabled(not self.in_manual_login and bool(self.tabs.count()) and self.worker.isRunning() and self.pending_result is None)
 
     def on_captured(self, report, image):
@@ -1126,6 +1133,19 @@ class MultiPlatformPublisherPanel(QWidget):
                     planned.account.account_name=account.account_name
                     planned.account.login_status=account.login_status
         reason = failure_message(results)
+        missing=[r for r in results if r.nickname_missing]
+        if missing:
+            self.log_message('[部署未启动] '+reason)
+            self.show_status('当前账号页面可访问；请设置自定义昵称后重新启动，未上传文件')
+            self.refresh_queues()
+            for result in missing:
+                target=next((t for t in targets if t.key==result.key),None)
+                panel=next((p for p in self.panels if target and p.platform==target.platform),None)
+                account=next((a for a in self.repository.accounts(target.platform)
+                    if a.account_id==target.account.account_id),None) if target else None
+                if panel and account:
+                    panel.set_custom_nickname(account=account)
+            return
         if not reason and {r.key for r in results if r.passed} != {t.key for t in targets}:
             reason = '部署前检查未全部完成，请检查网络与浏览器会话后重试；本次部署未启动。'
         if reason:

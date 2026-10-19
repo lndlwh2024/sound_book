@@ -445,7 +445,7 @@ def test_real_adapters_obey_task_account_limit_and_retry_isolation(tmp_path,monk
         records=install_local_browser(monkeypatch,playwright,modes)
         job.run()
     if scenario=='quota':
-        assert records['calls']==['xiaohongshu','kuaishou','kuaishou']
+        assert records['calls']==['kuaishou','xiaohongshu','kuaishou']
         assert job.report['success_count']==2 and job.report['failure_count']==1
         assert MultiTargetLedger(job.root).quota_block(targets[0].key)
         assert all(source.exists() for source in sources)
@@ -465,14 +465,14 @@ def test_real_adapters_obey_task_account_limit_and_retry_isolation(tmp_path,monk
         state='PLATFORM_BUSY' if scenario=='busy' else 'VERIFICATION_REQUIRED'
         assert job.blocked[targets[0].key]['status']==state
         assert sum(len(f['results'][targets[0].key]['attempts']) for f in job.report['files'])==1
-        assert records['calls']==(['xiaohongshu','kuaishou','kuaishou'] if scenario=='busy' else ['kuaishou','kuaishou'])
+        assert records['calls']==(['kuaishou','xiaohongshu','kuaishou'] if scenario=='busy' else ['kuaishou','kuaishou'])
         assert job.report['success_count']==2 and all(source.exists() for source in sources)
         first=job.report['files'][0]['results'][targets[0].key]
         assert first['status']==('RECOVERY_REQUIRED' if scenario=='uncertain_verification' else 'FAILED1')
         assert job.report['files'][1]['results'][targets[0].key]['status']==state
         assert not MultiTargetLedger(job.root).quota_block(targets[0].key)
     else:
-        assert records['calls']==['xiaohongshu','kuaishou','xiaohongshu','xiaohongshu','kuaishou']
+        assert records['calls']==['kuaishou','xiaohongshu','xiaohongshu','kuaishou','xiaohongshu']
         assert job.report['success_count']==4 and job.report['failure_count']==0
         assert all((tmp_path/'publiced'/source.name).exists() for source in sources)
 

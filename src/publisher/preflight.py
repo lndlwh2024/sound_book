@@ -19,7 +19,7 @@ from .channel_probe import CREATOR_NOTICES_JS
 from .creator_studio import CreatorStudioUploader, rejection
 from .dom_readiness import publishing_dom_state as account_dom_state, structure_ready
 from .douyin.browser import DouyinBrowserManager
-from .identity import extract_platform_identity, refresh_platform_identity, read_homepage_identity
+from .identity import extract_platform_identity, refresh_platform_identity, read_homepage_identity, protected_upload_access
 from .platforms import CHANNELS
 from .status import STATUS_TEXT
 from .youtube import PlatformRejected, UploadStopped, YouTubeUploader
@@ -44,6 +44,7 @@ class PreflightResult:
     status: str
     message: str
     identity: dict | None = None
+    nickname_missing: bool = False
 
     @property
     def passed(self):
@@ -81,8 +82,9 @@ def prerequisite_results(targets, report_root):
             available = False
         if not available:
             problems.append('缺少该账号的浏览器登录目录。请点击“登录 / 获取平台昵称”完成登录。')
-        if target.platform in ('xiaohongshu', 'kuaishou') and not (target.account.platform_nickname or '').strip():
-            problems.append('尚未绑定实际昵称。请点击“登录 / 获取平台昵称”读取并保存本人账号。')
+        if target.platform in ('xiaohongshu', 'kuaishou') and not (
+                target.account.platform_nickname or target.account.custom_nickname or '').strip():
+            problems.append('尚未设置账号昵称。请读取平台昵称，或设置自定义昵称后检查实际登录。')
         try:
             from .titles import resolve_title
             resolve_title(target.account,'配置校验.mp4',target.platform)
@@ -140,8 +142,17 @@ class AccountPreflight(BrowserPublishWorkflow):
             # Channel ID is the stable identity; remarks/nicknames may differ.
             YouTubeUploader.verify_channel(self, page, self.seconds)
         elif self.target.platform == 'wechat_channels':
-            identity=self.wait(page,'读取微信视频号左下角本人账号',
-                lambda:extract_platform_identity(page,'wechat_channels'),self.seconds)
+            if self.account.custom_nickname:
+                CreatorStudioUploader.verify_identity(self,page)
+                self._check_duration_notice(page)
+                return
+            identity=self.wait(page,'检查微信视频号账号与发布入口',
+                lambda:extract_platform_identity(page,'wechat_channels') or (
+                    protected_upload_access(page,'wechat_channels') and {'nickname':''}),self.seconds)
+            if not identity['nickname']:
+                self.nickname_missing=True
+                raise PlatformRejected('CONFIG_REQUIRED',
+                    '当前发布入口可用，但账号区域仅显示头像，无法读取昵称。请设置自定义昵称后重新启动；无需重新登录。')
             if not self.account.platform_nickname:
                 self.account.platform_nickname=identity['nickname']
                 self.account.account_name=identity['nickname']
@@ -155,7 +166,7 @@ class AccountPreflight(BrowserPublishWorkflow):
             # The current Douyin header hides its name in the avatar menu.
             # Once a nickname is bound, reveal that same own-account area for
             # the preflight check as well; never accept an unrelated post author.
-            if self.account.platform_nickname:
+            if self.account.platform_nickname and not self.account.custom_nickname:
                 bound_identity = refresh_platform_identity(page, 'douyin', self.stop_requested, seconds=min(5, self.seconds))
                 if not bound_identity:
                     bound_identity = read_homepage_identity(page, 'douyin', self.stop_requested, seconds=min(5,self.seconds))
@@ -168,7 +179,7 @@ class AccountPreflight(BrowserPublishWorkflow):
                     # Existing Douyin accounts may predate nickname binding.
                     # Reuse its proven video input as live protected-page proof;
                     # neither a cached status nor the URL alone is sufficient.
-                    if not wanted and urlsplit(page.url).path == urlsplit(self.channel.url).path:
+                    if (not wanted or self.account.custom_nickname) and urlsplit(page.url).path == urlsplit(self.channel.url).path:
                         inputs = page.locator('input[type="file"][accept*="video"], input[type="file"][accept*=".mp4"]')
                         if inputs.count() == 1 and inputs.is_enabled() and inputs.evaluate(
                                 "e=>!e.closest('[aria-disabled=true]')"):
@@ -213,7 +224,8 @@ class AccountPreflight(BrowserPublishWorkflow):
             return PreflightResult(self.target.key, target_name(self.target), 'SUCCESS', '当前登录与发布页访问检查通过',
                                    getattr(self,'found_identity',None))
         except PlatformRejected as error:
-            return PreflightResult(self.target.key, target_name(self.target), error.status, str(error))
+            return PreflightResult(self.target.key, target_name(self.target), error.status, str(error),
+                                   nickname_missing=getattr(self,'nickname_missing',False))
         except UploadStopped:
             raise
         except RuntimeError as error:
@@ -227,10 +239,16 @@ class AccountPreflight(BrowserPublishWorkflow):
             if not passed:
                 self._capture_failure_page(page, '部署前检查未通过')
             if context:
+                browser=context.browser
                 try:
                     context.close()
-                except Exception:
-                    pass
+                except Exception as error:
+                    self.log('[部署前会话关闭异常] '+str(error)+'；继续关闭本次检查专用浏览器')
+                if browser and browser.is_connected():
+                    browser.close()
+                if browser and browser.is_connected():
+                    raise RuntimeError('部署前检查浏览器尚未关闭；未启动部署，请关闭该账号检查窗口后重试')
+                self.log('[部署前会话已关闭] 检查结果随后返回；未启动其他浏览器')
 
 
 class DeploymentPreflightWorker(QThread):
@@ -295,6 +313,10 @@ class DeploymentPreflightWorker(QThread):
                     self.results.append(result)
                     self.emit_log(prefix + '：' + STATUS_TEXT.get(result.status, result.status) + '；' + result.message)
                     operation.complete(result.status, result.message)
+                    if not result.passed:
+                        # A terminal failure ends the plan. Do not open another
+                        # platform homepage while the UI is about to report it.
+                        break
         except UploadStopped:
             self.stopping.set()
         except Exception as error:

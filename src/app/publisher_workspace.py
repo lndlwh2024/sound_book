@@ -150,7 +150,7 @@ class PublisherPanel(MultiPlatformPublisherPanel):
             panel.nickname_button=QPushButton('读取昵称')
             panel.nickname_button.clicked.connect(panel.request_nickname)
             panel.capture_button.setText('页面结构 / 诊断')
-            for button in (panel.login_button,panel.nickname_button,panel.capture_button):
+            for button in (panel.login_button,panel.nickname_button,panel.custom_nickname_button,panel.capture_button):
                 tools.addWidget(button)
             tools.addStretch()
             tools.addWidget(add)
@@ -161,10 +161,10 @@ class PublisherPanel(MultiPlatformPublisherPanel):
             panel.dom_state.setStyleSheet('color:#A1B3CB;font-size:12px;')
             account_layout.addWidget(panel.dom_state)
             for widget in (panel.accounts,panel.enable_button,panel.disable_button,panel.account_status,
-                           panel.state,panel.nickname,panel.login_button,panel.capture_button,add,
+                           panel.state,panel.nickname,panel.login_button,panel.custom_nickname_button,panel.capture_button,add,
                            panel.delete_account_button,panel.dom_state):
                 widget.show()
-            for button in (panel.login_button,panel.nickname_button,panel.capture_button,add,panel.delete_account_button):
+            for button in (panel.login_button,panel.nickname_button,panel.custom_nickname_button,panel.capture_button,add,panel.delete_account_button):
                 button.setFixedHeight(30)
                 button.setStyleSheet('QPushButton {font-size:12px;min-height:20px;max-height:20px;padding:4px 7px;}')
             # Put every publishing option in one of two horizontal subpages.
@@ -384,7 +384,12 @@ class PublisherPanel(MultiPlatformPublisherPanel):
                 worker.deleteLater()
                 self.sync_deployment_buttons()
                 self.show_status('自动恢复等待：' + (reason or '部署检查未完成'))
-                self.schedule_retry()
+                self.log_message('[自动恢复等待] '+(reason or '部署检查未完成'))
+                needs_person=any(r.nickname_missing or r.status in (
+                    'CONFIG_REQUIRED','AUTH_REQUIRED','IDENTITY_MISMATCH',
+                    'VERIFICATION_REQUIRED','ACCOUNT_RESTRICTED','ACCOUNT_LIMIT') for r in worker.results)
+                if not needs_person:
+                    self.schedule_retry()
                 return
         super().preflight_finished()
 

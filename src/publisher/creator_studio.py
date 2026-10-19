@@ -316,6 +316,18 @@ class CreatorStudioUploader(BrowserPublishWorkflow):
 
     def verify_identity(self,page):
         wanted=self.account.platform_nickname.strip()
+        custom=(getattr(self.account,'custom_nickname','') or '').strip()
+        if custom:
+            from .identity import protected_upload_access
+            identity=extract_platform_identity(page,self.account.platform)
+            if identity and ((wanted and identity['nickname']!=wanted) or (
+                    self.account.platform_uid and identity.get('platform_uid')
+                    and self.account.platform_uid!=identity['platform_uid'])):
+                raise PlatformRejected('IDENTITY_MISMATCH','当前实际账号与绑定账号不一致，未上传文件')
+            self.wait(page,'检查当前账号的视频上传入口',
+                      lambda:protected_upload_access(page,self.account.platform),30)
+            self.log(f'[账号核对] 自定义昵称：{custom}；独立登录目录的实时上传入口检查通过；未将自定义昵称作为登录凭据')
+            return
         if not wanted:
             raise PlatformRejected('CONFIG_REQUIRED','请先使用“登录 / 获取平台昵称”绑定实际账号昵称')
         identity=self.wait(page,'核对实际平台账号',lambda:extract_platform_identity(page,self.account.platform),30)
@@ -443,6 +455,7 @@ class CreatorStudioUploader(BrowserPublishWorkflow):
 
     def result_hint(self):
         return {'platform':self.account.platform,'account_id':self.account.account_id,
+                'profile_id':self.account.account_id,
                 'nickname':self.account.platform_nickname,'file_name':self.file_name,'title':self.title,
                 'confirmation':self.confirmation,'account_block':self.account_block,'submitted':self.submitted}
 
