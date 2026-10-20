@@ -1,7 +1,6 @@
-"""Durable, transactional daily upload allowance per platform/account."""
+"""Durable daily confirmed-publication allowance per platform/account."""
 import sqlite3
 import json
-import hashlib
 from contextlib import contextmanager
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -19,15 +18,20 @@ class DailyUploadQuota:
         self.clock = clock or (lambda: datetime.now(CHINA_TIME))
 
     @contextmanager
-    def connect(self):
+    def connect(self, stop_requested=lambda:False):
         self.path.parent.mkdir(parents=True, exist_ok=True)
         connection = sqlite3.connect(self.path, timeout=10)
         connection.execute('CREATE TABLE IF NOT EXISTS limits (target TEXT PRIMARY KEY, maximum INTEGER NOT NULL CHECK(maximum>=0))')
         connection.execute('CREATE TABLE IF NOT EXISTS uploads (id TEXT PRIMARY KEY, day TEXT NOT NULL, target TEXT NOT NULL, digest TEXT NOT NULL, task TEXT NOT NULL, started_at TEXT NOT NULL)')
         connection.execute('CREATE INDEX IF NOT EXISTS uploads_day ON uploads(day,target)')
         connection.execute('CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)')
+        connection.execute('''CREATE TABLE IF NOT EXISTS published (
+            target TEXT NOT NULL, digest TEXT NOT NULL, day TEXT NOT NULL,
+            task TEXT NOT NULL, confirmed_at TEXT NOT NULL, PRIMARY KEY(target,digest))''')
+        connection.execute('CREATE INDEX IF NOT EXISTS published_day ON published(day,target)')
         connection.commit()
         try:
+            self._import_success_history(connection, stop_requested)
             with connection:
                 yield connection
         finally:
@@ -38,15 +42,32 @@ class DailyUploadQuota:
 
     def set_limit(self, target, maximum):
         if type(maximum) is not int or maximum < 0:
-            raise ValueError('每日上传上限必须为非负整数，0表示暂停该账号')
+            raise ValueError('每日成功发布上限必须为非负整数，0表示暂停该账号')
         with self.connect() as db:
             db.execute('INSERT INTO limits VALUES (?,?) ON CONFLICT(target) DO UPDATE SET maximum=excluded.maximum', (target, maximum))
 
     def bootstrap_history(self,stop_requested=lambda:False):
-        """Import provable real attempts once, without charging historical dedup skips."""
-        with self.connect() as db:
+        """Migrate confirmed successes; retain the old transfer audit untouched."""
+        with self.connect(stop_requested):
+            pass
+
+    def _stamp(self, value=None):
+        stamp = datetime.fromisoformat(value) if isinstance(value,str) else value or self.clock()
+        if stamp.tzinfo is None:
+            stamp=stamp.replace(tzinfo=CHINA_TIME)
+        return stamp.astimezone(CHINA_TIME)
+
+    def _insert_success(self, db, target, digest, task, stamp):
+        db.execute('INSERT OR IGNORE INTO published VALUES (?,?,?,?,?)',
+                   (target,digest,stamp.date().isoformat(),task,stamp.isoformat()))
+
+    def _import_success_history(self, db, stop_requested):
+        marker='confirmed_success_history_v1'
+        if db.execute('SELECT 1 FROM metadata WHERE key=?',(marker,)).fetchone():
+            return
+        with db:
             db.execute('BEGIN IMMEDIATE')
-            if db.execute("SELECT 1 FROM metadata WHERE key='history_imported'").fetchone():
+            if db.execute('SELECT 1 FROM metadata WHERE key=?',(marker,)).fetchone():
                 return
             for path in sorted((self.path.parent/'publish_reports').glob('*.json')):
                 if stop_requested():
@@ -55,35 +76,48 @@ class DailyUploadQuota:
                 task=report.get('task_id',path.name)
                 for item in report.get('files',[]):
                     for target,result in item.get('results',{}).items():
-                        for number,attempt in enumerate(result.get('attempts',[]),1):
-                            logs='\n'.join(entry.get('message','') for entry in attempt.get('logs',[]))
-                            started=(attempt.get('upload_started') is True or attempt.get('status')=='SUCCESS'
-                                or any(label in logs for label in ('[选择视频]','视频文件已选择','[上传完成]')))
-                            timestamp=attempt.get('upload_started_at') or attempt.get('started_at')
-                            if not started or not timestamp:
-                                continue
-                            stamp=datetime.fromisoformat(timestamp)
-                            if stamp.tzinfo is None:
-                                stamp=stamp.replace(tzinfo=CHINA_TIME)
-                            stamp=stamp.astimezone(CHINA_TIME)
+                        attempts=result.get('attempts',[])
+                        successes=[a for a in attempts if a.get('status')=='SUCCESS']
+                        # A persisted acknowledgement can precede attempt finalization.
+                        if not successes and result.get('status')=='SUCCESS':
+                            started=[a for a in attempts if a.get('upload_started') is True]
+                            successes=started[-1:]
+                        for attempt in successes:
+                            timestamp=(attempt.get('finished_at') or result.get('updated_at')
+                                       or attempt.get('upload_started_at') or attempt.get('started_at'))
                             digest=item.get('sha256','')
-                            identifier=attempt.get('id') or hashlib.sha256(f'{task}:{target}:{digest}:{number}'.encode()).hexdigest()
-                            db.execute('INSERT OR IGNORE INTO uploads VALUES (?,?,?,?,?,?)',
-                                (identifier,stamp.date().isoformat(),target,digest,task,stamp.isoformat()))
-            db.execute("INSERT INTO metadata VALUES ('history_imported','1')")
+                            if not timestamp or not digest:
+                                continue
+                            self._insert_success(db,target,digest,task,self._stamp(timestamp))
+            # Recover a success saved just before a crash, before its report was flushed.
+            ledger=self.path.parent/'target_ledger.json'
+            if ledger.is_file():
+                results=json.loads(ledger.read_text(encoding='utf-8-sig')).get('results',{})
+                for digest,targets in results.items():
+                    if stop_requested():
+                        raise InterruptedError('计数迁移已取消')
+                    for target,result in targets.items():
+                        if (result.get('status')=='SUCCESS' and result.get('task_id')
+                                and result.get('attempt_count') and result.get('updated_at')):
+                            self._insert_success(db,target,digest,result['task_id'],self._stamp(result['updated_at']))
+            db.execute('INSERT INTO metadata VALUES (?,?)',(marker,'1'))
 
     def snapshot(self, target, default=10):
         day = self.day()
-        if not self.path.exists():
+        if not self.path.exists() and not (self.path.parent/'publish_reports').exists() and not (self.path.parent/'target_ledger.json').exists():
             return {'day': day, 'limit': default, 'used': 0, 'remaining': default}
         with self.connect() as db:
             limit = db.execute('SELECT maximum FROM limits WHERE target=?', (target,)).fetchone()
-            used = db.execute('SELECT COUNT(*) FROM uploads WHERE day=? AND target=?', (day, target)).fetchone()[0]
+            used = db.execute('SELECT COUNT(*) FROM published WHERE day=? AND target=?', (day, target)).fetchone()[0]
         maximum = limit[0] if limit else default
         return {'day': day, 'limit': maximum, 'used': used, 'remaining': max(0, maximum-used)}
 
     def reserve(self, target, digest, task, attempt_id, default=10):
-        """Call immediately before setting the browser file input. Never refund an uncertain transfer."""
+        """Check the success allowance before transfer; starting a transfer spends none.
+
+        The publisher serializes browser tasks. Keep uploads as a transfer audit,
+        including old versions' rows; only record_success consumes the allowance.
+        """
         stamp = self.clock().astimezone(CHINA_TIME)
         day = stamp.date().isoformat()
         with self.connect() as db:
@@ -93,9 +127,14 @@ class DailyUploadQuota:
                 return existing[0]
             limit = db.execute('SELECT maximum FROM limits WHERE target=?', (target,)).fetchone()
             maximum = limit[0] if limit else default
-            used = db.execute('SELECT COUNT(*) FROM uploads WHERE day=? AND target=?', (day, target)).fetchone()[0]
+            used = db.execute('SELECT COUNT(*) FROM published WHERE day=? AND target=?', (day, target)).fetchone()[0]
             if used >= maximum:
-                raise DailyQuotaReached(f'今日已上传{used}次，上限{maximum}次；北京时间次日00:00或提高本账号上限后继续')
+                raise DailyQuotaReached(f'今日已成功发布{used}个，上限{maximum}个；北京时间次日00:00或提高本账号上限后继续')
             db.execute('INSERT INTO uploads VALUES (?,?,?,?,?,?)',
                        (attempt_id, day, target, digest, task, stamp.isoformat()))
             return stamp.isoformat()
+
+    def record_success(self, target, digest, task='', confirmed_at=None):
+        """Count one confirmed content publication once, across retries and restarts."""
+        with self.connect() as db:
+            self._insert_success(db,target,digest,task,self._stamp(confirmed_at))

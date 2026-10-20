@@ -47,7 +47,9 @@ def test_quota_restart_account_isolation_live_change_and_midnight(tmp_path):
     quota=DailyUploadQuota(tmp_path,lambda:clock[0])
     assert quota.snapshot('youtube:a')['limit']==10
     quota.set_limit('youtube:a',2)
-    for i in range(2):quota.reserve('youtube:a','hash','task',str(i))
+    for i in range(2):
+        quota.reserve('youtube:a','hash'+str(i),'task',str(i))
+        quota.record_success('youtube:a','hash'+str(i),'task')
     restarted=DailyUploadQuota(tmp_path,lambda:clock[0])
     with pytest.raises(DailyQuotaReached):restarted.reserve('youtube:a','other','new-task','2')
     assert restarted.snapshot('youtube:b')['used']==0
@@ -55,31 +57,33 @@ def test_quota_restart_account_isolation_live_change_and_midnight(tmp_path):
     restarted.set_limit('youtube:a',3)
     restarted.reserve('youtube:a','other','new-task','2')
     restarted.reserve('youtube:a','other','new-task','2')  # Idempotent boundary callback.
+    assert restarted.snapshot('youtube:a')['used']==2
+    restarted.record_success('youtube:a','other','new-task')
+    restarted.record_success('youtube:a','other','new-task')
     assert restarted.snapshot('youtube:a')['used']==3
     restarted.set_limit('youtube:a',1)
     assert restarted.snapshot('youtube:a')['remaining']==0
     clock[0]+=timedelta(minutes=2)
     assert restarted.snapshot('youtube:a')['used']==0
-    restarted.reserve('youtube:a','hash','another-task','3')
+    restarted.reserve('youtube:a','new-day','another-task','3')
+    restarted.record_success('youtube:a','new-day','another-task')
     assert restarted.snapshot('youtube:a')['used']==1
     restarted.set_limit('youtube:a',0)
     with pytest.raises(DailyQuotaReached):restarted.reserve('youtube:a','hash','task','4')
 
 
-def test_concurrent_reservations_cannot_exceed_cap(tmp_path):
+def test_concurrent_success_callbacks_count_each_published_file_once(tmp_path):
     quota=DailyUploadQuota(tmp_path)
     quota.set_limit('kuaishou:a',3)
-    def reserve(i):
-        try:
-            DailyUploadQuota(tmp_path).reserve('kuaishou:a','hash','task',str(i))
-            return True
-        except DailyQuotaReached:return False
+    def confirm(i):
+        DailyUploadQuota(tmp_path).record_success('kuaishou:a','hash'+str(i%3),'task')
     with ThreadPoolExecutor(max_workers=8) as pool:
-        assert sum(pool.map(reserve,range(12)))==3
+        list(pool.map(confirm,range(12)))
     assert quota.snapshot('kuaishou:a')['used']==3
+    with pytest.raises(DailyQuotaReached):quota.reserve('kuaishou:a','next','task','next')
 
 
-def test_history_import_counts_proven_uploads_once_not_dedup_or_preparation(tmp_path):
+def test_history_import_counts_success_only_not_failure_dedup_or_preparation(tmp_path):
     folder=tmp_path/'publish_reports';folder.mkdir()
     day=datetime.now(CHINA_TIME).isoformat()
     report={'task_id':'old','files':[{'sha256':'a'*64,'results':{'youtube:a':{'attempts':[
@@ -89,7 +93,7 @@ def test_history_import_counts_proven_uploads_once_not_dedup_or_preparation(tmp_
     (folder/'old.json').write_text(json.dumps(report))
     quota=DailyUploadQuota(tmp_path)
     quota.bootstrap_history();quota.bootstrap_history()
-    assert quota.snapshot('youtube:a')['used']==2
+    assert quota.snapshot('youtube:a')['used']==1
     assert quota.snapshot('douyin:a')['used']==0
 
 
@@ -297,15 +301,15 @@ def test_duplicate_copies_and_new_task_do_not_repeat_an_unknown_submission(tmp_p
     first.run_batch(first.plan_batch());first.run_batch(first.plan_batch())
     assert len(calls)==1
     assert all(item['results'][target.key]['status']=='RECOVERY_REQUIRED' for item in first.report['files'])
-    assert first.quota.snapshot(target.key)['used']==1
+    assert first.quota.snapshot(target.key)['used']==0
     second=task(root,[target],lambda *args:Uploader())
     jobs=second.plan_batch()
     assert all(j['item']['results'][target.key]['status']=='RECOVERY_REQUIRED' for j in jobs)
     second.run_batch(jobs)
-    assert len(calls)==1 and second.quota.snapshot(target.key)['used']==1
+    assert len(calls)==1 and second.quota.snapshot(target.key)['used']==0
 
 
-def test_failed_retry_waits_for_quota_then_rollover_without_resetting_failure2(tmp_path):
+def test_failed_retry_spends_no_success_quota_and_keeps_failure2_ceiling(tmp_path):
     path=media(tmp_path/'media');target=targets(path.parent)[0]
     target.account.daily_upload_limit=1;calls=[]
     class Uploader:
@@ -319,7 +323,8 @@ def test_failed_retry_waits_for_quota_then_rollover_without_resetting_failure2(t
     worker.quota=DailyUploadQuota(worker.root,lambda:stamp[0])
     worker.run_batch(worker.plan_batch())
     item=worker.report['files'][0]['results'][target.key]
-    assert len(calls)==1 and item['status']=='FAILED1' and item['quota_message']
+    assert len(calls)==2 and item['status']=='FAILED2' and not item.get('quota_message')
+    assert worker.quota.snapshot(target.key)['used']==0
     stamp[0]+=timedelta(days=1)
     worker.run_batch(worker.plan_batch())
     assert len(calls)==2 and item['status']=='FAILED2'
@@ -341,9 +346,33 @@ def test_cap_only_stops_one_account_raise_limit_resumes_same_task(tmp_path):
     worker=task(tmp_path/'state',[a,b],lambda target,*args:Uploader(target))
     worker.run_batch(worker.plan_batch())
     assert calls.count(a.key)==1 and calls.count(b.key)==2
+    bundles=[json.loads(p.read_text(encoding='utf-8')) for p in
+             (worker.root/'failure_diagnostics').rglob('*.result.json')]
+    limited=[r for r in bundles if r['status']=='DAILY_LIMIT']
+    assert limited and all('今日已成功发布1个' in r['message'] for r in limited)
     worker.quota.set_limit(a.key,2)
     worker.run_batch(worker.plan_batch())
     assert calls.count(a.key)==2 and calls.count(b.key)==2
+
+
+@pytest.mark.parametrize('platform',list(CHANNELS))
+def test_failed_then_successful_retry_uses_one_publication_slot_on_every_platform(tmp_path,platform):
+    path=media(tmp_path/'media','a.mp4');media(path.parent,'b.mp4',b'other video'*500)
+    target=next(t for t in targets(path.parent) if t.platform==platform)
+    target.account.daily_upload_limit=1;calls=[]
+    class Uploader:
+        supports_upload_boundary=True
+        last_outcome='FAILED'
+        def upload_single_video(self,path):
+            self.before_upload();calls.append(path.name)
+            info={'platform':'youtube','video_id':'abcdefghijk','draft':True} if platform=='youtube' else None
+            return len(calls)==2,'confirmed' if len(calls)==2 else 'cover failed',info
+    worker=task(tmp_path/'state',[target],lambda *args:Uploader())
+    worker.run_batch(worker.plan_batch())
+    assert calls==['a.mp4','a.mp4']
+    assert worker.quota.snapshot(target.key)['used']==1
+    assert worker.report['files'][0]['results'][target.key]['status']=='SUCCESS'
+    assert worker.report['files'][1]['results'][target.key]['quota_message']
 
 
 def test_login_failure_and_stop_before_file_input_spend_no_quota(tmp_path):
@@ -367,7 +396,7 @@ def test_login_failure_and_stop_before_file_input_spend_no_quota(tmp_path):
     assert other.quota.snapshot(target.key)['used']==0
 
 
-def test_automatic_confirmation_skips_retry_and_spends_no_quota(tmp_path):
+def test_automatic_confirmation_counts_success_once_without_uploading_again(tmp_path):
     path=media(tmp_path/'media');target=targets(path.parent)[3];calls=[]
     class Uploader:
         def reconcile(self,info):return info.get('video_id')=='abcdefghijk'
@@ -376,8 +405,10 @@ def test_automatic_confirmation_skips_retry_and_spends_no_quota(tmp_path):
     digest=hashlib.sha256(path.read_bytes()).hexdigest()
     worker.ledger.set_result(digest,target.key,'UNCONFIRMED','old',{'video_id':'abcdefghijk'})
     worker.run_batch(worker.plan_batch())
-    assert not calls and worker.quota.snapshot(target.key)['used']==0
+    assert not calls and worker.quota.snapshot(target.key)['used']==1
     assert worker.ledger.result(digest,target.key)['status']=='SUCCESS'
+    worker.run_batch(worker.plan_batch())
+    assert not calls and worker.quota.snapshot(target.key)['used']==1
 
 
 def test_stop_at_upload_hook_is_pending_and_does_not_spend_budget(tmp_path):

@@ -468,7 +468,9 @@ class MultiDeployWorker(QThread):
             marker = (job['digest'], target.key, state)
             if state != SUCCESS and (operation.captures or marker not in self.diagnostic_states):
                 try:
-                    folder = operation.complete(state, result.get('message', ''), result=result)
+                    message = (result.get('quota_message', '') if state == 'DAILY_LIMIT'
+                               else result.get('message', ''))
+                    folder = operation.complete(state, message, result=result)
                     self.diagnostic_states.add(marker)
                     self.diagnostic_states.add((job['digest'], target.key, result.get('status', state)))
                     evidence = operation.capture_summary()
@@ -519,6 +521,7 @@ class MultiDeployWorker(QThread):
                 adapter=STUDIO_ADAPTERS[target.platform]
                 validator=adapter(target.account,target.profile,self.root/'dom_reports')
             if validator.reconcile(previous['info']) is True:
+                self.quota.record_success(target.key,job['digest'],previous.get('task_id',''),previous.get('updated_at'))
                 item.update(self.ledger.set_result(job['digest'],target.key,SUCCESS,
                     '已核验本地保存的平台成功回执，未打开浏览器或重新上传',previous['info']))
                 item.pop('quota_message',None)
@@ -550,6 +553,7 @@ class MultiDeployWorker(QThread):
                 checker.failure_capture = self.failure_operation.capture
                 reconcile=getattr(checker,'reconcile',None)
                 if callable(reconcile) and reconcile(previous['info']) is True:
+                    self.quota.record_success(target.key,job['digest'],previous.get('task_id',''),previous.get('updated_at'))
                     item.update(self.ledger.set_result(job['digest'],target.key,SUCCESS,'自动检查确认先前投稿成功，未重新上传',previous['info']))
                     item.pop('quota_message',None)
                     item.pop('blocking_message',None)
@@ -607,7 +611,7 @@ class MultiDeployWorker(QThread):
                 return SUCCESS
         quota=self.quota.snapshot(target.key,getattr(target.account,'daily_upload_limit',10))
         if not quota['remaining']:
-            item['quota_message']=f'今日已用{quota["used"]}次，上限{quota["limit"]}次；北京时间次日00:00或提高本账号上限后继续'
+            item['quota_message']=f'今日已成功发布{quota["used"]}个，上限{quota["limit"]}个；北京时间次日00:00或提高本账号上限后继续'
             marker=(quota['day'],quota['limit'],quota['used'])
             if self.quota_notices.get(target.key)!=marker:
                 self.emit_log(f'[每日限额等待] {target.key}：'+item['quota_message'])
@@ -666,7 +670,7 @@ class MultiDeployWorker(QThread):
                 requires_review=getattr(uploader,'supports_upload_boundary',False) is True,
                 attempt_count=attempt['number'],task_id=self.report['task_id'])
             usage=self.quota.snapshot(target.key,getattr(target.account,'daily_upload_limit',10))
-            self.emit_log(f'[上传计数] {target.platform}/{target.account.account_name}：今日已用{usage["used"]}次，上限{usage["limit"]}次，剩余{usage["remaining"]}次')
+            self.emit_log(f'[发布额度] {target.platform}/{target.account.account_name}：今日已成功发布{usage["used"]}个，上限{usage["limit"]}个，剩余{usage["remaining"]}个；开始上传不计数')
             self.save_report()
         def before_submit(info):
             nonlocal boundary_info
@@ -681,6 +685,7 @@ class MultiDeployWorker(QThread):
                 task_id=self.report['task_id'],attempt_count=attempt['number'],
                 requires_review=not confirmed)
             if confirmed:
+                self.quota.record_success(target.key,job['digest'],self.report['task_id'])
                 item.update(saved)
             else:
                 item.update(message='已提交，等待平台确认',info=info)
@@ -702,7 +707,7 @@ class MultiDeployWorker(QThread):
                     self.emit_log('[草稿已记录] 视频ID='+info['video_id']+'；未发布；优先恢复此草稿')
                     self.save_report()
                 uploader.on_draft_identified=draft_checkpoint
-            # Injected adapters without a file-input boundary count their invocation.
+            # Injected adapters also check allowance before transfer, without spending it.
             if getattr(uploader,'supports_upload_boundary',False) is not True:
                 before_upload()
             success,message,info=uploader.upload_single_video(path)
@@ -757,6 +762,10 @@ class MultiDeployWorker(QThread):
         item.update(self.ledger.set_result(job['digest'],target.key,state,message,retained_info,
             task_id=self.report['task_id'],attempt_count=consumed, requires_review=review))
         attempt.update(status=state,finished_at=now(),message=message,info=retained_info)
+        if state==SUCCESS:
+            self.quota.record_success(target.key,job['digest'],self.report['task_id'])
+            usage=self.quota.snapshot(target.key,getattr(target.account,'daily_upload_limit',10))
+            self.emit_log(f'[成功发布计数] 今日已成功发布{usage["used"]}个，上限{usage["limit"]}个，剩余{usage["remaining"]}个')
         self.emit_log(f'[上传流程结束] 结果={state}；原因={message}；已用尝试={consumed}/2；'
             + ('已确认成功，等待归档' if state==SUCCESS else '保留原文件；未把草稿计为发布成功'),
             level='INFO' if state==SUCCESS else 'ERROR')

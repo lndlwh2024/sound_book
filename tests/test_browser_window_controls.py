@@ -84,6 +84,7 @@ def test_cover_opened_before_click_navigation_timeout_continues_without_second_c
 def test_cover_entry_does_not_wait_for_navigation_but_checks_its_dialog(tmp_path):
     upload=uploader(tmp_path)
     page=MagicMock()
+    page.get_by_text.return_value.count.return_value=0
     entry=page.get_by_text.return_value.first
     dialog=page.locator.return_value.last
     dialog.locator.return_value.count.return_value=1
@@ -94,9 +95,72 @@ def test_cover_entry_does_not_wait_for_navigation_but_checks_its_dialog(tmp_path
     upload._wait_cover_closed=MagicMock()
     upload._select_video_cover(page)
     assert entry.click.call_args.kwargs['no_wait_after'] is True
-    dialog.wait_for.assert_called_once()
     assert confirm.nth.return_value.click.call_args.kwargs['no_wait_after'] is True
     upload._wait_cover_closed.assert_called_once()
+
+
+@pytest.mark.parametrize('delayed_part', ['dialog', 'canvas', 'replacement'])
+def test_cover_waits_for_delayed_editor_and_current_frame_without_uploading_again(browser,tmp_path,delayed_part):
+    upload=uploader(tmp_path)
+    page=browser.new_page(viewport={'width':1366,'height':536})
+    try:
+        page.set_content('''<button id="cover">选择封面</button>
+            <canvas id="unrelated-preview"></canvas>
+            <button onclick="window.published=true">发布</button>
+            <div role="dialog" id="editor" style="display:none">
+                <button onclick="window.confirmed=(window.confirmed||0)+1;this.parentElement.style.display='none'">完成</button>
+            </div>''')
+        page.evaluate('''mode => {
+            document.querySelector('#cover').onclick=()=>{
+                window.opens=(window.opens||0)+1;
+                let editor=document.querySelector('#editor');
+                if(mode!=='dialog') editor.style.display='block';
+                if(mode==='dialog') editor.appendChild(document.createElement('canvas'));
+                setTimeout(()=>{
+                    if(mode==='replacement') {
+                        const next=editor.cloneNode(true);
+                        editor.replaceWith(next); editor=next;
+                    }
+                    if(mode!=='dialog') editor.appendChild(document.createElement('canvas'));
+                    editor.style.display='block';
+                },2600);
+            };
+        }''', delayed_part)
+        upload._select_video_cover(page)
+        assert page.evaluate('window.opens===1 && window.confirmed===1 && !window.published')
+        assert not upload._publish_armed
+    finally:page.close()
+
+
+def test_cover_missing_current_frame_times_out_without_confirming_or_publishing(browser,tmp_path):
+    upload=uploader(tmp_path)
+    wait_until=upload._wait_until
+    upload._wait_until=lambda page,label,condition,**kwargs: wait_until(page,label,condition,seconds=.7)
+    page=browser.new_page()
+    try:
+        page.set_content('''<canvas></canvas>
+            <button onclick="document.querySelector('#editor').style.display='block'">选择封面</button>
+            <div role="dialog" id="editor" style="display:none">
+                <button onclick="window.confirmed=true">完成</button></div>
+            <button onclick="window.published=true">发布</button>''')
+        with pytest.raises(RuntimeError,match='封面编辑器.*超时'):
+            upload._select_video_cover(page)
+        assert page.evaluate('!window.confirmed && !window.published')
+    finally:page.close()
+
+
+def test_cover_loading_wait_remains_interruptible(browser,tmp_path):
+    upload=uploader(tmp_path)
+    from src.publisher.douyin.uploader import PublishCancelled
+    upload._stop_requested=lambda: page.evaluate('!!window.cancelled')
+    page=browser.new_page()
+    try:
+        page.set_content('''<button onclick="setTimeout(()=>window.cancelled=true,400)">选择封面</button>
+            <button onclick="window.published=true">发布</button>''')
+        with pytest.raises(PublishCancelled):
+            upload._select_video_cover(page)
+        assert not page.evaluate('!!window.published')
+    finally:page.close()
 
 
 @pytest.mark.skipif(os.name!='nt',reason='Windows native browser-window check')

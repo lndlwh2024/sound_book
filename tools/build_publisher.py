@@ -85,6 +85,7 @@ def main():
                    'docs/DOUYIN_PUBLISH_HINT_20261020.md',
                    'docs/PUBLISH_INTERVALS_AND_LAYOUT_20261020.md',
                    'docs/BROWSER_WINDOW_DOUYIN_COVER_20261020.md',
+                   'docs/DOUYIN_COVER_READINESS_20261020.md',
                    'requirements-publisher.txt', 'requirements-publisher-lock.txt'):
         shutil.copy2(ROOT/source, output/Path(source).name)
     (output/'自检.cmd').write_text('@echo off\r\ncd /d "%~dp0"\r\nstart /wait "" ShuShengPublisher.exe --self-check --output "%~dp0self-check.json"\r\nnotepad "%~dp0self-check.json"\r\n', encoding='utf-8')

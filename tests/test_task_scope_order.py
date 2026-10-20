@@ -136,7 +136,7 @@ def test_late_saved_xhs_ack_recovers_after_budget_exhaustion_without_new_upload(
     assert worker.attempt(job,target)=='SUCCESS'
     assert 'quota_message' not in job['item']['results'][target.key]
     assert len(job['item']['results'][target.key]['attempts'])==2
-    assert DailyUploadQuota(root).snapshot(target.key)['used']==0
+    assert DailyUploadQuota(root).snapshot(target.key)['used']==1
 
 
 def test_xhs_ack_is_saved_as_success_before_page_exception_and_restart(tmp_path):

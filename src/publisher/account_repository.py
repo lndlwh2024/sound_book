@@ -39,7 +39,7 @@ class PlatformAccountRepository:
         from .drive_config import DriveBinding
         DriveBinding.read(account.drive_binding)
         if type(account.daily_upload_limit) is not int or account.daily_upload_limit < 0:
-            raise ValueError('每日上传上限必须为非负整数')
+            raise ValueError('每日成功发布上限必须为非负整数')
         if account.platform != 'douyin':
             self.store.save()
             DailyUploadQuota(self.store.root).set_limit(account.platform+':'+account.account_id, account.daily_upload_limit)

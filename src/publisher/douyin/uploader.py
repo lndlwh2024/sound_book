@@ -489,7 +489,11 @@ class DouyinUploader(BrowserPublishWorkflow):
             if not dialog.is_visible():
                 raise
             self._progress('封面窗口已打开，继续检查当前视频画面；不重复点击入口')
-        dialog.wait_for(state="visible", timeout=2000)
+        # The editor and its frame canvas load asynchronously, especially on the
+        # deployment laptop. Keep pumping events instead of failing after 2 s.
+        self._wait_until(page, '等待当前视频封面编辑器与画面就绪（最多30秒）',
+                         lambda: dialog.is_visible() and dialog.locator('video, canvas').count() > 0,
+                         seconds=30)
         original_dialog = dialog.element_handle()
         if dialog.locator('video, canvas').count() == 0:
             raise RuntimeError("封面弹窗中未检测到视频或帧画布，无法确认视频画面来源，需采集弹窗 DOM")

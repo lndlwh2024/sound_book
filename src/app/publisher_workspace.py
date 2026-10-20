@@ -548,6 +548,10 @@ class PublisherWorkspace(QWidget):
             ledger.set_result(digest, key, 'SUCCESS' if success else 'PENDING',
                 '用户已在平台核验：' + ('已发布' if success else '未发布，允许重新上传'),
                 original.get('info') if success else None, requires_review=False, manual_review=True)
+            if success:
+                from ..publisher.upload_quota import DailyUploadQuota
+                DailyUploadQuota(self.panel.store.root).record_success(
+                    key,digest,original.get('task_id',''),original.get('updated_at'))
             self.panel.restore_results()
             self.panel.render_results()
             dialog.accept()

@@ -215,9 +215,9 @@ class PlatformAccountPanel(QWidget):
         self.daily_limit = QSpinBox()
         self.daily_limit.setRange(0,1000000)
         self.daily_limit.setValue(10)
-        self.daily_limit.setToolTip('当前平台账号的每日真实上传次数上限；重试也计数，0暂停上传；保存后立即生效')
-        self.quota_state = QLabel('今日已用0，剩余10')
-        quota_row.addWidget(QLabel('每日上传上限:'))
+        self.daily_limit.setToolTip('当前平台账号每日成功发布数量上限；平台确认成功后计数，失败和重试不计数；0暂停发布，保存后立即生效')
+        self.quota_state = QLabel('今日成功0，剩余10')
+        quota_row.addWidget(QLabel('每日发布上限:'))
         quota_row.addWidget(self.daily_limit)
         quota_row.addWidget(self.quota_state,1)
         self.auto_archive = QCheckBox('全部目标完成后归档')
@@ -672,8 +672,8 @@ class PlatformAccountPanel(QWidget):
             return
         try:
             data=DailyUploadQuota(self.store.root).snapshot(self.platform+':'+account.account_id,account.daily_upload_limit)
-            self.quota_state.setText(f'今日已用{data["used"]}，剩余{data["remaining"]}')
-            self.quota_state.setToolTip(f'北京时间 {data["day"]}；按真实上传次数计数，重试也占额度')
+            self.quota_state.setText(f'今日成功{data["used"]}，剩余{data["remaining"]}')
+            self.quota_state.setToolTip(f'北京时间 {data["day"]}；仅平台确认成功后计数，失败和重试不占额度')
         except (OSError,ValueError,RuntimeError,sqlite3.Error) as error:
             self.quota_state.setText('额度读取失败')
             self.quota_state.setToolTip(str(error))

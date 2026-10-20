@@ -189,7 +189,7 @@ def test_strict_recovery_does_not_retry_unknown_submit(tmp_path):
     assert len(calls) == 1
     saved = MultiTargetLedger(worker.root).result(jobs[0]['digest'],target.key)
     assert saved['status'] == 'RECOVERY_REQUIRED' and saved['requires_review']
-    assert worker.quota.snapshot(target.key)['used'] == 1
+    assert worker.quota.snapshot(target.key)['used'] == 0
     assert path.exists()
 
 
@@ -257,6 +257,7 @@ def test_history_transfer_keeps_success_quota_and_date_but_requeues_missing_medi
     MultiTargetLedger(store.root).set_result('1'*64,target.key,'SUCCESS','confirmed')
     quota = DailyUploadQuota(store.root)
     quota.reserve(target.key,'1'*64,'task','attempt',10)
+    quota.record_success(target.key,'1'*64,'task')
     secret = store.root/'google_drive/credentials.dpapi'
     secret.parent.mkdir()
     secret.write_bytes(b'must not export')

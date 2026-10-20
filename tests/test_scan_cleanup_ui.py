@@ -238,7 +238,10 @@ def test_account_limit_is_saved_reloaded_independent_and_live(panel,index):
     key=current.platform+':'+account.account_id
     quota.reserve(key,'digest','task','unique-'+key)
     current.refresh_quota()
-    assert '今日已用1' in current.quota_state.text()
+    assert '今日成功0' in current.quota_state.text()
+    quota.record_success(key,'digest','task')
+    current.refresh_quota()
+    assert '今日成功1' in current.quota_state.text()
     other=panel.repository.add(current.platform,'B')
     assert other.daily_upload_limit==10
     assert quota.snapshot(current.platform+':'+other.account_id)['used']==0
