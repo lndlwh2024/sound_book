@@ -10,7 +10,23 @@ def test_shared_factory_retains_profile_and_full_client_default(monkeypatch,tmp_
     monkeypatch.delenv('SHUSHENG_MEDIA_BROWSER',raising=False)
     playwright=MagicMock()
     media_browser.launch_media_context(playwright,tmp_path/'existing',headless=False)
-    playwright.chromium.launch_persistent_context.assert_called_once_with(str(tmp_path/'existing'),headless=False)
+    playwright.chromium.launch_persistent_context.assert_called_once_with(str(tmp_path/'existing'),headless=False,
+        no_viewport=True,args=['--start-maximized'])
+
+
+def test_visible_window_uses_native_client_area_and_preserves_other_launch_options():
+    options=dict(headless=False,viewport={'width':1440,'height':900},timeout=10000,
+        args=['--disable-blink-features=AutomationControlled','--window-size=1440,900','--start-maximized'])
+    actual=media_browser.browser_window_options(options)
+    assert 'viewport' not in actual and actual['no_viewport'] is True
+    assert actual['args']==['--disable-blink-features=AutomationControlled','--start-maximized']
+    assert actual['timeout']==10000
+    assert options['viewport']=={'width':1440,'height':900} and len(options['args'])==3
+
+
+def test_headless_browser_keeps_its_explicit_viewport():
+    options=dict(headless=True,viewport={'width':1366,'height':540},args=['--test-switch'])
+    assert media_browser.browser_window_options(options)==options
 
 
 def test_publisher_runtime_uses_packaged_browser_and_preserves_profile(monkeypatch,tmp_path):

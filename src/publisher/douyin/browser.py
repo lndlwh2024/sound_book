@@ -37,8 +37,7 @@ class DouyinBrowserManager:
         3. 不传已废弃的 --disable-infobars。
         """
         return [
-            "--disable-blink-features=AutomationControlled",
-            "--window-size=1440,900"
+            "--disable-blink-features=AutomationControlled"
         ]
 
     @staticmethod

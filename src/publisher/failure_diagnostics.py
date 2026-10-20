@@ -84,6 +84,8 @@ class FailureOperation:
             data['url'] = safe_url(page.url)
             if page.is_closed():
                 raise RuntimeError('浏览器页面已关闭，无法取得最后页面')
+            from .media_browser import browser_window_metrics
+            data['browser_window'] = browser_window_metrics(page)
             # Preserve the last visible page even when DOM extraction fails.
             try:
                 try:

@@ -134,9 +134,10 @@ def launch_youtube_context(playwright, profile, **kwargs):
                            '不可用，请恢复安装；为保留登录状态，未回退至内置浏览器。')
     if profile_busy(browser_profile(profile,channel)):
         raise RuntimeError('YouTube 手工登录浏览器尚未释放账号目录，请点击“登录完成，验证频道”或关闭该专用浏览器窗口后重试。')
+    from .media_browser import browser_window_options
     return playwright.chromium.launch_persistent_context(
         str(browser_profile(profile, channel)), channel=channel,
-        executable_path=str(browser.executable), **kwargs)
+        executable_path=str(browser.executable), **browser_window_options(kwargs))
 
 
 def google_login_rejected(url):

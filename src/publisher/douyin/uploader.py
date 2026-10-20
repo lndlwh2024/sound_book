@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Optional, Dict, Any, Tuple, List, Callable
 from urllib.parse import urlsplit
 
-from playwright.sync_api import sync_playwright, BrowserContext, Page
+from playwright.sync_api import sync_playwright, BrowserContext, Page, TimeoutError as PlaywrightTimeoutError
 
 from ..browser_workflow import BrowserPublishWorkflow
 from ..archive import archive_completed_file
@@ -302,6 +302,8 @@ class DouyinUploader(BrowserPublishWorkflow):
 
                     logger.info(f"导航至抖音创作者中心上传页: {DOUYIN_UPLOAD_URL}")
                     self._navigate_upload_page(page)
+                    from ..media_browser import browser_window_metrics
+                    self._progress('[浏览器窗口] '+json.dumps(browser_window_metrics(page),ensure_ascii=False))
                     # 设计说明：使用 page.wait_for_timeout() 替代 time.sleep()
                     # Playwright 同步模式依赖调用驱动底层 Node.js 管道。
                     # 严禁在持有 page 时调用 time.sleep，否则会导致上传 Web Worker 挂起死锁。
@@ -424,6 +426,9 @@ class DouyinUploader(BrowserPublishWorkflow):
             raise RuntimeError("未找到唯一的【发布】提交按钮，拒绝使用【作品发布】侧栏入口")
         if not button.is_visible() or not button.is_enabled():
             raise RuntimeError("发布按钮不可用，视频处理或表单校验尚未完成")
+        button.scroll_into_view_if_needed(timeout=5000)
+        button.click(trial=True, timeout=5000)
+        self._progress('已将唯一的发布按钮滚动到当前窗口内，并确认未被遮挡；尚未点击发布')
         return button
 
     def _read_upload_state(self, page):
@@ -476,8 +481,14 @@ class DouyinUploader(BrowserPublishWorkflow):
         # 第一处是竖封面入口；在弹窗中确认当前视频帧，不上传外部图片。
         entry = page.get_by_text("选择封面", exact=True).first
         entry.wait_for(state="visible", timeout=2000)
-        entry.click()
         dialog = page.locator('[role="dialog"]:visible, .semi-modal:visible').last
+        try:
+            # This opens an editor, not a navigation. Wait on its DOM explicitly.
+            entry.click(timeout=5000, no_wait_after=True)
+        except PlaywrightTimeoutError:
+            if not dialog.is_visible():
+                raise
+            self._progress('封面窗口已打开，继续检查当前视频画面；不重复点击入口')
         dialog.wait_for(state="visible", timeout=2000)
         original_dialog = dialog.element_handle()
         if dialog.locator('video, canvas').count() == 0:
@@ -489,7 +500,7 @@ class DouyinUploader(BrowserPublishWorkflow):
             available = [confirm.nth(i) for i in range(confirm.count())
                          if confirm.nth(i).is_visible() and confirm.nth(i).is_enabled()]
             if len(available) == 1:
-                available[0].click(timeout=5000)
+                available[0].click(timeout=5000, no_wait_after=True)
                 self._progress("封面已确认，等待封面处理完成和弹窗关闭（最长 30 秒）")
                 self._wait_cover_closed(page, original_dialog)
                 self._progress("已确认当前视频封面画面")
@@ -518,7 +529,7 @@ class DouyinUploader(BrowserPublishWorkflow):
                                and button.is_visible() and button.is_enabled()]
                     if len(buttons) == 1:
                         self._check_stop()
-                        buttons[0].click(timeout=2000)
+                        buttons[0].click(timeout=2000, no_wait_after=True)
                         horizontal_confirmed = True
                         self._progress('已确认当前视频横封面，等待封面窗口关闭')
             warning = page.get_by_text(re.compile(r"操作频繁|发布频繁|达到.*上限|请稍后再试|封面.*失败"))
@@ -543,7 +554,7 @@ class DouyinUploader(BrowserPublishWorkflow):
             if choice.count() != 1 or not choice.is_visible() or not choice.is_enabled():
                 raise RuntimeError('横封面引导未找到唯一可用的设置横封面按钮')
             self._check_stop()
-            choice.click(timeout=2000)
+            choice.click(timeout=2000, no_wait_after=True)
             return True
         return False
 

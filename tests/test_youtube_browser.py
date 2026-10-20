@@ -34,7 +34,8 @@ def test_detects_vendor_paths_and_prefers_chrome(tmp_path, monkeypatch):
 def test_legacy_login_remains_on_its_original_bundled_profile(tmp_path):
     playwright = MagicMock()
     browsers.launch_youtube_context(playwright, tmp_path, headless=False)
-    playwright.chromium.launch_persistent_context.assert_called_once_with(str(tmp_path), headless=False)
+    playwright.chromium.launch_persistent_context.assert_called_once_with(str(tmp_path), headless=False,
+        no_viewport=True,args=['--start-maximized'])
     assert not (tmp_path/browsers.MARKER).exists()
 
 
@@ -61,6 +62,8 @@ def test_manual_login_and_automation_use_same_executable_and_dedicated_profile(t
     assert call.args[0] == str(browsers.browser_profile(tmp_path,channel))
     assert call.kwargs['channel'] == channel
     assert call.kwargs['executable_path'] == args[0]
+    assert call.kwargs['no_viewport'] is True and 'viewport' not in call.kwargs
+    assert call.kwargs['args']==['--start-maximized']
     assert (legacy/'marker').read_text() == 'original'
 
 

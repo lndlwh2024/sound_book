@@ -97,6 +97,9 @@ def test_failure_bundle_has_last_dom_screenshot_identity_and_entire_task_log(tmp
     assert 'task-1_' in dom.name and '_attempt-1_last' in dom.name
     data = json.loads(dom.read_text(encoding='utf-8'))
     assert data['task_id'] == 'task-1' and data['timestamp'].endswith('+08:00')
+    assert data['stage']=='发布核对'
+    assert data['browser_window']['innerHeight']>0
+    assert data['browser_window']['emulatedViewport']=={'width':1280,'height':720}
     content = dom.read_text(encoding='utf-8')
     assert '最后失败页面' in content and '旧页面' not in content and 'SECRET' not in content
     assert data['screenshot'] == next(folder.glob('*.png')).name

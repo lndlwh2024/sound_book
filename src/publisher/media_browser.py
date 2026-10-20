@@ -23,7 +23,37 @@ def media_browser_executable():
     return None
 
 
+def browser_window_options(options):
+    """A visible browser uses its real maximized client area, including toolbar space."""
+    result = dict(options)
+    if result.get('headless', True) is False:
+        result.pop('viewport', None)
+        result['no_viewport'] = True
+        args = [arg for arg in result.get('args', [])
+                if not arg.startswith('--window-size=') and arg != '--start-maximized']
+        result['args'] = args + ['--start-maximized']
+    return result
+
+
+def browser_window_metrics(page):
+    """Read actual window/viewport dimensions without changing the page."""
+    try:
+        metrics = page.evaluate('''() => ({innerWidth, innerHeight, outerWidth, outerHeight,
+            availWidth:screen.availWidth, availHeight:screen.availHeight,
+            screenWidth:screen.width, screenHeight:screen.height, devicePixelRatio,
+            scrollX, scrollY, pageWidth:document.documentElement.scrollWidth,
+            pageHeight:document.documentElement.scrollHeight})''')
+        if not isinstance(metrics, dict):
+            return {}
+        viewport = page.viewport_size
+        metrics['emulatedViewport'] = viewport if isinstance(viewport, dict) else None
+        return metrics
+    except Exception as error:
+        return {'unavailable': type(error).__name__}
+
+
 def launch_media_context(playwright, user_data_dir, **kwargs):
+    kwargs = browser_window_options(kwargs)
     executable = media_browser_executable()
     if executable:
         kwargs['executable_path'] = str(executable)

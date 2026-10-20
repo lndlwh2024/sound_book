@@ -112,6 +112,7 @@ def test_failed_stage_never_reaches_final_submit(failure_stage):
         result.prepare_publish_form(page, **stages(events, **{failure_stage: (failure_stage, fail)}))
     assert 'submit' not in events
     result._save_diagnostics.assert_called_once_with(page, failure_stage, 'page refused current file')
+    assert result.stage==failure_stage
 
 
 @pytest.mark.parametrize('cls,interruption', [

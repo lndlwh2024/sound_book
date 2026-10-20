@@ -151,6 +151,7 @@ class BrowserPublishWorkflow:
         raise RuntimeError('等待视频上传与处理完成超时；未点击发布，请查看上传状态诊断')
 
     def _required_stage(self, page: Page, name: str, action):
+        self.stage = name
         self._progress(name)
         self._check_stop()
         started = time.monotonic()

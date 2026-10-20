@@ -63,6 +63,7 @@ data/
 # Local previews, deployment checkouts, downloaded OAuth configuration and build artifacts
 artifacts/
 Googledrive/
+.playwright-cli/
 
 # Local standalone publisher archives belong in releases, not source commits.
 /ShuShengPublisher-win-*.zip

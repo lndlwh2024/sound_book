@@ -107,7 +107,7 @@ def test_stop_pipeline_never_archives_unconfirmed_file(tmp_path, monkeypatch, st
 
     uploader._handle_collection_assignment = collection
     if stop_phase == "after_submit":
-        publish.click.side_effect = stop.set
+        publish.click.side_effect = lambda **kwargs: None if kwargs.get('trial') else stop.set()
     success, msg, record = uploader.upload_single_video(video)
     assert success is False and record is None
     assert msg.startswith("已停止")
@@ -118,7 +118,7 @@ def test_stop_pipeline_never_archives_unconfirmed_file(tmp_path, monkeypatch, st
         publish.click.assert_not_called()
         assert "未点击发布" in msg
     else:
-        publish.click.assert_called_once()
+        assert len([call for call in publish.click.call_args_list if not call.kwargs.get('trial')]) == 1
         assert "平台结果未确认，按失败处理" in msg
 
 
