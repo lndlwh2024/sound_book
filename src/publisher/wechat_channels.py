@@ -15,21 +15,24 @@ from .wechat_title import SHORT_TITLE_LIMIT, shorten_title, title_length
 
 
 PUBLISH_PATH = '/cgi-bin/mmfinderassistant-bin/post/post_create'
-SUCCESS_TEXT = re.compile(r'^发表成功[！!。\s]*(?:.*审核.*)?$')
+# The current content microfrontend prefixes its CGI requests with
+# /micro/content. Keep the original endpoint for older frontend deployments.
+PUBLISH_PATHS = frozenset((PUBLISH_PATH, '/micro/content'+PUBLISH_PATH))
+SUCCESS_TEXT = re.compile(r'^(?:发表成功|已发表)[！!。\s]*(?:.*审核.*)?$')
 
 
 def publish_endpoint(url):
     try:
         address = urlsplit(url)
         return (address.scheme == 'https' and address.hostname == 'channels.weixin.qq.com'
-                and address.port in (None, 443) and address.path == PUBLISH_PATH)
+                and address.port in (None, 443) and address.path in PUBLISH_PATHS)
     except (ValueError, TypeError):
         return False
 
 
-def acknowledgement(body, http_status):
+def acknowledgement(body, http_status, *, endpoint='https://channels.weixin.qq.com'+PUBLISH_PATH):
     """An HTTP 200, draft ID or preview response alone never confirms a post."""
-    if not isinstance(body, dict):
+    if not publish_endpoint(endpoint) or not isinstance(body, dict):
         return None
     code = body.get('errCode')
     if isinstance(code, bool) or not isinstance(code, (int, str)):
@@ -50,7 +53,7 @@ def acknowledgement(body, http_status):
            and str(data[key])}
     if len(ids) > 1:
         return None
-    result = {'kind': 'wechat_publish_response', 'endpoint': 'https://channels.weixin.qq.com'+PUBLISH_PATH,
+    result = {'kind': 'wechat_publish_response', 'endpoint': safe_url(endpoint),
               'accepted': True, 'business_code': 0}
     if ids:
         result['post_id'] = ids.pop()
@@ -244,10 +247,13 @@ class WeChatChannelsUploader(CreatorStudioUploader):
     def success_notice(self, page):
         # Only platform notices count; a description/title containing "发表成功"
         # or a management-list row is never evidence for the current file.
-        notices = page.locator('[role=alert], [class*=toast], .weui-desktop-msg')
+        notices = page.locator('[role=alert], [class*=toast], .weui-desktop-msg, '
+                               '.common-toptip:has(.tip-icon.success) .toptip-content')
         for index in range(notices.count()):
             item = notices.nth(index)
-            if item.is_visible() and SUCCESS_TEXT.fullmatch(item.inner_text().strip()):
+            if (item.is_visible() and not item.evaluate(
+                    "e=>e.isContentEditable||!!e.closest('input,textarea,[contenteditable]')")
+                    and SUCCESS_TEXT.fullmatch(item.inner_text().strip())):
                 return item
         return None
 
@@ -256,6 +262,7 @@ class WeChatChannelsUploader(CreatorStudioUploader):
         def started(request):
             if self.submitted and request.method == 'POST' and publish_endpoint(request.url):
                 requests.add(request)
+                self.log('[微信视频号正式发表请求] '+safe_url(request.url))
         def received(response):
             if not self.submitted or response.request not in requests:
                 return
@@ -265,8 +272,10 @@ class WeChatChannelsUploader(CreatorStudioUploader):
             try:
                 body = response.json()
             except Exception:
+                self.log(f'[微信视频号发表回执] {safe_url(response.url)}；HTTP {response.status}；'
+                         '响应内容未能解析，继续核对平台成功提示，不按成功处理')
                 return
-            confirmation = acknowledgement(body, response.status)
+            confirmation = acknowledgement(body, response.status, endpoint=response.url)
             message = str(body.get('errMsg') or body.get('message') or '')[:250] if isinstance(body, dict) else ''
             code = body.get('errCode') if isinstance(body, dict) else None
             self.log(f'[微信视频号发表回执] {safe_url(response.url)}；HTTP {response.status}；业务码 {code}；{message}')

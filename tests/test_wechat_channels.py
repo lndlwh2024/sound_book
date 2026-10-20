@@ -110,7 +110,8 @@ def test_success_words_in_description_or_list_are_not_receipts(browser_page, tmp
     assert instance.success_notice(browser_page) is not None
 
 
-def install_browser(monkeypatch, playwright, records, mode, avatar_only=False, shadow=False):
+def install_browser(monkeypatch, playwright, records, mode, avatar_only=False, shadow=False,
+                    publish_path=PUBLISH_PATH):
     manager = MagicMock()
     manager.__enter__.return_value = playwright
     monkeypatch.setattr(creator_studio, 'sync_playwright', lambda: manager)
@@ -119,7 +120,7 @@ def install_browser(monkeypatch, playwright, records, mode, avatar_only=False, s
         context = playwright.chromium.launch_persistent_context(str(profile), headless=True)
         def route(request):
             if request.request.method == 'POST':
-                assert request.request.url == 'https://channels.weixin.qq.com'+PUBLISH_PATH
+                assert request.request.url == 'https://channels.weixin.qq.com'+publish_path
                 page = context.pages[0]
                 records.append(page.evaluate('''() => {const root=window.fixtureRoot||document;return ({description:root.querySelector('.input-editor').innerText,
                     short:root.querySelector('input[placeholder*=短标题]').value,
@@ -130,6 +131,7 @@ def install_browser(monkeypatch, playwright, records, mode, avatar_only=False, s
                                      else {'errCode': 17, 'message': '发表失败，服务异常'} if mode == 'reject' else {}))
             else:
                 body = HTML.replace('本人视频号</span>', '错误视频号</span>') if mode == 'identity' else HTML
+                body = body.replace(PUBLISH_PATH, publish_path)
                 if avatar_only:
                     body=body.replace('<img><span class="name">本人视频号</span>',
                         '<img class="avatar" style="width:32px;height:32px">')
