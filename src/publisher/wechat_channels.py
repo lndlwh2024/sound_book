@@ -58,7 +58,7 @@ def acknowledgement(body, http_status):
 
 
 class WeChatChannelsUploader(CreatorStudioUploader):
-    title_selector = '.post-desc-box .input-editor[contenteditable], .input-editor[contenteditable=true]'
+    title_selector = 'input[placeholder*="短标题"]'
 
     # Internal safeguards only: ordinary form controls, unknown upload state,
     # and unchanged transfer/processing state have independent deadlines.
@@ -112,11 +112,8 @@ class WeChatChannelsUploader(CreatorStudioUploader):
             original_title = resolve_title(self.account,video.name)
         except ValueError as error:
             raise PlatformRejected('CONFIG_REQUIRED',str(error)) from error
-        editor = self.wait(page, '等待微信视频号描述编辑区',
-                           lambda: self.one_visible(page.locator(self.title_selector)), self.upload_seconds)
-        # This platform deliberately has no description/title-rule setting.
-        # Clear a restored form value as well, instead of posting stale content.
-        self.fill_and_verify(page, editor, '', '视频描述')
+        # Description uses the platform's default blank value. It is optional,
+        # never filled or verified, and must not block the publishing workflow.
         control = self.wait(page, '等待微信视频号短标题', lambda: self.one_visible(
             page.locator('input[placeholder*="短标题"]')), self.control_seconds)
         page_limit=control.get_attribute('maxlength')
@@ -129,7 +126,7 @@ class WeChatChannelsUploader(CreatorStudioUploader):
             self.log(f'[微信视频号标题缩写] 原题（{title_length(original_title)}字符）：{original_title}'
                      f' → 短标题（{title_length(short)}字符）：{short}；标点计入长度')
         self.fill_and_verify(page, control, short, '短标题')
-        self.log('[内容填写] 视频描述留空；短标题='+ (short or '留空，不自动补入文件名'))
+        self.log('[内容填写] 视频描述使用平台默认空值；短标题='+ (short or '留空，不自动补入文件名'))
 
     def fill_and_verify(self, page, control, value, label):
         limit = control.get_attribute('maxlength')

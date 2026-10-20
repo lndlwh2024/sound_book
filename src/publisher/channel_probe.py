@@ -71,7 +71,7 @@ EXTRACT_JS = r'''() => {
             const profileNode=ownHome || ownWechat || !!el.closest('#header-avatar,#side-bar .side-bar-footer .account-info') ||
                 el.matches('[class*="user-info"],[class*="nickname"],[class*="user-name"],[class*="userName"],[class*="user_name"]')
                 && !!el.closest('[role=menu],[role=tooltip],[class*="dropdown-content"],[class*="popover-content"]');
-            const semantic=profileNode || el.matches('input,textarea,button,select,option,a[href],label,[role],[contenteditable="true"],video,progress,canvas,xhs-publish-btn,[class*="progress"],[onclick],[tabindex],[class*="button" i],[class*="btn" i]');
+            const semantic=profileNode || el.isContentEditable || el.matches('input,textarea,button,select,option,a[href],label,[role],[contenteditable],video,progress,canvas,xhs-publish-btn,[class*="progress"],[onclick],[tabindex],[class*="button" i],[class*="btn" i]');
             if (!semantic && !(s.cursor==='pointer' && noticeText.length>0 && noticeText.length<=80)) continue;
             nodes.push({tag:el.tagName.toLowerCase(), id:el.id, name:el.getAttribute('name'),
                 role:el.getAttribute('role'), type:el.getAttribute('type'), accept:el.getAttribute('accept'),
@@ -97,6 +97,10 @@ EXTRACT_JS = r'''() => {
                         disabled:owner.matches(':disabled')||owner.getAttribute('aria-disabled')==='true',
                         pointerEvents:getComputedStyle(owner).pointerEvents} : null;})(),
                 readOnly:el.readOnly===true, contentEditable:el.isContentEditable,
+                editorContent:el.isContentEditable ? {attribute:el.getAttribute('contenteditable'),
+                    textContent:(el.textContent||'').slice(0,1000),innerText:(el.innerText||'').slice(0,1000),
+                    placeholder:el.getAttribute('data-placeholder')||el.getAttribute('placeholder'),
+                    nonText:!!el.querySelector('img,video,audio,iframe,a[href],[data-mention]')} : null,
                 visible:r.width>0 && r.height>0 && s.visibility!=='hidden' && s.display!=='none',
                 text:el.matches('input,textarea') ? '' : (el.innerText||el.textContent||'').trim().slice(0,200),
                 valueNow:el.matches('progress') ? el.value : null, valueMax:el.matches('progress') ? el.max : null,

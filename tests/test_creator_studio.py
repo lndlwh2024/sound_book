@@ -174,7 +174,7 @@ def install_local_browser(monkeypatch,playwright,mode='api'):
                     payload={'code':42,'message':{'quota':'抱歉，今天投稿次数已达到上限，请明天再试',
                         'duration':'视频时长不得超过60分钟','failed':'发布失败，请稍后重试',
                         'closed_busy':'系统繁忙，请稍后再试','closed_rate_limit':'请求太频繁，请一分钟后再试'}[active]}
-                if platform=='kuaishou' and active!='notice':
+                if platform=='kuaishou' and active not in ('notice','unconfirmed'):
                     # Real pc/submit returns result=1. Its success acknowledgement
                     # need not include a photo/work ID (unlike the old fake API).
                     payload=({'result':1,'message':'成功'} if active in ('api','remount')

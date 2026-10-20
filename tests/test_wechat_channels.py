@@ -208,11 +208,14 @@ def test_location_is_forced_off_and_other_defaults_are_untouched(browser_page, t
     browser_page.locator('.position-display-wrap').evaluate("e=>e.innerText='北京市'")
     browser_page.locator('main').evaluate('''e=>e.insertAdjacentHTML('beforeend',
         '<input id="original" type="checkbox"><input id="ai" type="checkbox"><input id="link" value="">')''')
-    browser_page.locator('.input-editor').fill('上次页面遗留的描述')
+    browser_page.locator('.input-editor').evaluate('''e=>{
+        e.addEventListener('input',()=>window.descriptionEdited=true);
+    }''')
     instance.fill_details(browser_page, Path('file.mp4'))
     instance.select_collection(browser_page)
     assert browser_page.locator('.position-display-wrap').inner_text() == '不显示位置'
     assert browser_page.locator('.input-editor').inner_text().strip() == ''
+    assert not browser_page.evaluate('!!window.descriptionEdited')
     assert not browser_page.locator('#original').is_checked()
     assert not browser_page.locator('#ai').is_checked()
     assert browser_page.locator('#link').input_value() == ''
