@@ -440,6 +440,7 @@ def test_upload_wait_does_not_accept_early_form_or_success_label_while_progress_
         try:
             page = browser.new_page()
             page.set_content('''<input placeholder="填写作品标题，为作品获得更多流量"><span>上传成功</span>
+                <div>点击发布后，如作品还在上传中，请勿关闭页面，等待上传发布完成。</div>
                 <div id="busy">正在上传</div><div role="progressbar" class="upload-progress" style="width:200px;height:20px" aria-valuenow="40" aria-valuemax="100"></div>''')
             with pytest.raises(RuntimeError, match='未点击发布'):
                 uploader._wait_for_upload_ready(page, .4)
@@ -474,6 +475,38 @@ def test_only_current_create_api_acknowledgement_confirms_publish(tmp_path):
     assert uploader._publish_result['code'] != '0'
 
 
+@pytest.mark.parametrize('hint', [
+    '点击发布后，如作品还在上传中，请勿关闭页面，等待上传发布完成。',
+    '点击发布后,如作品还在上传中,请勿关闭页面,等待上传发布完成。',
+    '点击发布后，\n如作品还在上传中，请勿关闭页面，等待上传发布完成。',
+])
+def test_publish_guidance_is_not_upload_activity_or_a_success_signal(tmp_path, hint):
+    uploader = make_uploader(tmp_path)
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        try:
+            page = browser.new_page()
+            page.set_content('''<input placeholder="填写作品标题，为作品获得更多流量">
+                <canvas width="150" height="200"></canvas><div>重新上传</div>
+                <div id="hint"></div><div id="status"></div>''')
+            page.locator('#hint').evaluate('(el, text) => el.textContent = text', hint)
+            state = uploader._read_upload_state(page)
+            assert state['pending'] == [] and not state['ready']
+            assert not uploader._upload_activity_seen
+            for text in ('正在上传', '上传中', '转码中', '正在转码', '视频处理中', '视频处理尚未完成'):
+                page.locator('#status').evaluate('(el, text) => el.textContent = text', text)
+                state = uploader._read_upload_state(page)
+                assert state['pending'] == [text]
+                assert uploader._upload_activity_seen
+            page.locator('#status').evaluate('(el) => el.textContent = "视频上传失败，请重新上传"')
+            assert uploader._read_upload_state(page)['failed'] == ['视频上传失败，请重新上传']
+            assert page.locator('#hint').is_visible()
+            assert page.locator('#hint').text_content() == hint
+            assert uploader._publish_result is None
+        finally:
+            browser.close()
+
+
 def test_upload_progress_disappearance_completes_without_dismissing_preview_tip(tmp_path):
     uploader = make_uploader(tmp_path)
     uploader._video_selected = True
@@ -483,6 +516,7 @@ def test_upload_progress_disappearance_completes_without_dismissing_preview_tip(
             page = browser.new_page()
             page.set_content('''<input placeholder="填写作品标题，为作品获得更多流量">
                 <canvas width="150" height="200"></canvas><div>重新上传</div>
+                <div id="hint">点击发布后，如作品还在上传中，请勿关闭页面，等待上传发布完成。</div>
                 <div id="progress" class="upload-progress" style="width:200px;height:20px" role="progressbar" aria-valuenow="67"></div>
                 <aside id="tip"><h2>视频预览功能</h2><button onclick="window.dismissed=true">我知道了</button></aside>''')
             # Observe during pre-publish preparation, then the SDK removes progress before the gate.
@@ -491,6 +525,7 @@ def test_upload_progress_disappearance_completes_without_dismissing_preview_tip(
             page.evaluate("document.querySelector('#progress').remove()")
             uploader._wait_for_upload_ready(page, 4)
             assert page.locator('#tip').is_visible()
+            assert page.locator('#hint').is_visible()
             assert not page.evaluate('!!window.dismissed')
             assert uploader._publish_result is None
         finally:
@@ -506,7 +541,8 @@ def test_upload_progress_absence_alone_never_allows_publish(tmp_path, scenario):
         try:
             page = browser.new_page()
             page.set_content('''<input placeholder="填写作品标题，为作品获得更多流量">
-                <canvas></canvas><div>重新上传</div>''')
+                <canvas></canvas><div>重新上传</div>
+                <div>点击发布后，如作品还在上传中，请勿关闭页面，等待上传发布完成。</div>''')
             if scenario == 'no_preview':
                 page.locator('canvas').evaluate('(el)=>el.remove()')
             if scenario == 'upload_failed':

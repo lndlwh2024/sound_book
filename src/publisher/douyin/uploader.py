@@ -434,7 +434,10 @@ class DouyinUploader(BrowserPublishWorkflow):
                 const texts = Array.from(document.querySelectorAll('span,p,div'))
                     .filter(el=>el.children.length===0 && visible(el))
                     .map(el=>(el.innerText||'').trim()).filter(t=>t.length<160);
-                const pending = texts.filter(t=>/正在上传|上传中|转码中|正在转码|视频处理中|视频处理尚未完成/.test(t));
+                // This conditional publishing instruction is not a live upload status.
+                const publishGuidance = t => /^点击发布后[，,]如作品还在上传中[，,]请勿关闭页面[，,]等待上传发布完成[。.!！]?$/.test(t.replace(/\s+/g,''));
+                const pending = texts.filter(t=>!publishGuidance(t)
+                    && /正在上传|上传中|转码中|正在转码|视频处理中|视频处理尚未完成/.test(t));
                 const ready = texts.some(t=>/^(视频)?上传(成功|完成)[！!。]?$/.test(t));
                 const progress = Array.from(document.querySelectorAll('[role="progressbar"],progress,[class*="upload-progress"]'))
                     .filter(visible).map(el=>({text:el.innerText||'', value:Number(el.getAttribute('aria-valuenow')??el.value??((el.innerText||'').match(/(\d+(?:\.\d+)?)\s*%/)||[])[1]??-1),
