@@ -688,6 +688,11 @@ class ProductionWorker(QThread):
             limit_enabled = split_mode == "by_chapter" and bool(cfg.get("chapter_max_duration_enabled", False))
             max_seconds = float(cfg.get("chapter_max_duration_minutes", 60)) * 60
             ranges = unit_ranges(chapter_units, max_seconds) if limit_enabled else [(0, len(chapter_units))]
+            split_required = limit_enabled and len(ranges) > 1
+            if limit_enabled:
+                logger.info("分集上限检查：章节实际 %.3f 秒，最大允许 %g 秒；%s",
+                            sum(unit.audio_duration for unit in chapter_units), max_seconds,
+                            f"实际拆为 {len(ranges)} 段" if split_required else "无需拆分，沿用原单集文件名")
             manifest_mgr._atomic_write(book_dir / f"episode_{ep_order:02d}_segments.json", {
                 "synthesis_key": synth_key, "limited": limit_enabled, "max_seconds": max_seconds if limit_enabled else None,
                 "ranges": [{"start": lo, "end": hi, "unit_ids": [u.unit_id for u in chapter_units[lo:hi]]} for lo, hi in ranges]})
@@ -697,8 +702,9 @@ class ProductionWorker(QThread):
                 storybook_scenes = segment_scenes(chapter_scenes, lo, hi, chapter_units) if limit_enabled else chapter_scenes
                 suffix = ("上" if part_number == 1 else "下") if len(ranges) == 2 else f"第{part_number}段"
                 part_tag = f"_限长{max_seconds/60:g}m_{synth_key[:8]}_{render_key}_{suffix}" if limit_enabled else ""
-                chapter_name = sanitize_filename(ep.chapter_titles[0])[:60] if limit_enabled and ep.chapter_titles else ""
-                clean_ch = f"第{ep_order:02d}集" + ("_"+chapter_name if chapter_name else "") + part_tag
+                # Keep internal cache/manifest IDs scoped to the limit settings,
+                # but preserve the original delivery filename unless we split.
+                clean_ch = f"第{ep_order:02d}集" + (f"-{part_number}" if split_required else "")
                 part_id = f"episode_{ep_order:02d}" + part_tag
                 part_subtitle = ep.subtitle + (f" · {suffix}" if limit_enabled and len(ranges)>1 else "")
                 work_dir = book_dir / "render_work" / (part_id + "_" + synth_key + "_" + render_key)
@@ -717,6 +723,8 @@ class ProductionWorker(QThread):
                 # 计算单集物理时长（秒）并换算为分钟（不足 1 分钟四舍五入保底 1m）
                 duration_secs = sub_items[-1].end_time if sub_items else 0.0
                 dur_mins = max(1, int(round(duration_secs / 60.0)))
+                video_file_name = (f"{clean_book}_{clean_ch}_[{commit_hash}].MP4" if split_required else
+                                   f"{clean_book}_{clean_ch}{'_P' if storybook_enabled else ''}_{dur_mins}m_[{commit_hash}].mp4")
 
                 # 【为什么这样设计】
                 # 响应用户需求 1：
@@ -862,8 +870,8 @@ class ProductionWorker(QThread):
 
                         self._boundary()
                         # 节点 10: 视频合成压制 (VIDEO_RENDERING)
-                        # 小人书带插画视频命名格式严格遵循：{书名}_{章节名}_P_{时长}m_[{commit_hash}].mp4
-                        ep_mp4_path = output_base / f"{clean_book}_{clean_ch}_P_{dur_mins}m_[{commit_hash}].mp4"
+                        # 未拆分时保留原有 _P_ 命名；实际拆分使用统一的“第N集-分段号”。
+                        ep_mp4_path = output_base / video_file_name
                         self._status("VIDEO_RENDERING")
                         self.sig_progress_updated.emit(90.0, f"【10/12 视频合成】正在通过 NVENC 硬件加速压制小人书 MP4 视频...")
                         storybook_composer = StorybookComposer(
@@ -892,7 +900,7 @@ class ProductionWorker(QThread):
 
                         self._boundary()
                         # 节点 10: 视频合成压制 (不带插画的普通封面视频，命名保持原版不变)
-                        ep_mp4_path = output_base / f"{clean_book}_{clean_ch}_{dur_mins}m_[{commit_hash}].mp4"
+                        ep_mp4_path = output_base / video_file_name
                         self._status("VIDEO_RENDERING")
                         self.sig_progress_updated.emit(90.0, f"【10/12 视频合成】正在调用 GPU 硬件加速压制标准封面 MP4 视频...")
                         video_composer.render_episode_video(
@@ -918,8 +926,14 @@ class ProductionWorker(QThread):
                     if limit_enabled:
                         from ..audio.ffmpeg_utils import get_audio_info
                         actual_duration = get_audio_info(ep_mp4_path).get("duration", 0)
-                        if actual_duration <= 0 or actual_duration > max_seconds + 0.1:
-                            raise ValueError("成片时长未满足分集最大时长，保留文件供排查，不标记完成")
+                        if not math.isfinite(actual_duration) or actual_duration <= 0:
+                            raise ValueError("成片时长读取失败，无法校验分集最大时长；"
+                                             f"文件已保留：{ep_mp4_path.name}。请查看 FFprobe 诊断日志")
+                        if actual_duration > max_seconds + 0.1:
+                            raise ValueError(f"成片实际时长 {actual_duration:.3f} 秒，"
+                                             f"超过分集最大时长 {max_seconds:g} 秒；"
+                                             "文件已保留，不标记完成")
+                        logger.info("成片时长校验通过：实际 %.3f 秒，最大允许 %g 秒", actual_duration, max_seconds)
                     logger.info(f"第 {ep_order:02d} 集最终视频成品质检合格: {ep_mp4_path.name} ({ep_mp4_path.stat().st_size / 1024 / 1024:.2f} MB)")
 
                 episodes_manifests = [old for old in episodes_manifests if old.episode_id != part_id]

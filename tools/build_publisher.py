@@ -81,6 +81,7 @@ def main():
                    'docs/CUSTOM_NICKNAME_20261020.md',
                    'docs/WECHAT_SHORT_TITLE_20261020.md',
                    'docs/PUBLISHING_GUARDS_20261020.md',
+                   'docs/PRODUCTION_DURATION_QC_20261020.md',
                    'requirements-publisher.txt', 'requirements-publisher-lock.txt'):
         shutil.copy2(ROOT/source, output/Path(source).name)
     (output/'自检.cmd').write_text('@echo off\r\ncd /d "%~dp0"\r\nstart /wait "" ShuShengPublisher.exe --self-check --output "%~dp0self-check.json"\r\nnotepad "%~dp0self-check.json"\r\n', encoding='utf-8')

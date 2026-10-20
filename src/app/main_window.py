@@ -2813,7 +2813,7 @@ class MainWindow(QMainWindow):
                 "ffprobe", "-v", "error", "-show_entries", "format=duration",
                 "-of", "default=noprint_wrappers=1:nokey=1", str(p.absolute())
             ]
-            res = subprocess.run(cmd, capture_output=True, text=True, timeout=2, creationflags=0x08000000)
+            res = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=2, creationflags=0x08000000)
             if res.returncode == 0 and res.stdout.strip():
                 return float(res.stdout.strip())
         except Exception:

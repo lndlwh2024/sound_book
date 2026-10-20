@@ -128,7 +128,7 @@ class AudioMixer:
 
         try:
             logger.info(f"启动混音流程: voice={voice_path.name}, bgm={bgm_path.name}, 输出={output_path.name}")
-            subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True)
+            subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace", check=True)
             logger.info(f"混音完成: {output_path}")
             return True
         except subprocess.CalledProcessError as e:
@@ -212,7 +212,7 @@ class AudioMixer:
             ]
 
         try:
-            subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True)
+            subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace", check=True)
             logger.info(f"生成混音试听片段成功 ({preview_seconds}s): {output_path}")
             return True
         except subprocess.CalledProcessError as e:
@@ -231,7 +231,7 @@ class AudioMixer:
             str(output_path.absolute())
         ]
         try:
-            subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True)
+            subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace", check=True)
             return True
         except subprocess.CalledProcessError as e:
             logger.error(f"处理纯人声音量失败: {e.stderr}")

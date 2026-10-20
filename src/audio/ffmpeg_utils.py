@@ -47,14 +47,20 @@ def get_audio_info(wav_path: Path) -> dict:
     # 2. 降级使用 ffprobe
     cmd = [
         "ffprobe",
-        "-v", "quiet",
+        "-v", "error",
         "-print_format", "json",
         "-show_format",
         "-show_streams",
         str(wav_path)
     ]
     try:
-        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True)
+        # FFprobe JSON is UTF-8. Windows text mode otherwise decodes it with
+        # CP936, whose reader thread can fail and return stdout=None for a
+        # perfectly valid file with a Chinese filename or metadata.
+        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                check=True, timeout=30)
+        if not result.stdout:
+            raise ValueError("FFprobe 未返回媒体信息，无法读取真实时长")
         data = json.loads(result.stdout)
         
         stream = None
@@ -90,7 +96,7 @@ def normalize_audio(input_path: Path, output_path: Path, sample_rate: int = 2400
         str(output_path)
     ]
     try:
-        subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True)
+        subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace", check=True)
         return True
     except subprocess.CalledProcessError as e:
         logger.error(f"统一音频格式失败 {input_path}: {e.stderr}")
@@ -110,7 +116,7 @@ def _generate_silence(duration_ms: int, output_path: Path, sample_rate: int = 24
         str(output_path)
     ]
     try:
-        subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True)
+        subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace", check=True)
         return True
     except subprocess.CalledProcessError as e:
         logger.error(f"生成静音文件失败: {e.stderr}")
@@ -150,7 +156,7 @@ def concat_wavs(wav_files: List[Path], output_path: Path, pause_ms: int = 0) -> 
             str(output_path)
         ]
         
-        subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True)
+        subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace", check=True)
         return True
     except subprocess.CalledProcessError as e:
         logger.error(f"拼接 WAV 文件失败: {e.stderr}")
@@ -176,7 +182,7 @@ def wav_to_mp3(wav_path: Path, mp3_path: Path, bitrate: str = "128k") -> bool:
         str(mp3_path)
     ]
     try:
-        subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True)
+        subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace", check=True)
         return True
     except subprocess.CalledProcessError as e:
         logger.error(f"WAV 转 MP3 失败 {wav_path}: {e.stderr}")
@@ -263,7 +269,7 @@ def create_m4b(chapter_mp3s: List[dict], output_path: Path, metadata: dict = Non
             str(output_path)
         ])
         
-        subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True)
+        subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace", check=True)
         return True
         
     except subprocess.CalledProcessError as e:

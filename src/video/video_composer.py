@@ -22,7 +22,7 @@ def check_nvenc_available() -> bool:
             ["ffmpeg", "-encoders"],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            text=True,
+            text=True, encoding="utf-8", errors="replace",
             check=True
         )
         return "h264_nvenc" in res.stdout
@@ -115,7 +115,7 @@ class VideoComposer:
 
         try:
             logger.info(f"启动视频合成: 封面={cover_path.name}, 音轨={audio_path.name}, 标题={main_title}, 输出={output_mp4_path.name}")
-            subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True)
+            subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace", check=True)
             logger.info(f"视频合成成功: {output_mp4_path}")
             return True
         except subprocess.CalledProcessError as e:
@@ -167,7 +167,7 @@ class VideoComposer:
         ]
 
         try:
-            subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True)
+            subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace", check=True)
             logger.info(f"生成单帧排版预览图成功: {output_image_path}")
             return True
         except subprocess.CalledProcessError as e:
@@ -192,7 +192,7 @@ class VideoComposer:
             str(output.absolute())
         ]
         try:
-            subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True)
+            subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace", check=True)
             logger.info(f"libx264 回退合成成功: {output}")
             return True
         except subprocess.CalledProcessError as e:

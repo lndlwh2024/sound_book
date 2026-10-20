@@ -95,7 +95,7 @@ class AudioQC:
         ]
         try:
             # 捕获 stderr，因为 ffmpeg 把输出写到 stderr
-            process = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True)
+            process = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace", check=True)
             output = process.stderr
 
             for line in output.split('\n'):

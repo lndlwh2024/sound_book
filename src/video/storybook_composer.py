@@ -155,7 +155,7 @@ class StorybookComposer:
 
         try:
             logger.info(f"启动小人书视频合成: 场景数={len(scenes)}, 音轨={audio_path.name}, 输出={output_mp4_path.name}")
-            subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True)
+            subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace", check=True)
             logger.info(f"小人书视频合成成功: {output_mp4_path}")
             return True
         except subprocess.CalledProcessError as e:
@@ -189,7 +189,7 @@ class StorybookComposer:
             str(output_mp4_path.absolute())
         ]
         try:
-            subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True)
+            subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace", check=True)
             logger.info(f"libx264 软件回退合成小人书成功: {output_mp4_path}")
             return True
         except subprocess.CalledProcessError as e:
@@ -230,7 +230,7 @@ class StorybookComposer:
         ]
 
         try:
-            subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True)
+            subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace", check=True)
             return True
         except subprocess.CalledProcessError as e:
             logger.error(f"生成单帧小人书排版预览失败: {e.stderr}")

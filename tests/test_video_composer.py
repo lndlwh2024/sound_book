@@ -51,12 +51,13 @@ def test_render_preview_frame(tmp_path):
     assert preview_jpg.stat().st_size > 0
 
 
-def test_render_episode_video_mp4(tmp_path):
+@pytest.mark.parametrize('video_name', ['episode_01.mp4', '测试书_第38集-1_[testhash].MP4'])
+def test_render_episode_video_mp4(tmp_path, video_name):
     """测试完整分集 MP4 视频的渲染与封装"""
     composer = VideoComposer(layout_name="portrait_9_16", prefer_nvenc=True)
     cover_jpg = tmp_path / "cover.jpg"
     audio_wav = tmp_path / "audio.wav"
-    output_mp4 = tmp_path / "episode_01.mp4"
+    output_mp4 = tmp_path / video_name
 
     assert _generate_test_image(cover_jpg, 600, 800) is True
     assert _generate_silence(2000, audio_wav) is True

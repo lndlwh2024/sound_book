@@ -62,7 +62,7 @@ def pipeline(tmp_path, monkeypatch):
     monkeypatch.setattr(bridge,'StorybookComposer',Composer)
     from src.audio import ffmpeg_utils
     original_info=ffmpeg_utils.get_audio_info
-    monkeypatch.setattr(ffmpeg_utils,'get_audio_info',lambda p: {'duration':video_durations.get(str(p),0)} if str(p).endswith('.mp4') else original_info(p))
+    monkeypatch.setattr(ffmpeg_utils,'get_audio_info',lambda p: {'duration':video_durations.get(str(p),0)} if str(p).lower().endswith('.mp4') else original_info(p))
     output=tmp_path/'output';output.mkdir()
     cfg={'book_path':str(tmp_path/'test.epub'),'book_title':'安全测试','book_id':'isolated',
          'output_dir':str(output),'split_mode':'by_chapter','start_chapter':1,'end_chapter':1,
@@ -92,6 +92,86 @@ def test_chapter_split_uses_real_audio_and_repeats_only_picture(pipeline):
     assert len(list(p.output.glob('*.srt')))==3
     p.run() # Resume/repeat reuses completed parts and actual speech cache.
     assert len(p.generated)==8 and len(p.rendered)==3
+
+
+def test_maximum_is_an_upper_bound_and_short_chapter_completes(pipeline):
+    p=pipeline
+    worker,errors,states=p.run(chapter_max_duration_minutes=3)
+    assert not errors, errors
+    assert states[-1]=='COMPLETED'
+    assert len(p.generated)==8 and len(p.rendered)==1
+    assert sum(scene[3] for scene in p.rendered[0])==160  # below the 180s cap
+    assert worker._checkpoint.get('completed_part')
+
+
+def video_config(p,monkeypatch,storybook):
+    monkeypatch.setattr(bridge,'_get_git_commit_short',lambda:'testhash')
+    if not storybook:
+        cover=p.output/'cover.png'
+        cover.write_bytes(b'local cover stub')
+        from src.audio import ffmpeg_utils
+        original=ffmpeg_utils.get_audio_info
+        durations={}
+        def render(self,output_mp4_path,audio_path,**kwargs):
+            Path(output_mp4_path).write_bytes(b'video-stub'*2000)
+            durations[str(output_mp4_path)]=original(audio_path)['duration']
+        monkeypatch.setattr(bridge.VideoComposer,'render_episode_video',render)
+        monkeypatch.setattr(ffmpeg_utils,'get_audio_info',lambda path:
+            {'duration':durations.get(str(path),0)} if str(path).lower().endswith('.mp4') else original(path))
+    else:
+        cover=None
+    return dict(storybook_enabled=storybook,cover_path=str(cover) if cover else None)
+
+
+@pytest.mark.parametrize('storybook', [False, True])
+@pytest.mark.parametrize('maximum', [160/60,3])
+def test_unsplit_limit_keeps_original_delivery_filenames(pipeline,monkeypatch,storybook,maximum):
+    p=pipeline
+    changes=video_config(p,monkeypatch,storybook)
+    _,errors,states=p.run(chapter_max_duration_enabled=False,**changes)
+    assert not errors and states[-1]=='COMPLETED'
+    original_names={path.name for path in p.output.iterdir() if path.suffix in ('.mp4','.wav','.srt')}
+    _,errors,states=p.run(chapter_max_duration_enabled=True,chapter_max_duration_minutes=maximum,**changes)
+    assert not errors and states[-1]=='COMPLETED'
+    actual_names={path.name for path in p.output.iterdir() if path.suffix in ('.mp4','.wav','.srt')}
+    assert actual_names==original_names
+    assert len(actual_names)==3
+    assert all('限长' not in name and '第1段' not in name and '_第一章' not in name for name in actual_names)
+    assert len(list(p.output.glob('*.mp4')))==1
+
+
+@pytest.mark.parametrize('storybook', [False, True])
+@pytest.mark.parametrize('maximum,parts', [(1,3),(2,2)])
+def test_actual_splits_use_only_episode_number_and_part_index(pipeline,monkeypatch,storybook,maximum,parts):
+    p=pipeline
+    changes=video_config(p,monkeypatch,storybook)
+    _,errors,states=p.run(chapter_max_duration_minutes=maximum,**changes)
+    assert not errors, errors
+    assert states[-1]=='COMPLETED'
+    videos={path.name for path in p.output.iterdir() if path.suffix.lower()=='.mp4'}
+    assert videos=={f'安全测试_第01集-{number}_[testhash].MP4' for number in range(1,parts+1)}
+    assert len(p.generated)==8
+
+
+@pytest.mark.parametrize('reported_duration,message',[
+    (181,'超过分集最大时长'),
+    (0,'成片时长读取失败'),
+    (float('nan'),'成片时长读取失败'),
+    (float('inf'),'成片时长读取失败'),
+])
+def test_final_qc_separates_over_cap_from_unreadable_duration(pipeline,monkeypatch,reported_duration,message):
+    p=pipeline
+    from src.audio import ffmpeg_utils
+    original=ffmpeg_utils.get_audio_info
+    def info(path):
+        return {'duration':reported_duration} if str(path).endswith('.mp4') else original(path)
+    monkeypatch.setattr(ffmpeg_utils,'get_audio_info',info)
+    worker,errors,states=p.run(chapter_max_duration_minutes=3)
+    assert errors and message in errors[0][1]
+    assert states[-1]=='FAILED' and 'COMPLETED' not in states
+    assert not worker._checkpoint.get('completed_part')
+    assert len(list(p.output.glob('*.mp4')))==1  # preserve the rendered asset
+    assert len(p.generated)==8
 
 
 def test_pause_finishes_scene_without_partial_episode_failure_then_resume(pipeline):
