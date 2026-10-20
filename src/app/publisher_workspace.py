@@ -192,18 +192,21 @@ class PublisherPanel(MultiPlatformPublisherPanel):
                     panel.platform_fields.removeWidget(title)
                     panel.platform_fields.removeWidget(control)
                 panel._field_specs=[]
-                for number,index in enumerate((0,2,4,5,7,6,1)):
+                row = 0
+                for number,index in enumerate((0,2,4,5,7,6)):
                     title,control,_=fields[index]
                     row,col=divmod(number,2)
                     panel.platform_fields.addWidget(title,row,col*2)
-                    panel.platform_fields.addWidget(control,row,col*2+1,1,3 if index==1 else 1)
-                    control.setFixedHeight(50 if index==1 else 30)
+                    panel.platform_fields.addWidget(control,row,col*2+1)
+                    control.setFixedHeight(30)
                     title.setFixedWidth(82)
-                title,control,_=fields[3]
-                rule_row=QHBoxLayout()
-                rule_row.addWidget(title)
-                rule_row.addWidget(control,1)
-                rules_layout.addLayout(rule_row)
+                for index in (3,1):
+                    row += 1
+                    title,control,_=fields[index]
+                    panel.platform_fields.addWidget(title,row,0)
+                    panel.platform_fields.addWidget(control,row,1,1,3)
+                    control.setFixedHeight(36 if index==1 else 30)
+                    title.setFixedWidth(82)
                 self.youtube_options=tabs
             rules_layout.addStretch()
             tabs.addTab(info_page,'发布信息')

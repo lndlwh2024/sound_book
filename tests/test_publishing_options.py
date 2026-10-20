@@ -208,15 +208,26 @@ def test_standalone_custom_title_layout_fits_and_hidden_restore_is_paused(app,tm
         for index,view in enumerate(controller.panels):
             controller.channel_view.setCurrentIndex(index)
             view.settings_tabs.setCurrentIndex(1)
-            view.option_pages.setCurrentIndex(0 if view.platform!='youtube' else 1)
+            view.option_pages.setCurrentIndex(0)
             view.title_source.setCurrentIndex(view.title_source.findData('custom'))
             view.custom_title.setText('自定义标题');app.processEvents()
             for control in (view.custom_title,view.title_source,view.save_button,view.deploy_button):
                 assert control.isVisible()
                 assert control.mapTo(view.left_settings,control.rect().bottomRight()).y()<view.left_settings.height()
             assert view.custom_title.width()>120 and view.title_source.width()>90
+            if view.platform=='youtube':
+                for control in (view.channel_id,view.playlist,view.description,*view.youtube_fields.values()):
+                    assert control.isVisible()
+                    assert view.option_pages.currentWidget().rect().contains(
+                        control.mapTo(view.option_pages.currentWidget(),control.rect().topLeft()))
+                    assert view.option_pages.currentWidget().rect().contains(
+                        control.mapTo(view.option_pages.currentWidget(),control.rect().bottomRight()))
+                view.option_pages.setCurrentIndex(1);app.processEvents()
+                assert not view.title_source.isVisible()
+                assert view.daily_limit.isVisible() and view.auto_archive.isVisible()
+                view.option_pages.setCurrentIndex(0);app.processEvents()
             if view.platform in ('youtube','wechat_channels'):
-                folder=Path('artifacts/publishing-options-20261019');folder.mkdir(parents=True,exist_ok=True)
+                folder=Path('artifacts/publish-intervals-20261020');folder.mkdir(parents=True,exist_ok=True)
                 assert window.grab().save(str(folder/(view.platform+'-1366.png')))
         assert not window.findChildren(QScrollArea)
         controller.state.targets=['xiaohongshu:'+'a'*32]

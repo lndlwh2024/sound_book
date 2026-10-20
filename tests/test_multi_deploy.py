@@ -77,7 +77,7 @@ def test_continuous_task_logs_scan_wait_and_retains_unknown_without_reupload(tmp
         uploader=MagicMock(upload_single_video=upload)
         return uploader
     job=worker(tmp_path,targets,factory)
-    job.poll_seconds=300
+    job.poll_seconds=5
     logs,statuses,waits=[],[],[]
     job.log.connect(logs.append)
     job.status.connect(statuses.append)
@@ -90,12 +90,12 @@ def test_continuous_task_logs_scan_wait_and_retains_unknown_without_reupload(tmp
     job.controlled_wait=wait
     job.run()
     assert calls==['a.mp4','a.mp4']
-    assert waits==[300,300]
-    assert sum('[定时扫描等待]' in line for line in logs)==2
-    assert sum('[定时扫描开始]' in line for line in logs)==1
+    assert waits==[5,5]
+    assert sum('[等待本地视频]' in line for line in logs)==2
+    assert sum('[检查本地视频]' in line for line in logs)==1
     assert not any('[待核对保留]' in line for line in logs)
-    assert any('每300秒' in line and '北京时间' in line for line in logs)
-    assert any('定时扫描等待（每300秒）' in line for line in statuses)
+    assert any('每5秒' in line and '北京时间' in line for line in logs)
+    assert any('等待本地视频（每5秒检查）' in line for line in statuses)
     assert job.report['files'][0]['results'][targets[0].key]['status']=='FAILED2'
 
 
@@ -110,7 +110,7 @@ def test_manual_batch_does_not_claim_to_enter_periodic_scanning(tmp_path):
     job.log.connect(logs.append)
     job.run()
     assert job.report['status']=='COMPLETED'
-    assert not any('[定时扫描' in line for line in logs)
+    assert not any('[等待本地视频]' in line for line in logs)
 
 
 def test_deferred_archive_and_only_failed_target_retries(tmp_path):

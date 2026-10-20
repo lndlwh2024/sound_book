@@ -23,6 +23,7 @@ from .archive import archive_completed_file
 
 CHINA_TIME = timezone(timedelta(hours=8))
 SUCCESS = 'SUCCESS'
+LOCAL_UPLOAD_INTERVAL_SECONDS = 5
 LEGACY_REVIEW_MESSAGE = '发现原抖音成功账本；旧记录缺少本次确认依据，请核对后标记成功或允许重试，避免重复发布'
 LEGACY_FAILED_MESSAGE = '旧未确认投稿按失败处理；新任务允许重试'
 STUDIO_ADAPTERS = {'xiaohongshu': XiaohongshuUploader, 'kuaishou': KuaishouUploader,
@@ -173,7 +174,7 @@ class MultiDeployWorker(QThread):
     status = Signal(str)
     result_changed = Signal(dict)
 
-    def __init__(self, targets, root=None, parent=None, uploader_factory=None, poll_seconds=300, interval_seconds=30, file_paths=None, archive_targets=None, deferred_preflight=None, history_targets=None, strict_recovery=False, task_id=None):
+    def __init__(self, targets, root=None, parent=None, uploader_factory=None, poll_seconds=LOCAL_UPLOAD_INTERVAL_SECONDS, interval_seconds=LOCAL_UPLOAD_INTERVAL_SECONDS, file_paths=None, archive_targets=None, deferred_preflight=None, history_targets=None, strict_recovery=False, task_id=None):
         super().__init__(parent)
         self.targets = [PublishTarget(t.platform, replace(t.account), t.profile)
             for t in sorted(targets,key=lambda t:(PUBLISH_ORDER.index(t.platform),t.account.account_id))]
@@ -196,6 +197,7 @@ class MultiDeployWorker(QThread):
         self.deferred_preflight = set(deferred_preflight or ())
         self.factory = uploader_factory or self.make_uploader
         self.poll_seconds, self.interval_seconds = poll_seconds, interval_seconds
+        self._next_upload_at = 0
         self.stopping = threading.Event()
         self.pause_requested = threading.Event()
         self.wake_requested = threading.Event()
@@ -265,6 +267,15 @@ class MultiDeployWorker(QThread):
                 self.wake_requested.clear()
                 break
             remaining -= time.monotonic() - started
+
+    def wait_for_next_upload(self):
+        """Wait only before real work; file notifications belong to the local check."""
+        while self.checkpoint():
+            remaining = self._next_upload_at - time.monotonic()
+            if remaining <= 0:
+                return True
+            self.stopping.wait(min(.1, remaining))
+        return False
 
     def make_uploader(self, target, log):
         if target.platform == 'douyin':
@@ -447,6 +458,7 @@ class MultiDeployWorker(QThread):
     def attempt(self, job, target):
         operation = self.diagnostics.operation(target.platform, target.account.account_id, job['path'].name)
         self.failure_operation = operation
+        previous_attempts = len(job['item']['results'][target.key]['attempts'])
         try:
             status = self._attempt(job,target)
             return status
@@ -466,6 +478,11 @@ class MultiDeployWorker(QThread):
                 except OSError as error:
                     self.emit_log('[失败诊断保存异常] '+str(error), platform=target.platform)
             self.active_file_changed.emit('')
+            attempts = job['item']['results'][target.key]['attempts']
+            if len(attempts) > previous_attempts:
+                # Browser work and task diagnostics have finished. Keep a full,
+                # separate idle gap; a new-file notification cannot skip it.
+                self._next_upload_at = time.monotonic() + self.interval_seconds
 
     def _attempt(self, job, target):
         self.log_context={'platform':target.platform,'account_id':target.account.account_id,
@@ -598,6 +615,10 @@ class MultiDeployWorker(QThread):
             self.save_report()
             return 'DAILY_LIMIT'
         item.pop('quota_message',None)
+        if not self.wait_for_next_upload():
+            item.update(status='CANCELLED',message='用户停止，未开始下一次上传')
+            self.save_report()
+            return 'CANCELLED'
         if target.key in self.deferred_preflight:
             from .preflight import AccountPreflight, prerequisite_results
             from playwright.sync_api import sync_playwright
@@ -839,20 +860,16 @@ class MultiDeployWorker(QThread):
                     if self.ledger.result(copies[0]['digest'],target.key).get('status') not in (SUCCESS,'IGNORED'):
                         self.emit_log(f'[目录未包含此文件] {target.key}：未在该账号绑定目录找到同内容媒体；保留文件等待该账号完成')
                     continue  # Respect each account's bound directory/media filter.
-                before = len(job['item']['results'][target.key]['attempts'])
                 state = self.attempt(job, target)
                 if state in RETRYABLE:
                     retries.append((job, target))
                 if self.stopping.is_set():
                     break
-                if len(job['item']['results'][target.key]['attempts']) > before and state not in BLOCKING | {'DURATION_LIMIT','PERMANENT_REJECT','FILE_CHANGED'}:
-                    self.controlled_wait(self.interval_seconds)
             for job,target in retries:
                 if not self.checkpoint():
                     break
                 self.emit_log(f'[当前文件重试一次] {job["path"].name} → {target.key}')
                 self.attempt(job,target)
-                self.controlled_wait(self.interval_seconds)
             for job in copies:
                 self.archive(job)
         if jobs and (summary:=self.blocked_summary(include_reason=True)):
@@ -884,14 +901,14 @@ class MultiDeployWorker(QThread):
                 interval=f'{self.poll_seconds:g}秒'
                 next_scan=(datetime.now(CHINA_TIME)+timedelta(seconds=self.poll_seconds)).strftime('%Y-%m-%d %H:%M:%S')
                 self.report['status']='WAITING_QUOTA' if quota_wait else 'RUNNING'
-                self.status.emit(f'每日限额等待；提高对应账号上限或次日继续' if quota_wait else f'定时扫描等待（每{interval}）；'+(summary or '同账号同内容累计最多两次；重启不重置'))
-                self.emit_log(f'[定时扫描等待] 本轮结束；每{interval}检查目录；下次 {next_scan}（北京时间）；成功不重传；失败2跨重启保留，需手动确认重试；限额账号等待跨日或提高上限')
+                self.status.emit(f'每日限额等待；提高对应账号上限或次日继续' if quota_wait else f'等待本地视频（每{interval}检查）；'+(summary or '成功不重传；失败2需手动重试'))
+                self.emit_log(f'[等待本地视频] 每{interval}检查本地文件；下次 {next_scan}（北京时间）；网盘刷新使用各账号已保存的间隔；成功不重传；失败2需手动重试；限额账号等待跨日或提高上限')
                 self.save_report()
                 current=datetime.now(CHINA_TIME)
                 until_midnight=((current+timedelta(days=1)).replace(hour=0,minute=0,second=0,microsecond=0)-current).total_seconds()
                 self.controlled_wait(min(self.poll_seconds,until_midnight) if quota_wait else self.poll_seconds)
                 if not self.stopping.is_set():
-                    self.emit_log('[定时扫描开始] 正在检查本地媒体目录的新文件；这是目录扫描，不是平台投稿结果查询')
+                    self.emit_log('[检查本地视频] 查找已下载完整且尚未发布的视频；不刷新网盘')
         except Exception as error:
             self.report.update(status='FAILED', error=str(error))
             self.emit_log(f'[任务异常] {error}')
