@@ -25,6 +25,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--ffprobe', required=True, type=Path)
     parser.add_argument('--media-browser', type=Path, default=ROOT / 'artifacts/publisher-media-browser')
+    parser.add_argument('--output-dir', type=Path, default=ROOT / 'dist/publisher',
+                        help='Build in a separate directory to preserve previous package staging')
     parser.add_argument('--label',default='candidate')
     args = parser.parse_args()
     import re
@@ -40,7 +42,7 @@ def main():
         raise SystemExit('Version-matched Chrome for Testing 141.0.7390.37 is required')
     run(sys.executable, '-m', 'PyInstaller', '--noconfirm', '--onedir', '--windowed',
         '--name', 'ShuShengPublisher', '--icon', ROOT/'package/logo.ico',
-        '--distpath', ROOT/'dist/publisher', '--workpath', ROOT/'build/publisher',
+        '--distpath', args.output_dir, '--workpath', ROOT/'build/publisher',
         '--specpath', ROOT/'build', '--collect-data', 'playwright',
         '--copy-metadata', 'playwright', '--copy-metadata', 'PySide6',
         '--add-data', f'{ROOT / "resources/icons"};resources/icons',
@@ -49,7 +51,7 @@ def main():
         '--exclude-module', 'src.app.main_window', '--exclude-module', 'src.audio',
         '--exclude-module', 'src.video', '--exclude-module', 'src.tts',
         '--exclude-module', 'torch', ROOT/'publisher_app.py')
-    output = ROOT / 'dist/publisher/ShuShengPublisher'
+    output = args.output_dir.resolve() / 'ShuShengPublisher'
     internal = output / '_internal'
     shutil.copytree(media_browser/'chrome-win64', internal/'media-browser/chrome-win64', dirs_exist_ok=True)
     shutil.copy2(media_browser/'source.json',internal/'media-browser/source.json')
