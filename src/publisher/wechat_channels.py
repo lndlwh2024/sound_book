@@ -4,6 +4,7 @@ Only browser controls submit posts. Response listeners observe acknowledgements;
 they never call private endpoints or replay authenticated requests.
 """
 import re
+import time
 from urllib.parse import urlsplit
 
 from .channel_probe import CREATOR_NOTICES_JS, safe_url
@@ -59,6 +60,14 @@ def acknowledgement(body, http_status):
 class WeChatChannelsUploader(CreatorStudioUploader):
     title_selector = '.post-desc-box .input-editor[contenteditable], .input-editor[contenteditable=true]'
 
+    # Internal safeguards only: ordinary form controls, unknown upload state,
+    # and unchanged transfer/processing state have independent deadlines.
+    upload_state_seconds = 90
+    upload_stall_seconds = 300
+
+    def wait(self, page, label, condition, seconds=60):
+        return super().wait(page, label, condition, min(seconds, self.control_seconds))
+
     def check_rejection(self, page):
         address = urlsplit(page.url)
         if address.hostname != self.channel.host or not address.path.startswith('/platform/'):
@@ -66,6 +75,13 @@ class WeChatChannelsUploader(CreatorStudioUploader):
         super().check_rejection(page)
         if self.confirmation:
             return
+        errors = page.get_by_text(re.compile(
+            r'^(?:短)?标题(?:包含特殊字符|超过.{0,16}(?:字|字符)(?:数)?限制)'))
+        for index in range(errors.count()):
+            item = errors.nth(index)
+            if item.is_visible() and not item.evaluate(
+                    "e=>!!e.closest('input,textarea,[contenteditable]')"):
+                raise PlatformRejected('CONFIG_REQUIRED', item.inner_text().strip())
         for item in page.evaluate(CREATOR_NOTICES_JS):
             text = item['text']
             state = rejection(text.replace('发表', '发布'))
@@ -127,11 +143,16 @@ class WeChatChannelsUploader(CreatorStudioUploader):
     def read_upload_state(self, page):
         state = super().read_upload_state(page)
         extra = page.evaluate(r'''() => {
+            const scopes=[document];
+            for(const root of scopes)for(const e of root.querySelectorAll('*')){
+                if(e.shadowRoot)scopes.push(e.shadowRoot);
+            }
+            const query=selector=>scopes.flatMap(root=>[...root.querySelectorAll(selector)]);
             const visible=e=>!!(e.getClientRects().length&&getComputedStyle(e).visibility!=='hidden');
-            const busy=[...document.querySelectorAll('.post-upload-wrap .upload-progress,'
-                +'.post-upload-wrap .uploading-wrap,.post-video-cover-wrap .loading-wrap')].some(visible);
-            const labels=[...document.querySelectorAll('.post-upload-wrap .msg-tip,'
-                +'.post-upload-wrap .video-cannot-play-text,.post-video-cover-wrap .gen-text')]
+            const busy=query('.post-upload-wrap .upload-progress,'
+                +'.post-upload-wrap .uploading-wrap,.post-video-cover-wrap .loading-wrap').some(visible);
+            const labels=query('.post-upload-wrap .msg-tip,'
+                +'.post-upload-wrap .video-cannot-play-text,.post-video-cover-wrap .gen-text')
                 .filter(visible).map(e=>(e.innerText||'').trim());
             return {busy:busy||labels.some(t=>/正在处理文件|生成中/.test(t)),
                 complete:labels.some(t=>/^视频已上传/.test(t)),
@@ -143,7 +164,38 @@ class WeChatChannelsUploader(CreatorStudioUploader):
         state['complete'] = state['complete'] or extra['complete']
         if extra['busy']:
             state['pending'].append('微信视频号上传、处理或封面生成中')
+        self._check_upload_progress(state)
         return state
+
+    def _check_upload_progress(self, state):
+        guard = getattr(self, '_upload_guard', None)
+        if guard is None:
+            return
+        now = time.monotonic()
+        signature = (state['selected'], state['busy'], state['complete'],
+            tuple((p['value'], p['max']) for p in state['progress']),
+            tuple((v['src'], v['ready']) for v in state['videos']), tuple(state['pending']))
+        if signature != guard['signature']:
+            guard['signature'], guard['changed'] = signature, now
+        observed = (state['selected'] or state['busy'] or state['complete']
+                    or state['progress'] or any(v['ready'] >= 1 for v in state['videos']))
+        if not observed and now - guard['started'] >= self.upload_state_seconds:
+            raise RuntimeError(f'微信视频号连续 {self.upload_state_seconds} 秒无法识别本次文件的上传状态；'
+                               '未点击发表，保留原文件，请查看失败截图与DOM')
+        if now - guard['changed'] >= self.upload_stall_seconds:
+            raise RuntimeError(f'微信视频号上传/处理状态连续 {self.upload_stall_seconds} 秒无进展；'
+                               '未点击发表，保留原文件，请检查网络及页面提示')
+
+    def wait_upload(self, page):
+        now = time.monotonic()
+        self._upload_guard = {'started': now, 'changed': now, 'signature': None}
+        self.log(f'[微信视频号等待上限] 无法识别上传状态 {self.upload_state_seconds} 秒；'
+                 f'状态无进展 {self.upload_stall_seconds} 秒；上传总时长 {self.upload_seconds:g} 秒；'
+                 f'发表确认 {self.publish_seconds:g} 秒；重复读取不延长截止时间')
+        try:
+            return super().wait_upload(page)
+        finally:
+            self._upload_guard = None
 
     def form_row(self, page, label):
         rows = page.locator('.form-item').filter(has=page.get_by_text(label, exact=True))

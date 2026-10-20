@@ -484,7 +484,8 @@ def test_upload_readiness_rejects_previous_preview_and_ongoing_progress(tmp_path
     instance.file_selected=True
     instance.completion_reset=state!='stale'
     instance.prior_sources={'https://creator.xiaohongshu.com/old.mp4'}
-    instance.upload_seconds=.5
+    # Allow two event-pump polls under parallel browser-test load.
+    instance.upload_seconds=2
     source=tmp_path/instance.file_name
     source.write_bytes(b'fixture')
     with sync_playwright() as p:

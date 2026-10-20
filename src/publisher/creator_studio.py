@@ -390,24 +390,33 @@ class CreatorStudioUploader(BrowserPublishWorkflow):
 
     def read_upload_state(self,page):
         return page.evaluate(r'''({filename,platform})=> {
+            // Channels mounts its editor inside Wujie open shadow roots.
+            // Keep the other platform adapters' document scope unchanged.
+            const scopes=[document];
+            if(platform==='wechat_channels'){
+                for(const root of scopes)for(const e of root.querySelectorAll('*')){
+                    if(e.shadowRoot)scopes.push(e.shadowRoot);
+                }
+            }
+            const query=selector=>scopes.flatMap(root=>[...root.querySelectorAll(selector)]);
             const visible=e=>{const r=e.getBoundingClientRect();return r.width>0&&r.height>0&&getComputedStyle(e).visibility!=='hidden'};
             // Status labels often contain an SVG/thumb icon plus a direct text node.
             // A leaf-only scan misses these, even though the label is visible to the user.
-            const leaves=[...document.querySelectorAll('*')].filter(e=>visible(e)
+            const leaves=query('*').filter(e=>visible(e)
                 &&!e.closest('input,textarea,[contenteditable=true]')).map(e=>!e.children.length
                     ?(e.innerText||'').trim():[...e.childNodes].filter(n=>n.nodeType===Node.TEXT_NODE)
                         .map(n=>n.textContent).join('').trim()).filter(Boolean);
-            const progress=[...document.querySelectorAll('[role=progressbar],progress,[class*="upload-progress"],[class*="uploadProgress"]')]
+            const progress=query('[role=progressbar],progress,[class*="upload-progress"],[class*="uploadProgress"]')
                 .filter(visible).map(e=>({value:Number(e.getAttribute('aria-valuenow')??e.getAttribute('value')??-1),
                     max:Number(e.getAttribute('aria-valuemax')??e.getAttribute('max')??100)}));
             const busy=leaves.some(t=>/^(正在上传|上传中|正在转码|转码中|视频处理中|正在处理|处理中)/.test(t)
                 || /^(?:\d+(?:\.\d+)?)\s*%$/.test(t)&&parseFloat(t)<100)
                 || progress.some(p=>p.value>=0&&p.value<p.max)
-                || [...document.querySelectorAll('[aria-busy=true]')].some(visible);
+                || query('[aria-busy=true]').some(visible);
             const complete=leaves.some(t=>/^(视频)?上传(?:成功|完成|完毕)|^(视频)?(?:处理完成|转码完成)/.test(t)
                 || platform==='xiaohongshu'&&/^检测为高清视频/.test(t.replace(/^[^\p{L}\p{N}]+/u,'')));
-            const videos=[...document.querySelectorAll('video')].filter(visible).map(e=>({src:e.currentSrc||e.src,ready:e.readyState}));
-            const selected=[...document.querySelectorAll('input[type=file]')].some(e=>[...(e.files||[])].some(f=>f.name===filename))
+            const videos=query('video').filter(visible).map(e=>({src:e.currentSrc||e.src,ready:e.readyState}));
+            const selected=query('input[type=file]').some(e=>[...(e.files||[])].some(f=>f.name===filename))
                 || leaves.some(t=>t.includes(filename));
             return {busy,complete,progress,videos,selected,
                 pending:leaves.filter(t=>/^(正在上传|上传中|正在转码|转码中|视频处理中|正在处理|处理中)/.test(t)).slice(0,4)};

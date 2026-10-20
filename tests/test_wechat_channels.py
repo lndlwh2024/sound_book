@@ -110,7 +110,7 @@ def test_success_words_in_description_or_list_are_not_receipts(browser_page, tmp
     assert instance.success_notice(browser_page) is not None
 
 
-def install_browser(monkeypatch, playwright, records, mode, avatar_only=False):
+def install_browser(monkeypatch, playwright, records, mode, avatar_only=False, shadow=False):
     manager = MagicMock()
     manager.__enter__.return_value = playwright
     monkeypatch.setattr(creator_studio, 'sync_playwright', lambda: manager)
@@ -121,11 +121,11 @@ def install_browser(monkeypatch, playwright, records, mode, avatar_only=False):
             if request.request.method == 'POST':
                 assert request.request.url == 'https://channels.weixin.qq.com'+PUBLISH_PATH
                 page = context.pages[0]
-                records.append(page.evaluate('''() => ({description:document.querySelector('.input-editor').innerText,
-                    short:document.querySelector('input[placeholder*=短标题]').value,
-                    collection:document.querySelector('.post-album-display').innerText,
-                    location:document.querySelector('.position-display-wrap').innerText,
-                    wrong:window.wrong,selected:window.selected,early:!!document.querySelector('progress')})'''))
+                records.append(page.evaluate('''() => {const root=window.fixtureRoot||document;return ({description:root.querySelector('.input-editor').innerText,
+                    short:root.querySelector('input[placeholder*=短标题]').value,
+                    collection:root.querySelector('.post-album-display').innerText,
+                    location:root.querySelector('.position-display-wrap').innerText,
+                    wrong:window.wrong,selected:window.selected,early:!!root.querySelector('progress')})}'''))
                 request.fulfill(json=({'errCode': 0, 'data': {'objectId': 'local-post'}} if mode == 'success'
                                      else {'errCode': 17, 'message': '发表失败，服务异常'} if mode == 'reject' else {}))
             else:
@@ -133,6 +133,14 @@ def install_browser(monkeypatch, playwright, records, mode, avatar_only=False):
                 if avatar_only:
                     body=body.replace('<img><span class="name">本人视频号</span>',
                         '<img class="avatar" style="width:32px;height:32px">')
+                if shadow:
+                    body=body.replace('document.querySelector(', 'window.fixtureRoot.querySelector(')
+                    body=body.replace('</main><script>', '</main><script>'+'''const host=document.createElement('wujie-app');
+                        document.body.appendChild(host);window.fixtureRoot=host.attachShadow({mode:'open'});
+                        for(const node of [...document.body.childNodes]){
+                            if(node!==host&&node!==document.currentScript)window.fixtureRoot.appendChild(node);
+                        }
+                        window.fixtureRoot.appendChild(document.head.querySelector('style').cloneNode(true));''')
                 request.fulfill(body=body, content_type='text/html; charset=utf-8')
         context.route('**/*', route)
         return context
@@ -179,7 +187,7 @@ def test_configured_short_title_over_limit_is_shortened_before_filling(browser_p
     account.wechat_short_title = '过长'*20
     instance = adapter(account, tmp_path)
     instance.fill_details(browser_page, Path('test.mp4'))
-    assert len(instance.title)<=16 and '…' in instance.title
+    assert len(instance.title)<=16 and '…' not in instance.title
     assert browser_page.locator('input[placeholder*=短标题]').input_value()==instance.title
     assert account.wechat_short_title=='过长'*20
     assert browser_page.evaluate('window.wrong') is None
