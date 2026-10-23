@@ -620,6 +620,19 @@ class MultiPlatformPublisherPanel(QWidget):
         if answer == QMessageBox.Yes:
             self.disconnect_drive()
 
+    def set_cloud_poll_seconds(self, seconds):
+        previous = self.store.cloud_poll_seconds
+        try:
+            self.store.validate_cloud_poll_seconds(seconds)
+            self.store.cloud_poll_seconds = seconds
+            self.store.save()
+        except (OSError,ValueError) as error:
+            self.store.cloud_poll_seconds = previous
+            self.log_message('[公共云盘轮询保存失败] '+str(error))
+        for panel in self.panels:
+            panel.shared_drive.set_interval(self.store.cloud_poll_seconds)
+        self.sync_drive_watch()
+
     def connect_drive(self, panel):
         from .drive_widgets import DriveAuthWorker
         from ..publisher.google_drive import DriveError
@@ -729,7 +742,8 @@ class MultiPlatformPublisherPanel(QWidget):
         if self.drive_watch_worker:
             report=getattr(self.worker,'report',{}) if self.worker else {}
             self.drive_watch_worker.task_id=report.get('task_id','') if isinstance(report,dict) else ''
-            self.drive_watch_worker.configure(targets, paused=not deploying or self.worker.pause_requested.is_set())
+            self.drive_watch_worker.configure(targets, paused=not deploying or self.worker.pause_requested.is_set(),
+                                             poll_seconds=self.store.cloud_poll_seconds)
         for panel in self.panels:
             panel.refresh_cloud_badges()
 
@@ -1238,6 +1252,16 @@ class MultiPlatformPublisherPanel(QWidget):
             worker.log.connect(self.log_message)
 
     def receive_log_event(self,event):
+        # Cloud ingestion has a separate worker but belongs to the active task.
+        # Preserve its events in the same spool before normal logs can rotate.
+        for worker in (getattr(self,'preflight_worker',None),getattr(self,'worker',None)):
+            diagnostics=getattr(worker,'diagnostics',None)
+            if (diagnostics and diagnostics.task_id==event.get('task_id') and worker.isRunning()
+                    and event.get('id') not in diagnostics.event_ids):
+                try:
+                    diagnostics.record_event(event)
+                except OSError:
+                    pass  # The normal log remains available to the exporter.
         self.event_history.append(event)
         for panel in getattr(self,'panels',[]):panel.logs.append_event(event)
 
@@ -1276,13 +1300,18 @@ class MultiPlatformPublisherPanel(QWidget):
 
     def export_publish_logs(self):
         from ..publisher.diagnostic_export import export_diagnostics
-        filename,_=QFileDialog.getSaveFileName(self,'导出发布诊断包（含失败截图与DOM）','书声发布诊断包.zip','ZIP (*.zip)')
+        filename,_=QFileDialog.getSaveFileName(self,'导出最新任务诊断包','书声最新任务诊断包.zip','ZIP (*.zip)')
         if not filename:return
         try:
-            result=export_diagnostics(self.store.root,self.publish_events.folder,filename)
+            task_id=None
+            if self.preflight_worker and self.preflight_worker.isRunning():
+                task_id=self.preflight_worker.task_id
+            elif self.worker and self.worker.isRunning():
+                task_id=self.worker.report['task_id']
+            result=export_diagnostics(self.store.root,self.publish_events.folder,filename,task_id=task_id)
             counts=result['counts']
-            message=(f'日志 {counts["normal_logs"]} 份，DOM {counts["dom"]} 份，截图 {counts["screenshots"]} 张，'
-                f'任务日志 {counts["task_logs"]} 份；采集/文件异常 {len(result["warnings"])} 项，'
+            message=(f'仅任务 {result["selected_task_id"]}；日志 {counts["normal_logs"]} 份，'
+                f'DOM {counts["dom"]} 份，截图 {counts["screenshots"]} 张；采集/文件异常 {len(result["warnings"])} 项，'
                 f'缺失归档 {len(result["missing_failure_archives"])} 项。')
             self.log_message('[诊断包导出] '+message+'详情见压缩包内 diagnostic-manifest.json；不包含凭据或Cookie')
             QMessageBox.information(self,'诊断包已导出',message)

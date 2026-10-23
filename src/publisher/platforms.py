@@ -74,6 +74,7 @@ class ChannelAccountStore:
         self.selected_channels = ['douyin']
         self.archive_targets = []
         self.cloud_ingest_enabled = True
+        self.cloud_poll_seconds = 15
         self.load_error = ''
         if self.path.exists():
             try:
@@ -86,9 +87,16 @@ class ChannelAccountStore:
                 self.cloud_ingest_enabled = data.get('cloud_ingest_enabled', True)
                 if type(self.cloud_ingest_enabled) is not bool:
                     raise ValueError('云盘接入开关必须为布尔值')
+                self.cloud_poll_seconds = data.get('cloud_poll_seconds', 15)
+                self.validate_cloud_poll_seconds(self.cloud_poll_seconds)
             except Exception as error:
                 self.accounts = []
                 self.load_error = f'新渠道配置读取失败：{error}；原文件保留，抖音仍可使用。'
+
+    @staticmethod
+    def validate_cloud_poll_seconds(value):
+        if type(value) is not int or not 5 <= value <= 86400:
+            raise ValueError('公共云盘轮询间隔必须为5至86400秒')
 
     @staticmethod
     def _validate(account):
@@ -111,11 +119,13 @@ class ChannelAccountStore:
     def save(self):
         if self.load_error:
             raise ValueError(self.load_error)
+        self.validate_cloud_poll_seconds(self.cloud_poll_seconds)
         self.root.mkdir(parents=True, exist_ok=True)
         temporary = self.path.with_suffix('.tmp')
         temporary.write_text(json.dumps({'schema_version': 1, 'selected_channels': self.selected_channels,
                                         'archive_targets': self.archive_targets,
                                         'cloud_ingest_enabled': self.cloud_ingest_enabled,
+                                        'cloud_poll_seconds': self.cloud_poll_seconds,
                                         'accounts': [asdict(a) for a in self.accounts]},
                                         ensure_ascii=False, indent=2), encoding='utf-8')
         temporary.replace(self.path)

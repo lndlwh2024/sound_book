@@ -513,6 +513,7 @@ class DriveWatchWorker(QThread):
         self.configuration = None
         self.storage_policy = None
         self.failures = {}
+        self.poll_seconds = 15
 
     def emit_log(self,message):
         self.log.emit(message)
@@ -522,8 +523,9 @@ class DriveWatchWorker(QThread):
         context['task_id']=getattr(self,'task_id','')
         self.event_logged.emit(self.events.write(message,**context))
 
-    def configure(self, targets, paused=False):
-        token = (paused, tuple(sorted((t.key, t.account.target_dir, t.account.enabled,
+    def configure(self, targets, paused=False, poll_seconds=15):
+        DriveBinding.read({'poll_seconds':poll_seconds})
+        token = (paused, poll_seconds, tuple(sorted((t.key, t.account.target_dir, t.account.enabled,
             tuple(t.account.media_types), json.dumps(t.account.drive_binding,sort_keys=True)) for t in targets)))
         with self.lock:
             if token == self.configuration:
@@ -531,6 +533,7 @@ class DriveWatchWorker(QThread):
             self.configuration = token
             self.targets = [replace(t, account=replace(t.account, drive_binding=dict(t.account.drive_binding))) for t in targets]
             self.paused = paused
+            self.poll_seconds = poll_seconds
             self.revision += 1
         self.wake.set()
 
@@ -555,13 +558,14 @@ class DriveWatchWorker(QThread):
         while not self.stopping.is_set():
             with self.lock:
                 targets, paused, revision = list(self.targets), self.paused, self.revision
+                poll_seconds = self.poll_seconds
                 immediate = self.immediate.copy()
                 self.immediate.clear()
             if self.credentials.connected():
                 for target in targets:
                     self.current_target=target
                     binding = DriveBinding.read(target.account.drive_binding)
-                    signature = (target.key, binding.folder_id, target.account.target_dir, tuple(target.account.media_types),binding.poll_seconds)
+                    signature = (target.key, binding.folder_id, target.account.target_dir, tuple(target.account.media_types),poll_seconds)
                     if not binding.enabled or (paused and target.key not in immediate):
                         continue
                     if target.key not in immediate and time.monotonic() < self.next_poll.get(signature, 0):
@@ -589,7 +593,7 @@ class DriveWatchWorker(QThread):
                         self.binding_status.emit(target.key, '检查失败：' + str(error))
                         self.emit_log(f'[云盘检查失败] {target.key}：{error}；其他绑定继续，云端不修改')
                     failures = self.failures.get(signature, 0)
-                    delay = min(300, 15 * 2 ** min(failures - 1, 5)) if failures else binding.poll_seconds
+                    delay = max(poll_seconds,min(300,poll_seconds*2**min(failures-1,5))) if failures else poll_seconds
                     self.next_poll[signature] = time.monotonic() + delay
             self.wake.wait(.5)
             self.wake.clear()

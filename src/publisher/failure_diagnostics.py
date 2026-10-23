@@ -2,6 +2,7 @@
 import json
 import re
 import shutil
+import threading
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -10,6 +11,8 @@ from urllib.parse import urlsplit
 from .channel_probe import EXTRACT_JS, safe_url
 from .event_log import CHINA_TIME, display_event, redact
 from .platforms import CHANNELS
+
+_task_lock = threading.RLock()
 
 
 def _safe(value):
@@ -36,10 +39,68 @@ class TaskFailureDiagnostics:
         self.staging = self.root / '.failure_staging' / _safe(task_id)
         self.log_path = self.staging / 'task.log'
         self.bundles = []
+        self.task_folder = self.root / '.diagnostics' / _safe(task_id)
+        self.events_path = self.task_folder / 'events.jsonl'
+        self.event_ids = set()
+        if self.events_path.is_file():
+            with self.events_path.open(encoding='utf-8',errors='replace') as stream:
+                for line in stream:
+                    try:
+                        self.event_ids.add(json.loads(line).get('id'))
+                    except (ValueError,AttributeError):
+                        continue
+        self._task_state('RUNNING', activate=True)
         for event in events:
             self.record_event(event)
 
+    def _task_state(self, state, activate=False):
+        from ..version import __version__
+        with _task_lock:
+            self.task_folder.mkdir(parents=True,exist_ok=True)
+            path=self.task_folder/'task.json'
+            try:
+                data=json.loads(path.read_text(encoding='utf-8'))
+                if data.get('task_id')!=self.task_id:
+                    data={}
+            except (OSError,ValueError,AttributeError):
+                data={}
+            moment=datetime.now(CHINA_TIME).isoformat()
+            data.update(task_id=self.task_id,started_at=data.get('started_at',moment),
+                        status=state,app_version=__version__,updated_at=moment)
+            if activate:
+                data['activated_at']=moment
+                data.pop('finished_at',None)
+            else:
+                data['finished_at']=moment
+            latest=self.root/'.diagnostics/latest-task.json'
+            for destination in (path,latest):
+                if destination==latest and not activate:
+                    try:
+                        if json.loads(latest.read_text(encoding='utf-8')).get('task_id')!=self.task_id:
+                            continue
+                    except (OSError,ValueError,AttributeError):
+                        continue
+                temporary=destination.with_name(destination.name+'.'+uuid.uuid4().hex+'.tmp')
+                try:
+                    _json(temporary,data)
+                    temporary.replace(destination)
+                finally:
+                    temporary.unlink(missing_ok=True)
+
     def record_event(self, event):
+        with _task_lock:
+            self._record_event(event)
+
+    def _record_event(self, event):
+        if event.get('task_id')!=self.task_id:
+            return
+        identity=event.get('id')
+        if not identity or identity not in self.event_ids:
+            self.task_folder.mkdir(parents=True,exist_ok=True)
+            with self.events_path.open('a',encoding='utf-8') as stream:
+                stream.write(json.dumps(_clean(event),ensure_ascii=False)+'\n')
+            if identity:
+                self.event_ids.add(identity)
         # Keep a task spool independent of the normal JSONL log's rotation.
         self.staging.mkdir(parents=True, exist_ok=True)
         line = display_event(event) + '\n' + json.dumps(_clean(event), ensure_ascii=False) + '\n'
@@ -54,6 +115,11 @@ class TaskFailureDiagnostics:
         return operation
 
     def finish(self):
+        with _task_lock:
+            self._finish()
+
+    def _finish(self):
+        self._task_state('FINISHED')
         # Successful operations never create the platform/date hierarchy.
         if self.staging.exists():
             relative = self.staging.resolve().relative_to((self.root / '.failure_staging').resolve())
@@ -156,6 +222,8 @@ class FailureOperation:
         if not self.captures:
             path = folder / (stem + '.dom.json')
             _json(path, {'task_id': self.task.task_id, 'operation_id': self.operation_id,
+                'platform': self.platform, 'account_id': self.account_id, 'file_name': self.file_name,
+                'stage': '未取得浏览器页面',
                 'timestamp': moment.isoformat(), 'frames': [],
                 'capture_error': '本次未取得浏览器页面（未启动、已关闭或启动失败）；无可用截图，不使用其他任务的截图代替'})
             files.append(path.name)

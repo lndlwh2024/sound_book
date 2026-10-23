@@ -218,7 +218,11 @@ def test_standalone_date_and_all_platform_headers_fit_x230(app,tmp_path):
             if column!=1 and not table.isColumnHidden(column):
                 assert table.columnWidth(column)>=table.horizontalHeader().fontMetrics().horizontalAdvance(label)+12
         assert table.item(0,QUEUE_DATE_COLUMN).text()=='2026-10-22'
-        artifacts=Path('artifacts/publisher-nickname-date');artifacts.mkdir(parents=True,exist_ok=True)
+        shared=view.shared_drive
+        assert shared.geometry().right()<=view.width()
+        assert shared.interval.isVisible() and shared.interval.height()==shared.change_button.height()
+        assert shared.interval.geometry().right()<shared.connected_button.x()
+        artifacts=Path('artifacts/publisher-shared-poll');artifacts.mkdir(parents=True,exist_ok=True)
         window.grab().save(str(artifacts/'standalone-1366x768.png'))
     finally:
         controller.prepare_shutdown()

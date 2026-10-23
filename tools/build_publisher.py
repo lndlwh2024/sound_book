@@ -94,6 +94,7 @@ def main():
                    'docs/WECHAT_UPLOAD_FINISH_20261021.md',
                    'docs/DIAGNOSTICS9_20261023.md',
                    'docs/PUBLISHER_NICKNAME_DATE_20261023.md',
+                   'docs/PUBLISHER_SHARED_POLL_DIAGNOSTICS_20261023.md',
                    'requirements-publisher.txt', 'requirements-publisher-lock.txt'):
         shutil.copy2(ROOT/source, output/Path(source).name)
     (output/'自检.cmd').write_text('@echo off\r\ncd /d "%~dp0"\r\nstart /wait "" ShuShengPublisher.exe --self-check --output "%~dp0self-check.json"\r\nnotepad "%~dp0self-check.json"\r\n', encoding='utf-8')

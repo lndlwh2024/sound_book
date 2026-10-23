@@ -71,6 +71,16 @@ class SharedDriveWidget(QGroupBox):
         row.addWidget(self.enabled)
         self.change_button = QPushButton('更换连接')
         row.addWidget(self.change_button)
+        self.interval_label = QLabel('轮询')
+        row.addWidget(self.interval_label)
+        self.interval = QSpinBox()
+        self.interval.setRange(5, 86400)
+        self.interval.setValue(15)
+        self.interval.setSuffix(' 秒')
+        self.interval.setMinimumWidth(84)
+        self.interval.setKeyboardTracking(False)
+        self.interval.setToolTip('所有平台账号共用的云盘轮询间隔；立即检查仍可单独触发')
+        row.addWidget(self.interval)
         row.addStretch()
         self.connected_button, self.disconnected_button = QPushButton('连接'), QPushButton('断开')
         for button in (self.connected_button,self.disconnected_button):
@@ -82,11 +92,17 @@ class SharedDriveWidget(QGroupBox):
                 QPushButton {padding:3px 7px;background:#315F89;color:#FFFFFF;}
                 QPushButton:disabled {background:#303743;color:#788493;border:1px solid #414956;}
             ''')
+        controls = (*controls,self.interval,self.interval_label)
         height = max(36, *(control.sizeHint().height() for control in controls))
         for control in controls:
             control.setFixedHeight(height)
         layout.addLayout(row)
         self.enabled.setToolTip('关闭接入时仅走本地发布；授权和各账号目录配置保留。')
+
+    def set_interval(self, seconds):
+        blocked = self.interval.blockSignals(True)
+        self.interval.setValue(seconds)
+        self.interval.blockSignals(blocked)
 
     def update_connection(self, connected, pending, enabled):
         blocked = self.enabled.blockSignals(True)
@@ -150,13 +166,6 @@ class DriveBindingWidget(QGroupBox):
         self.today = QLabel('今日目录：等待检查')
         self.today.setWordWrap(True)
         row.addWidget(self.today, 1)
-        row.addWidget(QLabel('轮询'))
-        self.interval = QSpinBox()
-        self.interval.setRange(5, 86400)
-        self.interval.setValue(15)
-        self.interval.setSuffix(' 秒')
-        self.interval.setMinimumWidth(84)
-        row.addWidget(self.interval)
         self.check = QPushButton('立即检查')
         self.check.clicked.connect(self.check_requested)
         row.addWidget(self.check)
@@ -178,11 +187,10 @@ class DriveBindingWidget(QGroupBox):
         self.folder_id = binding.folder_id
         self.folder.setText(binding.folder_path)
         self.folder.setToolTip(binding.folder_id)
-        self.interval.setValue(binding.poll_seconds)
 
     def value(self):
         return dict(enabled=self.watch.isChecked(), folder_id=self.folder_id,
-            folder_path=self.folder.text(), poll_seconds=self.interval.value())
+            folder_path=self.folder.text())
 
     def update_connection(self, connected, pending=False, provider_name='Google云盘'):
         self.is_connected, self.pending = connected, pending
@@ -197,7 +205,6 @@ class DriveBindingWidget(QGroupBox):
         active = self.cloud_enabled and self.watch.isChecked() and self.is_connected and not self.pending
         self.choose.setEnabled(active and not self.binding_locked)
         self.check.setEnabled(active)
-        self.interval.setEnabled(self.watch.isChecked())
         self.connected_button.setEnabled(not self.pending and not self.is_connected)
         self.disconnected_button.setEnabled(not self.pending and self.is_connected)
         self.change_button.setEnabled(not self.pending)

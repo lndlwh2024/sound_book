@@ -159,8 +159,11 @@ def test_shared_cloud_controls_stay_above_account_tabs(panel,index):
         assert view.settings_tabs.tabText(1)=='部署配置'
         assert not view.shared_drive.connection_state.wordWrap()
         assert view.shared_drive.change_button.y() == view.shared_drive.disconnected_button.y()
-        controls = (view.shared_drive.enabled,view.shared_drive.change_button,view.shared_drive.connected_button,view.shared_drive.disconnected_button)
+        controls = (view.shared_drive.enabled,view.shared_drive.change_button,view.shared_drive.interval,
+                    view.shared_drive.interval_label,view.shared_drive.connected_button,view.shared_drive.disconnected_button)
         assert len({control.height() for control in controls}) == 1
+        assert view.shared_drive.change_button.geometry().right() < view.shared_drive.interval_label.x()
+        assert view.shared_drive.interval.geometry().right() < view.shared_drive.connected_button.x()
         assert view.shared_drive.connection_state.y() < view.shared_drive.enabled.y()
         assert panel.rect().contains(view.save_button.mapTo(panel,view.save_button.rect().center()))
         assert view.findChild(QScrollArea) is None
@@ -226,7 +229,7 @@ def test_binding_persists_without_changing_identity_and_no_nickname_editor(panel
     view.drive.watch.setChecked(True)
     view.drive.folder_id='series_'+str(index)
     view.drive.folder.setText('书声 / 分类'+str(index))
-    view.drive.interval.setValue(25)
+    view.shared_drive.interval.setValue(25)
     assert view.save_current()
     repo=PlatformAccountRepository(ChannelAccountStore(panel.store.root),DouyinAccountManager(
         panel.repository.douyin_manager.config_file,panel.repository.douyin_manager.profiles_base_dir))
@@ -305,3 +308,118 @@ def test_different_cloud_series_archive_independently_in_same_task(tmp_path):
     assert len(calls)==1 and (tmp_path/'a'/'publiced'/'海星.mp4').exists()
     assert worker.report['target_count']==1 and worker.report['source_success_count']==1
     assert not list((tmp_path/'b').glob('*.mp4'))
+
+
+def test_shared_poll_persists_and_synchronizes_all_platforms(panel,monkeypatch):
+    from unittest.mock import MagicMock
+    sync=MagicMock();monkeypatch.setattr(panel,'sync_drive_watch',sync)
+    panel.panels[0].shared_drive.interval.setValue(27)
+    assert panel.store.cloud_poll_seconds==27
+    assert ChannelAccountStore(panel.store.root).cloud_poll_seconds==27
+    assert all(p.shared_drive.interval.value()==27 and not hasattr(p.drive,'interval') for p in panel.panels)
+    sync.assert_called_once()
+    panel.set_cloud_ingest_enabled(False)
+    assert ChannelAccountStore(panel.store.root).cloud_poll_seconds==27
+    assert all(p.shared_drive.interval.value()==27 for p in panel.panels)
+
+
+def test_shared_poll_save_error_restores_controls_and_disk(panel,monkeypatch):
+    from unittest.mock import MagicMock
+    panel.set_cloud_poll_seconds(30)
+    monkeypatch.setattr(panel.store,'save',MagicMock(side_effect=OSError('磁盘写入失败')))
+    panel.panels[1].shared_drive.interval.setValue(40)
+    assert panel.store.cloud_poll_seconds==30
+    assert ChannelAccountStore(panel.store.root).cloud_poll_seconds==30
+    assert all(p.shared_drive.interval.value()==30 for p in panel.panels)
+
+
+@pytest.mark.parametrize('value',[True,4,86401,15.0,'15'])
+def test_shared_poll_rejects_invalid_values_without_overwriting(tmp_path,value):
+    store=ChannelAccountStore(tmp_path)
+    store.cloud_poll_seconds=25;store.save()
+    store.cloud_poll_seconds=value
+    with pytest.raises(ValueError):store.save()
+    assert ChannelAccountStore(tmp_path).cloud_poll_seconds==25
+
+
+def test_shared_poll_legacy_binding_defaults_to_common_15(tmp_path):
+    store=ChannelAccountStore(tmp_path)
+    account=store.add('youtube','频道')
+    account.drive_binding={'poll_seconds':600};store.save()
+    import json
+    data=json.loads(store.path.read_text(encoding='utf-8'));data.pop('cloud_poll_seconds')
+    store.path.write_text(json.dumps(data),encoding='utf-8')
+    restored=ChannelAccountStore(tmp_path)
+    assert restored.cloud_poll_seconds==15 and not restored.load_error
+    assert restored.accounts[0].drive_binding['poll_seconds']==600
+
+
+@pytest.mark.parametrize('completed,seconds',[(True,25),(False,25),(False,600)])
+def test_actual_scheduler_uses_common_poll_for_different_legacy_accounts(tmp_path,monkeypatch,completed,seconds):
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+    from src.publisher import drive_ingest
+    first=target(tmp_path)
+    second=replace(first,account=replace(first.account,account_id='second',drive_binding={**first.account.drive_binding,'poll_seconds':600}))
+    credentials=SimpleNamespace(connected=lambda:True,generation=0)
+    worker=DriveWatchWorker(tmp_path/'state',credentials,client=FakeDrive())
+    worker.configure([first,second],poll_seconds=seconds)
+    monkeypatch.setattr(drive_ingest.time,'monotonic',lambda:100.0)
+    poll=MagicMock(return_value=completed)
+    monkeypatch.setattr(DriveIngestor,'poll',poll)
+    # One complete scheduler iteration, with no sleep or external requests.
+    monkeypatch.setattr(worker.wake,'wait',lambda timeout:worker.stop())
+    worker.watch_loop()
+    assert poll.call_count==2
+    assert len(worker.next_poll)==2
+    assert set(worker.next_poll.values())=={100.0+seconds}
+    previous=worker.revision
+    worker.configure([first,second],poll_seconds=seconds+5)
+    assert worker.revision==previous+1 and worker.poll_seconds==seconds+5
+
+
+@pytest.mark.parametrize('active_kind',['preflight','publish','finished'])
+def test_export_button_selects_actual_active_task_and_reports_id(panel,tmp_path,monkeypatch,active_kind):
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+    from PySide6.QtWidgets import QFileDialog,QMessageBox
+    from src.publisher.failure_diagnostics import TaskFailureDiagnostics
+    from src.publisher.event_log import make_event
+    from pathlib import Path
+    import zipfile,json
+    root=panel.store.root
+    active=TaskFailureDiagnostics(root,'active')
+    active.record_event(make_event('current task',task_id='active'))
+    newer=TaskFailureDiagnostics(root,'latest')
+    newer.record_event(make_event('latest task',task_id='latest'));newer.finish()
+    path=tmp_path/'diagnostics.zip'
+    monkeypatch.setattr(QFileDialog,'getSaveFileName',lambda *a:(str(path),'ZIP'))
+    info=MagicMock();monkeypatch.setattr(QMessageBox,'information',info)
+    if active_kind=='preflight':panel.preflight_worker=SimpleNamespace(isRunning=lambda:True,task_id='active')
+    if active_kind=='publish':panel.worker=SimpleNamespace(isRunning=lambda:True,report={'task_id':'active'})
+    try:
+        panel.export_publish_logs()
+    finally:
+        panel.preflight_worker=None;panel.worker=None;active.finish()
+    with zipfile.ZipFile(path) as archive:
+        manifest=json.loads(archive.read('diagnostic-manifest.json'))
+    expected='latest' if active_kind=='finished' else 'active'
+    assert manifest['selected_task_id']==expected
+    assert expected in info.call_args.args[2]
+
+
+def test_cloud_worker_events_join_task_log_before_normal_log_rotation(panel):
+    from types import SimpleNamespace
+    from src.publisher.event_log import make_event
+    from src.publisher.failure_diagnostics import TaskFailureDiagnostics
+    import json
+    diagnostics=TaskFailureDiagnostics(panel.store.root,'cloud-task')
+    panel.worker=SimpleNamespace(isRunning=lambda:True,diagnostics=diagnostics)
+    event=make_event('[云盘下载完成] video.mp4；云盘日期=2026-10-23',task_id='cloud-task')
+    try:
+        panel.receive_log_event(event)
+        panel.receive_log_event(event)
+    finally:
+        panel.worker=None;diagnostics.finish()
+    events=[json.loads(line) for line in diagnostics.events_path.read_text(encoding='utf-8').splitlines()]
+    assert len(events)==1 and events[0]['id']==event['id']

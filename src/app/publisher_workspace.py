@@ -226,6 +226,7 @@ class PublisherPanel(MultiPlatformPublisherPanel):
             panel.deployment_controls.layout().setSpacing(4)
             panel.shared_drive.layout().setContentsMargins(10,6,10,6)
             for control in (panel.shared_drive.enabled,panel.shared_drive.change_button,
+                            panel.shared_drive.interval,panel.shared_drive.interval_label,
                             panel.shared_drive.connected_button,panel.shared_drive.disconnected_button):
                 control.setFixedHeight(32)
             panel.table_queue.setColumnHidden(2,True)

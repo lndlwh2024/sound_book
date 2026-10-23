@@ -137,6 +137,8 @@ class PlatformAccountPanel(QWidget):
         from .drive_widgets import SharedDriveWidget
         self.shared_drive = SharedDriveWidget()
         self.shared_drive.enabled.toggled.connect(parent.set_cloud_ingest_enabled)
+        self.shared_drive.set_interval(self.store.cloud_poll_seconds)
+        self.shared_drive.interval.valueChanged.connect(parent.set_cloud_poll_seconds)
         self.shared_drive.connected_button.clicked.connect(lambda:parent.connect_drive(self))
         self.shared_drive.change_button.clicked.connect(lambda:parent.connect_drive(self))
         self.shared_drive.disconnected_button.clicked.connect(parent.confirm_disconnect_drive)
@@ -163,7 +165,7 @@ class PlatformAccountPanel(QWidget):
         self.drive = DriveBindingWidget(directory_only=True)
         self.drive.setStyleSheet(self.drive.styleSheet()+' QLineEdit,QSpinBox {min-height:22px;max-height:26px;padding:5px 6px;font-size:13px;} '
             'QPushButton {min-height:22px;padding:5px 8px;font-size:13px;}')
-        for control in (self.drive.folder,self.drive.choose,self.drive.check,self.drive.interval):
+        for control in (self.drive.folder,self.drive.choose,self.drive.check):
             control.setMinimumHeight(34)
         resource_layout.addWidget(self.drive)
         self.drive.connect_requested.connect(lambda:parent.connect_drive(self))
