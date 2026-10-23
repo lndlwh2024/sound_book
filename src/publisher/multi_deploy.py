@@ -173,6 +173,7 @@ class MultiDeployWorker(QThread):
     queue_changed = Signal()
     status = Signal(str)
     result_changed = Signal(dict)
+    nickname_changed = Signal(dict)
 
     def __init__(self, targets, root=None, parent=None, uploader_factory=None, poll_seconds=LOCAL_UPLOAD_INTERVAL_SECONDS, interval_seconds=LOCAL_UPLOAD_INTERVAL_SECONDS, file_paths=None, archive_targets=None, deferred_preflight=None, history_targets=None, strict_recovery=False, task_id=None):
         super().__init__(parent)
@@ -307,7 +308,9 @@ class MultiDeployWorker(QThread):
             if all(f['results'].get(key,{}).get('status') in (SUCCESS,'IGNORED') for key in keys_for(f))]
         self.report['failure_files'] = [summary(f) for f in self.report['files'] if failed(f)]
         self.report['source_success_count'] = len(self.report['success_files'])
-        self.report['all_selected_completed']=bool(self.report['files']) and len(self.report['success_files'])==len(self.report['files'])
+        self.report['all_selected_published']=bool(self.report['files']) and len(self.report['success_files'])==len(self.report['files'])
+        self.report['archive_pending_count']=sum(not f.get('archived_path') for f in self.report['success_files'])
+        self.report['all_selected_completed']=self.report['all_selected_published'] and self.report['archive_pending_count']==0
         self.report['source_failure_count'] = len(self.report['failure_files'])
         self.report['platform_counts'] = {}
         for file in self.report['files']:
@@ -633,6 +636,8 @@ class MultiDeployWorker(QThread):
                     check.failure_capture = self.failure_operation.capture
                     result=check.check(playwright)
                 failures=[] if result.passed else [result]
+                if result.passed and result.identity:
+                    self.nickname_changed.emit(dict(result.identity,platform=target.platform,account_id=target.account.account_id))
             if failures:
                 failure=failures[0]
                 self.blocked[target.key]={'status':failure.status,'message':failure.message}
@@ -694,6 +699,8 @@ class MultiDeployWorker(QThread):
         uploader = None
         try:
             uploader=self.factory(target,log)
+            uploader.nickname_changed=lambda identity:self.nickname_changed.emit(
+                dict(identity,platform=target.platform,account_id=target.account.account_id))
             uploader.failure_capture = self.failure_operation.capture
             uploader.before_upload=before_upload
             uploader.before_submit=before_submit

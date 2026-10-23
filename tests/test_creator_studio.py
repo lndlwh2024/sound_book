@@ -288,16 +288,18 @@ def test_full_real_adapter_waits_for_upload_and_requires_confirmed_result(tmp_pa
 
 
 @pytest.mark.parametrize('platform',['xiaohongshu','kuaishou'])
-def test_identity_mismatch_prevents_selecting_file(tmp_path,monkeypatch,platform):
+def test_nickname_change_syncs_and_allows_upload(tmp_path,monkeypatch,platform):
     instance=uploader(tmp_path,platform)
     instance.account.platform_nickname='另一个账号'
+    instance.account.collection_name='一分钟趣味知识'
     source=tmp_path/'video.mp4'
     source.write_bytes(b'fixture')
     with sync_playwright() as playwright:
         records=install_local_browser(monkeypatch,playwright)
-        success,_,_=instance.upload_single_video(source)
-    assert not success and instance.last_outcome=='IDENTITY_MISMATCH'
-    assert not records['calls']
+        success,message,_=instance.upload_single_video(source)
+    assert success and instance.last_outcome=='SUCCESS',message
+    assert instance.account.platform_nickname=='测试账号'
+    assert records['calls']==[platform]
 
 
 @pytest.mark.parametrize('platform',['xiaohongshu','kuaishou'])

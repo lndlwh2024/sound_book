@@ -62,6 +62,29 @@ class PlatformAccountRepository:
         else:
             self.store.delete(account)
 
+    def sync_nickname(self, platform, account_id, nickname):
+        """Update just the live stable-ID account; never recreate removed accounts."""
+        from .identity import validated_custom_nickname
+        nickname = validated_custom_nickname(nickname)
+        account = next((a for a in self.accounts(platform) if a.account_id == account_id), None)
+        if account is None:
+            return None
+        if account.platform_nickname == nickname and account.account_name == (account.custom_nickname or nickname):
+            return account
+        old = account.platform_nickname, account.account_name
+        account.platform_nickname = nickname
+        account.account_name = account.custom_nickname or nickname
+        try:
+            self.save(account)
+        except Exception:
+            account.platform_nickname, account.account_name = old
+            if platform == 'douyin':
+                original = self.douyin_manager.get_account(account_id)
+                if original:
+                    original.platform_nickname, original.account_name = old
+            raise
+        return account
+
     def publish_account(self, account):
         if account.platform != 'douyin':
             return replace(account)

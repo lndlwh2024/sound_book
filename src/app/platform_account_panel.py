@@ -37,7 +37,7 @@ class MediaQueueTable(QTableWidget):
 
     def resizeEvent(self,event):
         super().resizeEvent(event)
-        if self.columnCount()==5+len(CHANNELS):
+        if self.columnCount()==6+len(CHANNELS):
             from .channel_panel import size_queue_columns
             size_queue_columns(self)
 
@@ -365,6 +365,7 @@ class PlatformAccountPanel(QWidget):
         self.table_queue.setTextElideMode(Qt.ElideNone)
         self.table_queue.setStyleSheet(TABLE_STYLE)
         self.table_queue.setHorizontalHeaderLabels(QUEUE_HEADERS)
+        self.table_queue.horizontalHeader().moveSection(len(QUEUE_HEADERS)-1,1)
         size_queue_columns(self.table_queue)
         self.table_queue.setSelectionBehavior(QTableWidget.SelectRows)
         self.table_queue.setEditTriggers(QTableWidget.NoEditTriggers)
@@ -693,8 +694,22 @@ class PlatformAccountPanel(QWidget):
         return (account.account_id if account else '', self.directory.text().strip(),
                 tuple(key for key, check in self.media_checks.items() if check.isChecked()))
 
-    def apply_queue_snapshot(self, files):
-        signature = tuple((str(path), stat.st_size, stat.st_mtime_ns) for path, stat in files)
+    def set_video_date(self, row, path, provenance):
+        from .channel_panel import QUEUE_DATE_COLUMN
+        from ..publisher.drive_ingest import canonical_local_path
+        source=provenance.get(canonical_local_path(path),{})
+        item=QTableWidgetItem(source.get('label','本地'))
+        item.setTextAlignment(Qt.AlignCenter)
+        item.setToolTip(source.get('tooltip','本地文件，无云盘来源日期；不使用文件名或修改时间推断'))
+        self.table_queue.setItem(row,QUEUE_DATE_COLUMN,item)
+
+    def apply_queue_snapshot(self, files, provenance=None):
+        from ..publisher.drive_ingest import queue_provenance
+        files=[(path,stat) for path,stat in files if path.is_file()]
+        if provenance is None:
+            provenance=queue_provenance(self.store.root,files)
+        signature = (tuple((str(path), stat.st_size, stat.st_mtime_ns) for path, stat in files),
+                     json.dumps(provenance,sort_keys=True))
         if getattr(self, '_queue_signature', None) == signature:
             return
         self._queue_signature = signature
@@ -712,6 +727,7 @@ class PlatformAccountPanel(QWidget):
             item.setToolTip(str(path))
             item.setData(Qt.UserRole,str(path))
             item.setData(Qt.UserRole+1,(stat.st_size,stat.st_mtime_ns))
+            self.set_video_date(row,path,provenance)
             if path == selected_path:
                 self.table_queue.setCurrentCell(row,1)
 
@@ -741,6 +757,8 @@ class PlatformAccountPanel(QWidget):
                 report(f'工作目录不存在或无法访问：{directory}')
                 return
             files = sorted([p for p in root.iterdir() if p.is_file() and p.suffix.lower() in extensions],key=lambda p:p.stat().st_mtime)
+            from ..publisher.drive_ingest import queue_provenance
+            provenance=queue_provenance(self.store.root,[(path,path.stat()) for path in files])
             for row,path in enumerate(files):
                 self.table_queue.insertRow(row)
                 stat = path.stat()
@@ -752,6 +770,7 @@ class PlatformAccountPanel(QWidget):
                 self.table_queue.item(row,1).setToolTip(str(path))
                 self.table_queue.item(row,1).setData(Qt.UserRole,str(path))
                 self.table_queue.item(row,1).setData(Qt.UserRole+1,(stat.st_size,stat.st_mtime_ns))
+                self.set_video_date(row,path,provenance)
                 if path == selected_path:
                     self.table_queue.setCurrentCell(row,1)
             report(f'{directory}：找到 {len(files)} 个匹配媒体文件'+

@@ -63,21 +63,19 @@ def test_avatar_only_custom_name_passes_preflight_and_actual_uploader_without_up
     finally:page.close()
 
 
-def test_avatar_only_without_custom_name_returns_configuration_prompt_without_name_timeout(browser,tmp_path):
+def test_avatar_only_without_custom_name_does_not_block_publishing(browser,tmp_path):
     page=local_page(browser)
     try:
         check=AccountPreflight(PublishTarget('wechat_channels',owner(''),str(tmp_path)),seconds=.5)
-        with pytest.raises(PlatformRejected) as error:check.verify_page(page)
-        assert error.value.status=='CONFIG_REQUIRED'
-        assert check.nickname_missing and '自定义昵称' in str(error.value)
-        assert '超时' not in str(error.value)
+        check.verify_page(page)
+        assert not getattr(check,'nickname_missing',False)
     finally:page.close()
 
 
 @pytest.mark.parametrize('body',[
     '<h1>发表动态</h1>',
     AVATAR_FORM.replace('type="file"','disabled type="file"'),
-    AVATAR_FORM.replace('class="avatar"','class="other-avatar"'),
+    AVATAR_FORM.replace('class="common-menu-item account-info default"','class="other-card"'),
     AVATAR_FORM.replace('placeholder="填写短标题有机会获得更多流量"','placeholder="搜索"'),
     AVATAR_FORM+'<input type=password>',
     AVATAR_FORM+'<button>扫码登录</button>',
@@ -90,15 +88,15 @@ def test_custom_label_cannot_substitute_for_live_authenticated_upload_form(brows
 
 
 @pytest.mark.parametrize('shadow',[False,True])
-def test_custom_name_still_rejects_actual_wrong_account_and_login_redirect(browser,tmp_path,shadow):
+def test_custom_name_syncs_renamed_account_but_still_rejects_login_redirect(browser,tmp_path,shadow):
     page=local_page(browser,shadow=shadow)
     try:
         # Put a readable own-account name in the account card, not arbitrary text.
         page.locator('.common-menu-item').evaluate("e=>e.insertAdjacentHTML('beforeend','<span class=nickname>另一个账号</span>')")
         account=owner();account.platform_nickname='原账号'
         check=AccountPreflight(PublishTarget('wechat_channels',account,str(tmp_path)),seconds=.5)
-        with pytest.raises(PlatformRejected) as error:check.verify_page(page)
-        assert error.value.status=='IDENTITY_MISMATCH'
+        check.verify_page(page)
+        assert account.platform_nickname=='另一个账号'
         page.goto('https://channels.weixin.qq.com/login')
         with pytest.raises(PlatformRejected) as error:check.verify_page(page)
         assert error.value.status=='AUTH_REQUIRED'
@@ -191,8 +189,9 @@ def test_wechat_custom_name_reconciliation_requires_stable_account_bound_real_su
         'endpoint':'https://channels.weixin.qq.com/cgi-bin/mmfinderassistant-bin/post/post_create'}
     info=uploader.result_hint()
     assert uploader.reconcile(info)
+    assert uploader.reconcile(dict(info,nickname='another'))
     for changed in ({'account_id':'other'},{'profile_id':'other'},{'submitted':False},
-                    {'nickname':'another'},{'confirmation':{}},{'confirmation':{'kind':'draft'}}):
+                    {'confirmation':{}},{'confirmation':{'kind':'draft'}}):
         assert not uploader.reconcile(dict(info,**changed))
 
 

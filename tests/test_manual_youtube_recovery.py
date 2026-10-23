@@ -83,10 +83,15 @@ def test_manual_all_succeeded_skips_browser_and_ends_deployment(panel,tmp_path,m
     before=ledger.path.read_bytes()
     preflight=MagicMock(side_effect=AssertionError('must not open successful accounts'))
     monkeypatch.setattr(ui,'DeploymentPreflightWorker',preflight)
+    launch=MagicMock();monkeypatch.setattr(panel,'launch_deployment',launch)
     panel.begin_preflight(targets,[media])
     preflight.assert_not_called()
     assert panel.worker is None and panel.preflight_worker is None
-    assert '部署已自动停止' in panel.panels[0].deploy_status.text()
+    if archived:
+        launch.assert_not_called()
+        assert '部署已自动停止' in panel.panels[0].deploy_status.text()
+    else:
+        launch.assert_called_once_with(targets,[media])
     assert ledger.path.read_bytes()==before
 
 
@@ -121,7 +126,8 @@ def test_manual_retries_only_unfinished_target_and_automatically_finishes(tmp_pa
     job.controlled_wait=MagicMock()
     job.run()
     assert calls==[targets[1].key]
-    assert job.report['status']=='COMPLETED' and job.report['all_selected_completed']
+    assert job.report['status']=='COMPLETED' and job.report['all_selected_published']
+    assert not job.report['all_selected_completed'] and job.report['archive_pending_count']==1
     assert job.report['task_type']=='MANUAL' and job.report['selected_files']==[str(media.resolve())]
     assert all(c.args[0]==0 for c in job.controlled_wait.call_args_list)
     assert job.ledger.result(digest,targets[0].key)['info']=={'receipt':'kept'}

@@ -10,6 +10,7 @@ from urllib.parse import urlsplit
 from .channel_probe import CREATOR_NOTICES_JS, safe_url
 from .creator_studio import CreatorStudioUploader, rejection
 from .youtube import PlatformRejected
+from .page_access import check_network_page, wechat_platform_path
 from .titles import resolve_title
 from .wechat_title import SHORT_TITLE_LIMIT, shorten_title, title_length
 
@@ -72,8 +73,11 @@ class WeChatChannelsUploader(CreatorStudioUploader):
         return super().wait(page, label, condition, min(seconds, self.control_seconds))
 
     def check_rejection(self, page):
+        if self.confirmation and self.submitted:
+            return
+        check_network_page(page.url)
         address = urlsplit(page.url)
-        if address.hostname != self.channel.host or not address.path.startswith('/platform/'):
+        if address.hostname != self.channel.host or not wechat_platform_path(address.path):
             raise PlatformRejected('AUTH_REQUIRED', '微信视频号需要扫码登录；未确认登录，不上传文件')
         super().check_rejection(page)
         if self.confirmation:
@@ -154,14 +158,37 @@ class WeChatChannelsUploader(CreatorStudioUploader):
             const labels=query('.post-upload-wrap .msg-tip,'
                 +'.post-upload-wrap .video-cannot-play-text,.post-video-cover-wrap .gen-text')
                 .filter(visible).map(e=>(e.innerText||'').trim());
+            // This child is rendered only in UploadStatus.done. The uploading
+            // preview lives in .media-status-wrap and must never count as done.
+            const done=query('.post-media-preview-wrap > .post-media-wrap');
+            const sources=done.flatMap(root=>[...root.querySelectorAll('video')])
+                .map(v=>v.currentSrc||v.src).filter(Boolean);
+            const previews=done.flatMap(root=>[...root.querySelectorAll('video')])
+                .filter(visible).map(v=>({src:v.currentSrc||v.src,ready:v.readyState}));
             return {busy:busy||labels.some(t=>/正在处理文件|生成中/.test(t)),
                 complete:labels.some(t=>/^视频已上传/.test(t)),
-                failed:labels.filter(t=>/网络出错|上传失败|处理失败/.test(t))};
+                failed:labels.filter(t=>/网络出错|上传失败|处理失败/.test(t)),sources,previews};
         }''')
         if extra['failed']:
             raise PlatformRejected('FAILED', '；'.join(extra['failed']))
         state['busy'] = state['busy'] or extra['busy']
         state['complete'] = state['complete'] or extra['complete']
+        if not self.file_selected:
+            self._prior_done_sources=set(extra['sources'])
+            self._done_preview_reported=False
+        prior=self.prior_sources | getattr(self,'_prior_done_sources',set())
+        fresh_done=self.file_selected and any(
+            video['src'] and video['ready']>=1 and video['src'] not in prior
+            for video in extra['previews'])
+        if fresh_done:
+            state['complete']=True
+            # A new media source in the done-only branch is a new completion,
+            # even if the old page already showed a completion label before selection.
+            self.completion_reset=True
+            if not getattr(self,'_done_preview_reported',False):
+                self.log('[微信视频号上传完成证据] 本次选入文件的预览来源已更新，平台已进入上传完成结构；'
+                         '未采到上传中间进度也可继续校验；仍检查处理中和封面状态')
+                self._done_preview_reported=True
         if extra['busy']:
             state['pending'].append('微信视频号上传、处理或封面生成中')
         self._check_upload_progress(state)
@@ -228,6 +255,7 @@ class WeChatChannelsUploader(CreatorStudioUploader):
         self.log(f'[参数确认] {label}：{value}；已回读')
 
     def select_collection(self, page):
+        self.log('[微信视频号参数设置] 开始设置位置和合集；尚未点击发表')
         self.select_named_option(page, '位置', '不显示位置',
                                  '.post-position-wrap .position-display-wrap',
                                  '.post-position-wrap .location-filter-wrap')
@@ -297,10 +325,7 @@ class WeChatChannelsUploader(CreatorStudioUploader):
         if (not isinstance(info, dict) or info.get('platform') != 'wechat_channels'
                 or info.get('account_id') != self.account.account_id or info.get('submitted') is not True):
             return False
-        actual_bound = bool(self.account.platform_nickname and info.get('nickname') == self.account.platform_nickname)
-        profile_bound = bool(not self.account.platform_nickname and not info.get('nickname')
-            and self.account.custom_nickname and info.get('profile_id') == self.account.account_id)
-        if not (actual_bound or profile_bound):
+        if info.get('profile_id', self.account.account_id) != self.account.account_id:
             return False
         proof = info.get('confirmation')
         if not isinstance(proof, dict):

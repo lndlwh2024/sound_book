@@ -111,22 +111,27 @@ def test_current_identity_passes_without_touching_file_input_or_submit(page,tmp_
         else '<header><div class="user-info"><span class="name">本人昵称</span></div></header>')
     if platform == 'wechat_channels':
         identity = '<aside id="side-bar"><div class="side-bar-footer"><div class="account-info"><span class="name">本人昵称</span></div></div></aside>'
-    page.set_content(identity+'<input type=file accept="video/*"><button onclick="window.clicked=true">发布</button>')
+    page.set_content(identity+'<input placeholder="短标题"><input type=file accept="video/*"><button onclick="window.clicked=true">发布</button>')
     preflight.AccountPreflight(target(tmp_path,platform),seconds=.1).verify_page(page)
     assert page.locator('input[type=file]').evaluate('e=>e.files.length')==0
     assert not page.evaluate('window.clicked===true')
 
 
 @pytest.mark.parametrize('platform',list(CHANNELS))
-def test_wrong_live_identity_never_passes(page,tmp_path,platform):
+def test_only_stable_channel_mismatch_blocks_but_nickname_change_does_not(page,tmp_path,platform):
+    account=target(tmp_path,platform)
     page.goto(CHANNELS[platform].url if platform!='youtube' else 'https://studio.youtube.com/channel/UC'+'b'*22)
-    identity = '<header class="creator-header"><div class="user-info"><span class="name">别人的昵称</span></div></header>'
+    identity = '<header class="creator-header"><div class="user-info"><span class="name">新昵称</span></div></header>'
     if platform == 'wechat_channels':
-        identity = '<aside id="side-bar"><div class="side-bar-footer"><div class="account-info"><span class="name">别人的昵称</span></div></div></aside>'
-    page.set_content(identity)
-    with pytest.raises(PlatformRejected) as error:
-        preflight.AccountPreflight(target(tmp_path,platform),seconds=.1).verify_page(page)
-    assert error.value.status=='IDENTITY_MISMATCH'
+        identity = '<aside id="side-bar"><div class="side-bar-footer"><div class="account-info"><span class="name">新昵称</span></div></div></aside><input placeholder="短标题">'
+    page.set_content(identity+'<input type=file accept="video/*">')
+    if platform=='youtube':
+        with pytest.raises(PlatformRejected) as error:
+            preflight.AccountPreflight(account,seconds=.1).verify_page(page)
+        assert error.value.status=='IDENTITY_MISMATCH'
+    else:
+        preflight.AccountPreflight(account,seconds=.1).verify_page(page)
+        assert account.account.platform_nickname=='新昵称'
 
 
 def test_stop_interrupts_identity_wait(page,tmp_path):
@@ -196,7 +201,7 @@ def test_missing_prerequisites_never_launches_browser_or_creates_task_state(tmp_
     factory = MagicMock()
     monkeypatch.setattr(preflight,'sync_playwright',factory)
     chosen=target(tmp_path)
-    chosen.account.platform_nickname=''
+    chosen.profile=str(tmp_path/'missing-profile')
     worker = preflight.DeploymentPreflightWorker([chosen],tmp_path)
     worker.run()
     factory.assert_not_called()

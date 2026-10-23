@@ -56,6 +56,9 @@ class DriveJournal:
                 target TEXT NOT NULL, binding TEXT NOT NULL, day TEXT NOT NULL,
                 PRIMARY KEY(target,binding))''')
             db.execute('CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)')
+            db.execute('''CREATE TABLE IF NOT EXISTS file_provenance (
+                identity TEXT PRIMARY KEY, source_day TEXT NOT NULL DEFAULT '',
+                downloaded_at TEXT NOT NULL DEFAULT '', size_bytes INTEGER, mtime_ns INTEGER)''')
 
     def pin_legacy_account(self, cloud_account):
         """Freeze the verified pre-upgrade owner before any future reconnection."""
@@ -90,6 +93,8 @@ class DriveJournal:
                     (identity,row['target'],binding,row['cloud_id'],row['version'],row['path'],
                      row['state'],row['sha256'],row['duplicate']))
                 db.execute('DELETE FROM files WHERE identity=?',(row['identity'],))
+                db.execute('UPDATE OR IGNORE file_provenance SET identity=? WHERE identity=?',
+                           (identity,row['identity']))
             for row in db.execute('SELECT * FROM scan_cursor').fetchall():
                 parts = row['binding'].split('|')
                 if len(parts) != 2:
@@ -204,6 +209,28 @@ class DriveJournal:
         with self.connect() as db:
             db.execute("UPDATE files SET state='DOWNLOADED',sha256=?,duplicate=? WHERE identity=?",
                 (digest, int(duplicate), identity))
+            db.execute('''INSERT INTO file_provenance(identity,downloaded_at) VALUES (?,?)
+                ON CONFLICT(identity) DO UPDATE SET downloaded_at=CASE
+                WHEN downloaded_at='' THEN excluded.downloaded_at ELSE downloaded_at END''',
+                (identity,datetime.now(CHINA_TIME).isoformat()))
+        self.record_local_stamp(identity)
+
+    def record_source_day(self, identity, day):
+        day = date.fromisoformat(day).isoformat()
+        with self.connect() as db:
+            db.execute('''INSERT INTO file_provenance(identity,source_day) VALUES (?,?)
+                ON CONFLICT(identity) DO UPDATE SET source_day=CASE
+                WHEN source_day='' THEN excluded.source_day ELSE source_day END''',(identity,day))
+
+    def record_local_stamp(self, identity):
+        entry = self.entry(identity)
+        try:
+            stamp = Path(entry['path']).stat()
+        except OSError:
+            return
+        with self.connect() as db:
+            db.execute('UPDATE file_provenance SET size_bytes=?,mtime_ns=? WHERE identity=?',
+                       (stamp.st_size,stamp.st_mtime_ns,identity))
 
     def origins(self, path, digest):
         with self.connect() as db:
@@ -218,6 +245,43 @@ class DriveJournal:
                 (target,digest)).fetchall()
             db.executemany('UPDATE files SET duplicate=1 WHERE identity=?',
                 [(r['identity'],) for r in rows if canonical_local_path(r['path']) == canonical_local_path(path)])
+
+
+def queue_provenance(root, files):
+    """Read provenance in bulk without hashing videos or opening a write journal."""
+    journal = Path(root)/'drive_ingest.sqlite3'
+    if not journal.is_file():
+        return {}
+    wanted = {canonical_local_path(path):stamp for path,stamp in files}
+    found = {}
+    try:
+        with sqlite3.connect(journal.resolve().as_uri()+'?mode=ro',uri=True,timeout=.2) as db:
+            db.row_factory=sqlite3.Row
+            columns = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            query = ('''SELECT f.path,p.source_day,p.downloaded_at,p.size_bytes,p.mtime_ns
+                FROM files f LEFT JOIN file_provenance p ON f.identity=p.identity
+                WHERE f.state='DOWNLOADED' ''' if 'file_provenance' in columns else
+                "SELECT path,NULL source_day,NULL downloaded_at,NULL size_bytes,NULL mtime_ns FROM files WHERE state='DOWNLOADED'")
+            for row in db.execute(query):
+                path=canonical_local_path(row['path'])
+                stamp=wanted.get(path)
+                if stamp is None or (row['size_bytes'] is not None and
+                        (row['size_bytes'],row['mtime_ns']) != (stamp.st_size,stamp.st_mtime_ns)):
+                    continue
+                item=found.setdefault(path,{'days':set(),'downloaded_at':''})
+                if row['source_day']:
+                    item['days'].add(row['source_day'])
+                if row['downloaded_at'] and (not item['downloaded_at'] or row['downloaded_at']<item['downloaded_at']):
+                    item['downloaded_at']=row['downloaded_at']
+    except sqlite3.Error:
+        return {path:{'label':'日期未知','tooltip':'云盘来源日期暂不可读取'} for path in wanted}
+    result={}
+    for path,item in found.items():
+        days=sorted(item['days'])
+        result[path]={'label':days[0] if len(days)==1 else '多日期' if days else '日期未知',
+                      'tooltip':'云盘来源日期：'+('、'.join(days) or '历史记录未保存日期')
+                      +'\n下载完成时间：'+(item['downloaded_at'] or '历史记录未保存时间')}
+    return result
 
 
 def file_hashes(path, stopped=lambda: False):
@@ -328,6 +392,7 @@ class DriveIngestor:
                 self.log(f'[云盘不可下载] {target.key} / {file["name"]}')
                 continue
             entry = self.journal.reserve(target, file, self.cloud_account)
+            self.journal.record_source_day(entry['identity'], day)
             path = Path(entry['path'])
             marker = path.with_name('.' + path.name + '.shusheng-pending')
             if entry['state'] == 'DOWNLOADED':
@@ -377,8 +442,8 @@ class DriveIngestor:
                     if self.storage_policy:
                         self.storage_policy.check(directory, int(file['size']))
                     self.log(f'[开始下载] {target.key} / {file["name"]}；云端文件ID={file["id"]}；'
-                        f'大小={file["size"]}字节；保存到={path}')
-                    self.status(target.key, '正在下载：' + file['name'])
+                        f'大小={file["size"]}字节；保存到={path}；云盘日期={day}')
+                    self.status(target.key, f'正在下载：{day} / '+file['name'])
                     last_progress = [0.0]
                     def progress(size):
                         if size > int(file['size']):
@@ -387,7 +452,7 @@ class DriveIngestor:
                             if self.storage_policy:
                                 self.storage_policy.check_progress(directory)
                             last_progress[0] = time.monotonic()
-                            self.status(target.key, f'下载 {size * 100 / int(file["size"]):.0f}%：{file["name"]}')
+                            self.status(target.key, f'{day} 下载 {size * 100 / int(file["size"]):.0f}%：{file["name"]}')
                     self.client.download(file['id'], partial, self.stopped, progress)
                     digest = self.validate(partial, file)
                     latest = self.client.metadata(file['id'])
@@ -409,8 +474,9 @@ class DriveIngestor:
                 self.journal.complete(entry['identity'], digest, duplicate)
                 # Give the existing fully-written check an old mtime only after journal commit.
                 os.utime(path, (time.time() - 5, time.time() - 5))
+                self.journal.record_local_stamp(entry['identity'])
                 marker.unlink(missing_ok=True)
-                self.log(f'[云盘下载完成] {target.key} / {path.name}；SHA-256已校验' + ('；历史成功重复，跳过上传' if duplicate else '；进入本地部署队列'))
+                self.log(f'[云盘下载完成] {target.key} / {path.name}；云盘日期={day}；SHA-256已校验' + ('；历史成功重复，跳过上传' if duplicate else '；进入本地部署队列'))
                 self.ready(str(path))
             except (InterruptedError, DriveAuthRequired):
                 raise

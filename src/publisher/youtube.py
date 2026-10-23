@@ -6,6 +6,7 @@ from urllib.parse import urlsplit, parse_qs
 
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 from .browser_workflow import BrowserPublishWorkflow
+from .page_access import check_network_page
 from .channel_probe import ChannelDOMProbe
 from .douyin.uploader import resolve_publish_series
 from .titles import resolve_title
@@ -174,6 +175,7 @@ class YouTubeUploader(BrowserPublishWorkflow):
         if not re.fullmatch(r'UC[\w-]{22}', wanted):
             raise PlatformRejected('IDENTITY_MISMATCH', '请先绑定有效YouTube频道ID（UC开头）')
         def check():
+            check_network_page(page.url)
             parsed = urlsplit(page.url)
             if parsed.hostname == 'accounts.google.com':
                 raise PlatformRejected('AUTH_REQUIRED', GOOGLE_LOGIN_HELP if google_login_rejected(page.url)
@@ -186,6 +188,9 @@ class YouTubeUploader(BrowserPublishWorkflow):
             return False
         self.wait(page, '核对实际频道ID', check, seconds)
         self.log(f'[频道核对] 已匹配 {wanted}；账号备注：{self.account.account_name}')
+        from .identity import sync_current_nickname
+        self.found_identity=sync_current_nickname(page,self.account,'youtube',self.log,
+                                                getattr(self,'nickname_changed',None))
 
     def open_upload(self, page):
         self.click(page, page.get_by_role('button', name='创建', exact=True), '打开创建菜单')
@@ -618,7 +623,7 @@ class YouTubeUploader(BrowserPublishWorkflow):
                         file_input = self.open_upload(page)
                         self.stop_check()
                         self.before_upload()
-                        file_input.set_input_files(str(video.resolve()))
+                        file_input.set_input_files(str(video.resolve()), timeout=30000)
                         self._video_selected=True
                         self.log('[正在上传] '+video.name+'；已选择本地文件，尚未发布')
                     submit=self.prepare_publish_form(page,
@@ -632,6 +637,9 @@ class YouTubeUploader(BrowserPublishWorkflow):
                     title=self.title
                     self.stop_check()
                     self.before_submit(self.result_hint())
+                    from .identity import sync_current_nickname
+                    sync_current_nickname(page,self.account,'youtube',self.log,
+                                          getattr(self,'nickname_changed',None))
                     self.stop_check()
                     self.submitted,self._publish_armed = True,True  # A timeout after this boundary must not be blindly retried.
                     submit.click(timeout=1000)

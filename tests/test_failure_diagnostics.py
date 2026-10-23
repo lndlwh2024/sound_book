@@ -244,7 +244,7 @@ def test_queue_hides_unselected_platform_columns_without_reindexing_or_changing_
         check.setChecked(key in ('douyin', 'youtube'))
     panel.update_selection()
     for p in panel.panels:
-        assert p.table_queue.columnCount() == 5+len(CHANNELS)
+        assert p.table_queue.columnCount() == 6+len(CHANNELS)
         assert [key for key in PUBLISH_ORDER if not p.table_queue.isColumnHidden(5+PUBLISH_ORDER.index(key))] == ['douyin','youtube']
         assert p.table_queue.isColumnHidden(5+PUBLISH_ORDER.index('wechat_channels'))
     archive_targets = list(panel.store.archive_targets)

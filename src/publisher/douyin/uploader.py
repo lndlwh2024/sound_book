@@ -315,6 +315,9 @@ class DouyinUploader(BrowserPublishWorkflow):
                         return False, "账号登录态已失效，请重新扫码登录", None
 
                     # 步骤 1: 注入视频文件
+                    from ..identity import sync_current_nickname
+                    self.found_identity=sync_current_nickname(page,self.account,'douyin',self._progress,
+                                                            getattr(self,'nickname_changed',None))
                     logger.info("【步骤 1/5】正在注入视频文件...")
                     self._check_stop()
                     file_input = page.locator('input[type="file"][accept*="video"], input[type="file"][accept*=".mp4"]').first
@@ -344,6 +347,8 @@ class DouyinUploader(BrowserPublishWorkflow):
                     # 点击超时也可能已提交，先记下边界，避免误报取消成功。
                     publish_submitted = True
                     self._publish_armed = True
+                    sync_current_nickname(page,self.account,'douyin',self._progress,
+                                          getattr(self,'nickname_changed',None))
                     publish_btn.click()
                     self._progress("已点击发布，等待实际投稿接口确认（最长10分钟）；此时停止且未确认成功将记为失败，保留文件")
 
@@ -480,7 +485,8 @@ class DouyinUploader(BrowserPublishWorkflow):
     def _select_video_cover(self, page: Page):
         # 第一处是竖封面入口；在弹窗中确认当前视频帧，不上传外部图片。
         entry = page.get_by_text("选择封面", exact=True).first
-        entry.wait_for(state="visible", timeout=2000)
+        self._wait_until(page, '等待视频封面入口（最多30秒）',
+                         lambda: entry.is_visible() and entry.is_enabled(), seconds=30)
         dialog = page.locator('[role="dialog"]:visible, .semi-modal:visible').last
         try:
             # This opens an editor, not a navigation. Wait on its DOM explicitly.

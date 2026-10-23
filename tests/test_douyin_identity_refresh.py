@@ -100,15 +100,12 @@ def test_password_or_login_route_never_yields_identity(page):
 
 
 @pytest.mark.parametrize('wanted',['本人真实昵称','另一个账号'])
-def test_deployment_preflight_can_verify_hidden_bound_nickname_and_reject_mismatch(page,tmp_path,wanted):
+def test_deployment_preflight_syncs_hidden_nickname_without_rejecting_rename(page,tmp_path,wanted):
     page.set_content(header())
     account=ChannelAccount('stable-id','douyin','备注',platform_nickname=wanted)
     checker=AccountPreflight(PublishTarget('douyin',account,str(tmp_path)),seconds=1)
-    if wanted=='本人真实昵称':
-        checker.verify_page(page)
-    else:
-        with pytest.raises(PlatformRejected, match='不符'):
-            checker.verify_page(page)
+    checker.verify_page(page)
+    assert account.platform_nickname=='本人真实昵称'
     assert page.locator('input[type=file]').evaluate('e=>e.files.length') == 0
 
 

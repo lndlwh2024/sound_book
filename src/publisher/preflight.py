@@ -15,11 +15,11 @@ from PySide6.QtCore import QThread, Signal
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 
 from .browser_workflow import BrowserPublishWorkflow
+from .page_access import check_network_page, wechat_platform_path
 from .channel_probe import CREATOR_NOTICES_JS
 from .creator_studio import CreatorStudioUploader, rejection
 from .dom_readiness import publishing_dom_state as account_dom_state, structure_ready
 from .douyin.browser import DouyinBrowserManager
-from .identity import extract_platform_identity, refresh_platform_identity, read_homepage_identity, protected_upload_access
 from .platforms import CHANNELS
 from .status import STATUS_TEXT
 from .youtube import PlatformRejected, UploadStopped, YouTubeUploader
@@ -58,7 +58,7 @@ def failure_message(results):
     actions = {
         'AUTH_REQUIRED': '请点击该账号的“登录 / 获取平台昵称”完成登录，并关闭登录浏览器后重试。',
         'ACCOUNT_RESTRICTED': '请按平台提示解除账号限制后重试；重复登录不能解除封禁。',
-        'IDENTITY_MISMATCH': '请登录绑定的正确账号；YouTube 还需核对频道 ID。',
+        'IDENTITY_MISMATCH': '请核对实际账号及固定频道 ID；昵称变化不阻止发布。',
         'VERIFICATION_REQUIRED': '请由账号本人完成平台安全验证后重试。',
         'PLATFORM_BUSY': '请稍后重新启动，当前不会继续请求投稿。',
     }
@@ -82,9 +82,6 @@ def prerequisite_results(targets, report_root):
             available = False
         if not available:
             problems.append('缺少该账号的浏览器登录目录。请点击“登录 / 获取平台昵称”完成登录。')
-        if target.platform in ('xiaohongshu', 'kuaishou') and not (
-                target.account.platform_nickname or target.account.custom_nickname or '').strip():
-            problems.append('尚未设置账号昵称。请读取平台昵称，或设置自定义昵称后检查实际登录。')
         try:
             from .titles import resolve_title
             resolve_title(target.account,'配置校验.mp4',target.platform)
@@ -118,11 +115,12 @@ class AccountPreflight(BrowserPublishWorkflow):
         return self._wait_until(page, label, condition, min(seconds, self.seconds))
 
     def _check_duration_notice(self, page):
+        check_network_page(page.url)
         address = urlsplit(page.url)
         if self.target.platform == 'youtube' and google_login_rejected(page.url):
             raise PlatformRejected('AUTH_REQUIRED', GOOGLE_LOGIN_HELP)
         if (address.hostname != self.channel.host or re.search(r'/(login|signin)(?:/|$)', address.path, re.I)
-                or self.target.platform == 'wechat_channels' and not address.path.startswith('/platform/')):
+                or self.target.platform == 'wechat_channels' and not wechat_platform_path(address.path)):
             raise PlatformRejected('AUTH_REQUIRED', '登录已失效或进入登录页，请先完成“登录 / 获取平台昵称”。')
         # Same rejection evidence as the actual publisher, including a banned
         # creator landing page, verification panels and server-busy notices.
@@ -141,56 +139,8 @@ class AccountPreflight(BrowserPublishWorkflow):
         if self.target.platform == 'youtube':
             # Channel ID is the stable identity; remarks/nicknames may differ.
             YouTubeUploader.verify_channel(self, page, self.seconds)
-        elif self.target.platform == 'wechat_channels':
-            if self.account.custom_nickname:
-                CreatorStudioUploader.verify_identity(self,page)
-                self._check_duration_notice(page)
-                return
-            identity=self.wait(page,'检查微信视频号账号与发布入口',
-                lambda:extract_platform_identity(page,'wechat_channels') or (
-                    protected_upload_access(page,'wechat_channels') and {'nickname':''}),self.seconds)
-            if not identity['nickname']:
-                self.nickname_missing=True
-                raise PlatformRejected('CONFIG_REQUIRED',
-                    '当前发布入口可用，但账号区域仅显示头像，无法读取昵称。请设置自定义昵称后重新启动；无需重新登录。')
-            if not self.account.platform_nickname:
-                self.account.platform_nickname=identity['nickname']
-                self.account.account_name=identity['nickname']
-                self.account.login_status='AUTHORIZED'
-                self.found_identity=identity
-                self.log('[账号识别] 已从当前独立登录会话读取本人昵称：'+identity['nickname']+'；未选择或上传文件')
-            CreatorStudioUploader.verify_identity(self,page)
-        elif self.target.platform in ('xiaohongshu', 'kuaishou'):
-            CreatorStudioUploader.verify_identity(self, page)
         else:
-            # The current Douyin header hides its name in the avatar menu.
-            # Once a nickname is bound, reveal that same own-account area for
-            # the preflight check as well; never accept an unrelated post author.
-            if self.account.platform_nickname and not self.account.custom_nickname:
-                bound_identity = refresh_platform_identity(page, 'douyin', self.stop_requested, seconds=min(5, self.seconds))
-                if not bound_identity:
-                    bound_identity = read_homepage_identity(page, 'douyin', self.stop_requested, seconds=min(5,self.seconds))
-            else:
-                bound_identity = None
-            def ready():
-                identity = bound_identity or extract_platform_identity(page, 'douyin')
-                wanted = (self.account.platform_nickname or '').strip()
-                if not identity:
-                    # Existing Douyin accounts may predate nickname binding.
-                    # Reuse its proven video input as live protected-page proof;
-                    # neither a cached status nor the URL alone is sufficient.
-                    if (not wanted or self.account.custom_nickname) and urlsplit(page.url).path == urlsplit(self.channel.url).path:
-                        inputs = page.locator('input[type="file"][accept*="video"], input[type="file"][accept*=".mp4"]')
-                        if inputs.count() == 1 and inputs.is_enabled() and inputs.evaluate(
-                                "e=>!e.closest('[aria-disabled=true]')"):
-                            self.log('[登录核对] 当前受保护视频上传入口可用；沿用原账号独立目录，未改写昵称绑定')
-                            return True
-                    return False
-                if wanted and identity['nickname'] != wanted:
-                    raise PlatformRejected('IDENTITY_MISMATCH',
-                        f'当前昵称 {identity["nickname"]} 与绑定昵称 {wanted} 不符。请登录正确账号。')
-                return identity
-            self.wait(page, '核对当前抖音账号', ready, self.seconds)
+            CreatorStudioUploader.verify_identity(self,page)
         self._check_duration_notice(page)
 
     def check(self, playwright, headless=False):

@@ -6,6 +6,7 @@ from urllib.parse import urlsplit
 
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 from .browser_workflow import BrowserPublishWorkflow
+from .page_access import check_network_page
 from .channel_probe import ChannelDOMProbe, safe_url, CREATOR_NOTICES_JS
 from .dom_readiness import publishing_dom_state as account_dom_state, structure_ready
 from .page_structure import file_input_selector
@@ -81,6 +82,7 @@ class CreatorStudioUploader(BrowserPublishWorkflow):
             raise PlatformRejected(*self.platform_error)
         if self.confirmation and self.submitted:
             return
+        check_network_page(page.url)
         address=urlsplit(page.url)
         if address.hostname!=self.channel.host or re.search(r'/(login|signin)(?:/|$)',address.path):
             raise PlatformRejected('AUTH_REQUIRED','平台登录页面或来源发生变化，请重新登录')
@@ -315,26 +317,12 @@ class CreatorStudioUploader(BrowserPublishWorkflow):
             and not re.search(r'upload|draft|precheck|check|limit|metric|log|status|list|detail|refresh',path))
 
     def verify_identity(self,page):
-        wanted=self.account.platform_nickname.strip()
-        custom=(getattr(self.account,'custom_nickname','') or '').strip()
-        if custom:
-            from .identity import protected_upload_access
-            identity=extract_platform_identity(page,self.account.platform)
-            if identity and ((wanted and identity['nickname']!=wanted) or (
-                    self.account.platform_uid and identity.get('platform_uid')
-                    and self.account.platform_uid!=identity['platform_uid'])):
-                raise PlatformRejected('IDENTITY_MISMATCH','当前实际账号与绑定账号不一致，未上传文件')
-            self.wait(page,'检查当前账号的视频上传入口',
-                      lambda:protected_upload_access(page,self.account.platform),30)
-            self.log(f'[账号核对] 自定义昵称：{custom}；独立登录目录的实时上传入口检查通过；未将自定义昵称作为登录凭据')
-            return
-        if not wanted:
-            raise PlatformRejected('CONFIG_REQUIRED','请先使用“登录 / 获取平台昵称”绑定实际账号昵称')
-        identity=self.wait(page,'核对实际平台账号',lambda:extract_platform_identity(page,self.account.platform),30)
-        if identity['nickname']!=wanted or (self.account.platform_uid and identity.get('platform_uid')
-                                           and self.account.platform_uid!=identity['platform_uid']):
-            raise PlatformRejected('IDENTITY_MISMATCH',f'实际账号 {identity["nickname"]} 与绑定账号 {wanted} 不一致，未上传文件')
-        self.log(f'[账号核对] {self.channel.name} / {wanted}；使用该账号独立浏览器目录')
+        from .identity import protected_upload_access, sync_current_nickname
+        self.wait(page,'检查当前账号的视频上传入口',
+                  lambda:protected_upload_access(page,self.channel.key),30)
+        self.found_identity=sync_current_nickname(page,self.account,self.channel.key,self.log,
+                                                getattr(self,'nickname_changed',None))
+        self.log('[登录核对] 独立登录目录的实时上传入口检查通过；昵称同步不作为发布条件')
 
     def video_input(self,page):
         switched=False
@@ -403,7 +391,9 @@ class CreatorStudioUploader(BrowserPublishWorkflow):
             // Status labels often contain an SVG/thumb icon plus a direct text node.
             // A leaf-only scan misses these, even though the label is visible to the user.
             const leaves=query('*').filter(e=>visible(e)
-                &&!e.closest('input,textarea,[contenteditable=true]')).map(e=>!e.children.length
+                &&!e.closest('input,textarea,[contenteditable=true],#header-avatar,'
+                    +'[class*="user-info"],[class*="userInfo"],#side-bar .account-info,'
+                    +'.common-menu-item.account-info')).map(e=>!e.children.length
                     ?(e.innerText||'').trim():[...e.childNodes].filter(n=>n.nodeType===Node.TEXT_NODE)
                         .map(n=>n.textContent).join('').trim()).filter(Boolean);
             const progress=query('[role=progressbar],progress,[class*="upload-progress"],[class*="uploadProgress"]')
@@ -535,6 +525,9 @@ class CreatorStudioUploader(BrowserPublishWorkflow):
                     if self.success_notice(page):
                         raise PlatformRejected('CONFIG_REQUIRED','页面已有发布成功提示，无法归属本次文件，未提交')
                     self.stop_check()
+                    from .identity import sync_current_nickname
+                    self.found_identity=sync_current_nickname(page,self.account,self.account.platform,self.log,
+                                                            getattr(self,'nickname_changed',None))
                     self.before_submit(self.result_hint())
                     self.stop_check()
                     self.submitted,self._publish_armed=True,True

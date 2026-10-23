@@ -71,7 +71,7 @@ EXTRACT_JS = r'''() => {
             const profileNode=ownHome || ownWechat || !!el.closest('#header-avatar,#side-bar .side-bar-footer .account-info') ||
                 el.matches('[class*="user-info"],[class*="nickname"],[class*="user-name"],[class*="userName"],[class*="user_name"]')
                 && !!el.closest('[role=menu],[role=tooltip],[class*="dropdown-content"],[class*="popover-content"]');
-            const semantic=profileNode || el.isContentEditable || el.matches('input,textarea,button,select,option,a[href],label,[role],[contenteditable],video,progress,canvas,xhs-publish-btn,[class*="progress"],[onclick],[tabindex],[class*="button" i],[class*="btn" i]');
+            const semantic=profileNode || el.isContentEditable || el.matches('input,textarea,button,select,option,a[href],label,[role],[contenteditable],video,progress,canvas,xhs-publish-btn,[class*="progress"],[onclick],[tabindex],[class*="button" i],[class*="btn" i],.post-media-preview-wrap,.post-media-wrap,.media-status-wrap');
             if (!semantic && !(s.cursor==='pointer' && noticeText.length>0 && noticeText.length<=80)) continue;
             nodes.push({tag:el.tagName.toLowerCase(), id:el.id, name:el.getAttribute('name'),
                 role:el.getAttribute('role'), type:el.getAttribute('type'), accept:el.getAttribute('accept'),
@@ -105,6 +105,10 @@ EXTRACT_JS = r'''() => {
                 text:el.matches('input,textarea') ? '' : (el.innerText||el.textContent||'').trim().slice(0,200),
                 valueNow:el.matches('progress') ? el.value : null, valueMax:el.matches('progress') ? el.max : null,
                 videoReadyState:el.matches('video') ? el.readyState : null,
+                wechatUpload:el.matches('video') ? {
+                    doneBranch:!!el.closest('.post-media-preview-wrap > .post-media-wrap'),
+                    transferringBranch:!!el.closest('.media-status-wrap'),
+                    hasSource:!!(el.currentSrc||el.src)} : null,
                 root:path});
         }
     };

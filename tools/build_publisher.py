@@ -90,6 +90,10 @@ def main():
                    'docs/DOUYIN_COVER_READINESS_20261020.md',
                    'docs/WECHAT_EMPTY_DESCRIPTION_20261020.md',
                    'docs/WECHAT_PUBLISH_CONFIRMATION_20261020.md',
+                   'docs/WIN10_DIAGNOSTICS6_20261021.md',
+                   'docs/WECHAT_UPLOAD_FINISH_20261021.md',
+                   'docs/DIAGNOSTICS9_20261023.md',
+                   'docs/PUBLISHER_NICKNAME_DATE_20261023.md',
                    'requirements-publisher.txt', 'requirements-publisher-lock.txt'):
         shutil.copy2(ROOT/source, output/Path(source).name)
     (output/'自检.cmd').write_text('@echo off\r\ncd /d "%~dp0"\r\nstart /wait "" ShuShengPublisher.exe --self-check --output "%~dp0self-check.json"\r\nnotepad "%~dp0self-check.json"\r\n', encoding='utf-8')

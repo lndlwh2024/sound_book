@@ -2,6 +2,7 @@
 import re
 import time
 from urllib.parse import urlsplit
+from playwright.sync_api import Error as PlaywrightError
 from .platforms import CHANNELS
 
 
@@ -12,7 +13,54 @@ def validated_custom_nickname(value):
     return value
 
 
+def sync_current_nickname(page, account, platform, log=lambda message: None, changed=None):
+    """Nickname is optional display metadata, never an upload credential."""
+    def note(message):
+        try:
+            log(message)
+        except Exception:
+            pass
+    try:
+        identity = extract_platform_identity(page, platform)
+        if not identity and platform == 'douyin':
+            identity = refresh_platform_identity(page, platform, seconds=.4)
+        if not identity:
+            return None
+        nickname = validated_custom_nickname(identity['nickname'])
+        old = account.platform_nickname
+        account.platform_nickname = nickname
+        account.account_name = getattr(account, 'custom_nickname', '') or nickname
+        if callable(changed):
+            changed(identity)
+        if old != nickname:
+            note(f'[昵称同步] {old or "未记录"} → {nickname}；账号ID和发布记录保持不变')
+        return identity
+    except Exception as error:
+        # Reading/saving a display name must never reject an otherwise valid
+        # upload. Login and stable-channel checks are performed separately.
+        note(f'[昵称同步未完成] {type(error).__name__}：{error}；继续发布')
+        return None
+
+
 def protected_upload_access(page, platform):
+    """Retry a read-only access probe if navigation invalidates its DOM snapshot."""
+    initial_url = page.url
+    try:
+        accessible = _read_protected_upload_access(page, platform)
+    except PlaywrightError as error:
+        # Wujie can remove a child frame while redirecting to login. The next
+        # bounded wait iteration checks the current URL for AUTH_REQUIRED.
+        # Do not turn a detached snapshot into an upload failure or accept it
+        # as authentication; unrelated browser errors must remain visible.
+        if re.search(r'frame (?:was|has been) detached|execution context was destroyed|'
+                     r'cannot find context with specified (?:executionContextId|id)',
+                     str(error), re.I):
+            return False
+        raise
+    return bool(accessible and page.url == initial_url)
+
+
+def _read_protected_upload_access(page, platform):
     """Read-only proof of a live upload form in this account's isolated profile.
 
     A user label is not an authentication credential. Hidden file inputs are
@@ -44,15 +92,18 @@ def protected_upload_access(page, platform):
         if platform == 'wechat_channels':
             editor = scope.locator('input[placeholder*="短标题"]:visible')
             avatar = page.locator('.common-menu-item.account-info img.avatar:visible, #side-bar .side-bar-footer .account-info img:visible')
-            if not avatar.count():
+            own_card=page.locator('#side-bar .side-bar-footer .account-info:visible, '
+                                  '.common-menu-item.account-info:visible')
+            if not avatar.count() and not own_card.count():
                 continue
         elif platform in ('kuaishou','xiaohongshu'):
             # Their title editors appear only after choosing a video. Login
             # checks must stay read-only and must not wait for that later form.
             own_avatar=page.locator('header [class*="avatar"]:visible, '
                 '[class*="user-info"] img:visible, [class*="userInfo"] img:visible')
+            own_card=page.locator('header [class*="user-info"]:visible, header [class*="userInfo"]:visible')
             return bool(address.path.rstrip('/') == urlsplit(channel.url).path.rstrip('/')
-                        and (extract_platform_identity(page,platform) or own_avatar.count()))
+                        and (own_card.count() or own_avatar.count()))
         else:
             return address.path.rstrip('/') == urlsplit(channel.url).path.rstrip('/')
         if editor.count() == 1 and editor.is_enabled():
@@ -232,10 +283,11 @@ def _identity(result, page, platform):
 
 
 def extract_platform_identity(page, platform):
+    from .page_access import wechat_platform_path
     address = urlsplit(page.url)
     if address.hostname != CHANNELS[platform].host or re.search(r'/(login|signin)(?:/|$)', address.path):
         return None
-    if platform == 'wechat_channels' and not address.path.startswith('/platform/'):
+    if platform == 'wechat_channels' and not wechat_platform_path(address.path):
         return None  # The official /login.html is on the same host.
     if platform == 'wechat_channels':
         return _identity(page.evaluate(WECHAT_IDENTITY_JS),page,platform)
@@ -321,9 +373,10 @@ def refresh_platform_identity(page, platform, stop_requested=lambda: False, seco
 
 def identity_read_failure(page, platform):
     """A missing display name does not mean the saved login has expired."""
+    from .page_access import wechat_platform_path
     address = urlsplit(page.url)
     if (address.hostname != CHANNELS[platform].host or re.search(r'/(login|signin)(?:/|$)', address.path)
-            or platform == 'wechat_channels' and not address.path.startswith('/platform/')):
+            or platform == 'wechat_channels' and not wechat_platform_path(address.path)):
         return '当前标签页不在已登录的创作者页面；请选择正确页面，确实进入登录页时再完成登录。原昵称与绑定保留。'
     state = page.evaluate(r'''() => {
         const visible=e=>!!(e.getClientRects().length&&getComputedStyle(e).visibility!=='hidden');

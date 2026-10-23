@@ -99,7 +99,7 @@ def test_cover_entry_does_not_wait_for_navigation_but_checks_its_dialog(tmp_path
     upload._wait_cover_closed.assert_called_once()
 
 
-@pytest.mark.parametrize('delayed_part', ['dialog', 'canvas', 'replacement'])
+@pytest.mark.parametrize('delayed_part', ['entry', 'dialog', 'canvas', 'replacement'])
 def test_cover_waits_for_delayed_editor_and_current_frame_without_uploading_again(browser,tmp_path,delayed_part):
     upload=uploader(tmp_path)
     page=browser.new_page(viewport={'width':1366,'height':536})
@@ -111,6 +111,10 @@ def test_cover_waits_for_delayed_editor_and_current_frame_without_uploading_agai
                 <button onclick="window.confirmed=(window.confirmed||0)+1;this.parentElement.style.display='none'">完成</button>
             </div>''')
         page.evaluate('''mode => {
+            if(mode==='entry') {
+                document.querySelector('#cover').style.display='none';
+                setTimeout(()=>document.querySelector('#cover').style.display='block',2600);
+            }
             document.querySelector('#cover').onclick=()=>{
                 window.opens=(window.opens||0)+1;
                 let editor=document.querySelector('#editor');

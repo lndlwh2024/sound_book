@@ -14,6 +14,7 @@ from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlsplit, parse_qs, quote
 from urllib.request import Request, build_opener, HTTPRedirectHandler
+from .windows_proxy import proxy_handlers, ProxyConfigurationError
 
 SCOPE = 'https://www.googleapis.com/auth/drive.readonly'
 AUTH_URL = 'https://accounts.google.com/o/oauth2/v2/auth'
@@ -42,7 +43,7 @@ def request(url, *, data=None, token=None, stream=False):
         headers['Authorization'] = 'Bearer ' + token
     body = urlencode(data).encode() if data is not None else None
     try:
-        response = build_opener(NoRedirect).open(Request(url, data=body, headers=headers), timeout=20)
+        response = build_opener(NoRedirect, *proxy_handlers(url)).open(Request(url, data=body, headers=headers), timeout=20)
         if stream:
             return response
         with response:
@@ -53,6 +54,8 @@ def request(url, *, data=None, token=None, stream=False):
         if error.code == 400 and url == TOKEN_URL:
             raise DriveAuthRequired('Google授权不可用或已撤销，请重新连接') from None
         raise DriveError(f'Google请求失败（HTTP {error.code}），请检查权限、网络与Drive API设置') from None
+    except ProxyConfigurationError as error:
+        raise DriveError(str(error)+'；未据此判定授权失效') from None
     except (URLError, TimeoutError, OSError) as error:
         reason = error.reason if isinstance(error,URLError) else error
         if isinstance(reason,ssl.SSLCertVerificationError):

@@ -34,7 +34,8 @@ from ..publisher.youtube_browser import (launch_youtube_context, start_manual_lo
     google_login_rejected, GOOGLE_LOGIN_HELP, youtube_runtime_summary,
     manual_browser_open, ManualBrowserHandoff)
 
-QUEUE_HEADERS = ['序号', '文件名', '类型', '文件大小', '修改时间', *(CHANNELS[key].name for key in PUBLISH_ORDER)]
+QUEUE_HEADERS = ['序号', '文件名', '类型', '文件大小', '修改时间', *(CHANNELS[key].name for key in PUBLISH_ORDER), '视频日期']
+QUEUE_DATE_COLUMN = len(QUEUE_HEADERS)-1
 
 
 class QueueSnapshotWorker(QThread):
@@ -64,7 +65,9 @@ class QueueSnapshotWorker(QThread):
                     state = account_dom_state(self.root/'dom_reports', platform, account_id)
             except (OSError, ValueError) as exc:
                 error = str(exc)
-            snapshots.append((platform, request, files, state, error))
+            from ..publisher.drive_ingest import queue_provenance
+            provenance=queue_provenance(self.root,files)
+            snapshots.append((platform, request, files, state, error, provenance))
         self.snapshot_ready.emit(snapshots)
 
 
@@ -73,6 +76,7 @@ def size_queue_columns(table):
     header.setDefaultAlignment(Qt.AlignCenter)
     header.setMinimumSectionSize(36)
     metrics = table.fontMetrics()
+    header_metrics = header.fontMetrics()
     for column in (0, *range(2, len(QUEUE_HEADERS))):
         if table.isColumnHidden(column):
             continue
@@ -81,16 +85,17 @@ def size_queue_columns(table):
             item=table.item(row,column)
             if item:
                 labels.extend(item.text().split(' / '))
-        width=max(metrics.horizontalAdvance(label) for label in labels)+18
+        width=max(header_metrics.horizontalAdvance(QUEUE_HEADERS[column]),
+                  max(metrics.horizontalAdvance(label) for label in labels))+22
         header.setSectionResizeMode(column,QHeaderView.Fixed)
-        table.setColumnWidth(column,max(36,min(width,170 if column>=5 else 150)))
+        table.setColumnWidth(column,max(36,width))
     header.setSectionResizeMode(1,QHeaderView.Stretch)
     for row in range(table.rowCount()):
         item=table.item(row,1)
         if item:
             bounds=metrics.boundingRect(QRect(0,0,max(30,table.columnWidth(1)-12),1000),
                 Qt.TextWordWrap,item.text())
-            accounts=max([len(table.item(row,c).text().split(' / ')) for c in range(5,len(QUEUE_HEADERS))
+            accounts=max([len(table.item(row,c).text().split(' / ')) for c in range(5,5+len(PUBLISH_ORDER))
                 if not table.isColumnHidden(c) and table.item(row,c)]+[1])
             table.setRowHeight(row,max(30,bounds.height()+10,accounts*26))
 
@@ -1054,7 +1059,7 @@ class MultiPlatformPublisherPanel(QWidget):
                 if path.is_file():digests.append(file_hashes(path)[0])
                 else:
                     previous=self.results.get(str(path),{})
-                    if previous.get('archived_path') and previous.get('sha256'):
+                    if previous.get('archived_path') and Path(previous['archived_path']).is_file() and previous.get('sha256'):
                         digests.append(previous['sha256'])
                     else:break
             if len(digests)==len(file_paths) and digests:
@@ -1064,10 +1069,15 @@ class MultiPlatformPublisherPanel(QWidget):
                     self.log_message('[手工任务跳过成功账号] 所选内容已完成，不打开该账号浏览器、不重新上传',
                         platform=target.platform,account_id=target.account.account_id,account_name=target.account.account_name)
                 if not pending:
+                    if any(Path(filename).is_file() for filename in file_paths):
+                        self._deferred_preflight=set()
+                        self.log_message('[待统一归档] 所需平台均已成功，仅处理归档，不打开上传浏览器')
+                        self.launch_deployment(targets,file_paths)
+                        return
                     self.on_manual_upload_finished()
                     self.sync_deployment_buttons()
                     self.sync_drive_watch()
-                    self.show_status('手工上传任务已完成：所选平台均已有成功记录，部署已自动停止')
+                    self.show_status('手工上传任务已完成：所需平台均已成功且已归档，部署已自动停止')
                     self.log_message('[手工任务完成] 所选平台均已完成，未启动上传；部署已自动停止')
                     return
         self._deferred_preflight={t.key for t in pending if not quota.snapshot(t.key,t.account.daily_upload_limit)['remaining']}
@@ -1121,17 +1131,13 @@ class MultiPlatformPublisherPanel(QWidget):
             if not result.passed or not result.identity:
                 continue
             target=next((t for t in targets if t.key==result.key),None)
-            panel=next((p for p in self.panels if target and p.platform==target.platform),None)
-            account=next((a for a in self.repository.accounts(target.platform)
-                          if a.account_id==target.account.account_id),None) if target else None
-            if not panel or not account or not panel.apply_identity(account,result.identity):
-                self.show_status('昵称读取成功但未能保存到原账号，部署未启动；请检查配置')
-                return
+            if target is None:
+                continue
+            self.receive_nickname(dict(result.identity,platform=target.platform,account_id=target.account.account_id))
             for planned in getattr(self,'_all_deployment_targets',targets):
                 if planned.key==target.key:
-                    planned.account.platform_nickname=account.platform_nickname
-                    planned.account.account_name=account.account_name
-                    planned.account.login_status=account.login_status
+                    planned.account.platform_nickname=result.identity['nickname']
+                    planned.account.account_name=planned.account.custom_nickname or result.identity['nickname']
         reason = failure_message(results)
         missing=[r for r in results if r.nickname_missing]
         if missing:
@@ -1167,6 +1173,7 @@ class MultiPlatformPublisherPanel(QWidget):
         self.connect_worker_logs(self.worker)
         self.worker.status.connect(self.show_status)
         self.worker.result_changed.connect(self.receive_result)
+        self.worker.nickname_changed.connect(self.receive_nickname)
         self.worker.active_file_changed.connect(self.set_active_file)
         self.worker.queue_changed.connect(self.refresh_queues)
         self.worker.finished.connect(self.deployment_finished)
@@ -1176,6 +1183,25 @@ class MultiPlatformPublisherPanel(QWidget):
             panel.deploy_button.setText('停止部署')
             panel.pause_button.setEnabled(True)
             panel.pause_button.setText('暂停全部平台')
+
+    def receive_nickname(self, update):
+        """Persist optional display metadata on the UI thread without gating work."""
+        try:
+            platform, account_id = update['platform'], update['account_id']
+            account = self.repository.sync_nickname(platform, account_id, update['nickname'])
+            if account is None:
+                return
+            panel = next((p for p in self.panels if p.platform == platform), None)
+            if panel:
+                index = panel.accounts.findData(account_id)
+                if index >= 0:
+                    panel.accounts.setItemText(index, panel.account_label(account))
+                panel._accounts = [account if a.account_id == account_id else a for a in panel._accounts]
+                if panel.current() and panel.current().account_id == account_id:
+                    panel.nickname.setText('自定义昵称：'+account.custom_nickname if account.custom_nickname
+                                           else '平台昵称：'+account.platform_nickname)
+        except Exception as error:
+            self.log_message('[昵称同步未完成] '+str(error)+'；继续发布')
 
     def toggle_pause(self):
         if self.worker and self.worker.isRunning() and not self.worker.stopping.is_set():
@@ -1284,7 +1310,8 @@ class MultiPlatformPublisherPanel(QWidget):
             panel.pause_button.setText('暂停全部平台')
         if manual:
             complete=bool(report.get('all_selected_completed'))
-            self.show_status(('手工上传任务已完成：所选平台全部完成，部署已自动停止' if complete else
+            self.show_status(('手工上传任务已完成：所需平台全部成功并已统一归档，部署已自动停止' if complete else
+                '所需平台已发布成功，但归档尚未完成；文件继续保留在队列，不重复上传' if report.get('all_selected_published') else
                 f'手工上传本轮已结束，部署已自动停止；成功{report.get("success_count",0)}，失败{report.get("failure_count",0)}，待核验{report.get("unconfirmed_count",0)}'))
         else:self.show_status('任务已停止，结果已保存；原文件保留表示存在未成功目标或关闭了归档')
         self.refresh_queues()
@@ -1349,14 +1376,16 @@ class MultiPlatformPublisherPanel(QWidget):
         worker.deleteLater()
 
     def apply_queue_snapshots(self, snapshots):
-        for platform, request, files, state, error in snapshots:
+        for snapshot in snapshots:
+            platform, request, files, state, error = snapshot[:5]
+            provenance = snapshot[5] if len(snapshot)>5 else {}
             panel = next(p for p in self.panels if p.platform == platform)
             if panel.queue_request() != request:
                 continue
             if error:
                 panel.logs.appendPlainText('[目录/DOM扫描] '+error)
                 continue
-            panel.apply_queue_snapshot(files)
+            panel.apply_queue_snapshot(files,provenance)
             if state is not None:
                 panel.dom_state.setText(state.message)
                 panel.dom_state.setToolTip(str(state.reports[-1]) if state.reports else '')

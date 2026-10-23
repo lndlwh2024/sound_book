@@ -127,7 +127,7 @@ def install_browser(monkeypatch, playwright, records, mode, avatar_only=False, s
                     collection:root.querySelector('.post-album-display').innerText,
                     location:root.querySelector('.position-display-wrap').innerText,
                     wrong:window.wrong,selected:window.selected,early:!!root.querySelector('progress')})}'''))
-                request.fulfill(json=({'errCode': 0, 'data': {'objectId': 'local-post'}} if mode == 'success'
+                request.fulfill(json=({'errCode': 0, 'data': {'objectId': 'local-post'}} if mode in ('success','identity')
                                      else {'errCode': 17, 'message': '发表失败，服务异常'} if mode == 'reject' else {}))
             else:
                 body = HTML.replace('本人视频号</span>', '错误视频号</span>') if mode == 'identity' else HTML
@@ -168,9 +168,10 @@ def test_real_shared_workflow_fills_waits_publishes_or_retains_failure(tmp_path,
         install_browser(monkeypatch, playwright, records, mode)
         instance = adapter(account, tmp_path)
         result, message, info = instance.upload_single_video(video)
-    assert result is (mode == 'success')
+    assert result is (mode in ('success','identity'))
     if mode == 'identity':
-        assert instance.last_outcome == 'IDENTITY_MISMATCH' and not records and not info['submitted']
+        assert instance.last_outcome == 'SUCCESS' and len(records)==1 and info['submitted']
+        assert account.platform_nickname=='错误视频号'
     else:
         assert len(records) == 1 and records[0] == {
             'description': '', 'short': account.wechat_short_title,
@@ -254,7 +255,8 @@ def test_saved_proof_bound_to_account_and_official_submission(tmp_path):
             'nickname': instance.account.platform_nickname, 'submitted': True,
             'confirmation': acknowledgement({'errCode': 0}, 200)}
     assert instance.reconcile(info)
-    for key, value in [('account_id', 'b'*32), ('nickname', '其他视频号'), ('submitted', False), ('platform', 'kuaishou')]:
+    assert instance.reconcile(dict(info,nickname='改名前的昵称'))
+    for key, value in [('account_id', 'b'*32), ('profile_id', 'b'*32), ('submitted', False), ('platform', 'kuaishou')]:
         assert not instance.reconcile(dict(info, **{key: value}))
     info['confirmation']['endpoint'] = 'https://channels.weixin.qq.com/cgi-bin/mmfinderassistant-bin/post/post_preview'
     assert not instance.reconcile(info)
@@ -342,7 +344,7 @@ def test_both_editions_offer_only_two_wechat_parameters(tmp_path, standalone):
         assert not hasattr(panel, 'description') and not hasattr(panel, 'wechat_video_label')
         assert not panel.findChildren(QScrollArea)
         assert not controller.channel_checks['wechat_channels'].isChecked()
-        assert QUEUE_HEADERS[5+PUBLISH_ORDER.index('wechat_channels')] == '微信视频号' and panel.table_queue.columnCount() == 10
+        assert QUEUE_HEADERS[5+PUBLISH_ORDER.index('wechat_channels')] == '微信视频号' and panel.table_queue.columnCount() == 11
         panel.title_source.setCurrentIndex(panel.title_source.findData('custom'))
         panel.wechat_short_title.setText('测试短标题')
         panel.collection.setText('测试合集')
