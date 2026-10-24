@@ -207,7 +207,8 @@ class DouyinDOMProbe:
                     json_p, img_p = self.capture_dom_report(active_page)
                     captured = True
 
-                context.close()
+                from ..media_browser import close_media_context
+                close_media_context(context)
                 if captured:
                     return True, f"成功抓取 DOM 报告: {json_p.name}"
                 else:

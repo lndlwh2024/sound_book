@@ -11,7 +11,7 @@ def test_shared_factory_retains_profile_and_full_client_default(monkeypatch,tmp_
     playwright=MagicMock()
     media_browser.launch_media_context(playwright,tmp_path/'existing',headless=False)
     playwright.chromium.launch_persistent_context.assert_called_once_with(str(tmp_path/'existing'),headless=False,
-        no_viewport=True,args=['--start-maximized'])
+        no_viewport=True,args=['--start-maximized','--restore-last-session'],channel='chromium')
 
 
 def test_visible_window_uses_native_client_area_and_preserves_other_launch_options():
@@ -36,7 +36,7 @@ def test_publisher_runtime_uses_packaged_browser_and_preserves_profile(monkeypat
     monkeypatch.setattr(media_browser,'resource_root',lambda:tmp_path)
     playwright=MagicMock()
     media_browser.launch_media_context(playwright,tmp_path/'existing',headless=True)
-    playwright.chromium.launch_persistent_context.assert_called_once_with(str(tmp_path/'existing'),headless=True,executable_path=str(executable))
+    playwright.chromium.launch_persistent_context.assert_called_once_with(str(tmp_path/'existing'),headless=True,executable_path=str(executable),args=['--restore-last-session'])
 
 
 def test_matched_official_browser_decodes_real_h264_aac_and_reuses_existing_profile(tmp_path,monkeypatch):

@@ -35,7 +35,7 @@ def test_legacy_login_remains_on_its_original_bundled_profile(tmp_path):
     playwright = MagicMock()
     browsers.launch_youtube_context(playwright, tmp_path, headless=False)
     playwright.chromium.launch_persistent_context.assert_called_once_with(str(tmp_path), headless=False,
-        no_viewport=True,args=['--start-maximized'])
+        no_viewport=True,args=['--start-maximized','--restore-last-session'],channel='chromium')
     assert not (tmp_path/browsers.MARKER).exists()
 
 
@@ -63,7 +63,7 @@ def test_manual_login_and_automation_use_same_executable_and_dedicated_profile(t
     assert call.kwargs['channel'] == channel
     assert call.kwargs['executable_path'] == args[0]
     assert call.kwargs['no_viewport'] is True and 'viewport' not in call.kwargs
-    assert call.kwargs['args']==['--start-maximized']
+    assert call.kwargs['args']==['--start-maximized','--restore-last-session']
     assert (legacy/'marker').read_text() == 'original'
 
 

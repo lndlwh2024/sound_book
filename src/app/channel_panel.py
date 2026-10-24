@@ -322,7 +322,8 @@ class ChannelProbeWorker(QThread):
                 finally:
                     if context:
                         try:
-                            context.close()
+                            from ..publisher.media_browser import close_media_context
+                            close_media_context(context)
                         except TargetClosedError:
                             pass  # Closing the last browser window manually is a normal exit.
                         except Exception:
@@ -758,7 +759,9 @@ class MultiPlatformPublisherPanel(QWidget):
         if self.drive_states.get(key)!=text:
             platform,_,account_id=key.partition(':')
             account=next((a for a in self.repository.accounts(platform) if a.account_id==account_id),None)
-            self.log_message('[云盘状态] '+text,platform=platform,account_id=account_id,
+            report=getattr(self.worker,'report',{}) if self.worker else {}
+            self.log_message('[云盘状态] '+text,platform='common',category='cloud',binding_platform=platform,
+                task_id=report.get('task_id','') if isinstance(report,dict) else '',account_id=account_id,
                 account_name=account.account_name if account else '')
         self.drive_states[key] = text
         for panel in self.panels:
@@ -1174,7 +1177,7 @@ class MultiPlatformPublisherPanel(QWidget):
             self.refresh_queues()
             QMessageBox.warning(self, '部署前校验', reason)
             return
-        self.log_message('[部署前检查] 全部所选账号通过当前登录、身份与页面校验，开始部署')
+        self.log_message('[部署前检查] 所选账号当前登录和发布入口检查通过，开始部署；实际上传前会再次检查登录')
         self.launch_deployment(getattr(self,'_all_deployment_targets',targets),file_paths)
 
     def launch_deployment(self,targets,file_paths):

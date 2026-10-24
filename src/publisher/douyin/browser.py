@@ -198,11 +198,13 @@ class DouyinBrowserManager:
                         page.wait_for_timeout(2000)
                     except Exception:
                         pass
-                    context.close()
+                    from ..media_browser import close_media_context
+                    close_media_context(context)
                     tip = f"登录授权成功！账号: {account.account_name}"
                     return True, tip
                 else:
-                    context.close()
+                    from ..media_browser import close_media_context
+                    close_media_context(context)
                     return False, "登录超时或未完成扫码"
 
         except Exception as e:

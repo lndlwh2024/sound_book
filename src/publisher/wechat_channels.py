@@ -10,7 +10,7 @@ from urllib.parse import urlsplit
 from .channel_probe import CREATOR_NOTICES_JS, safe_url
 from .creator_studio import CreatorStudioUploader, rejection
 from .youtube import PlatformRejected
-from .page_access import check_network_page, wechat_platform_path
+from .page_access import check_network_page, wechat_platform_path, login_page_message
 from .titles import resolve_title
 from .wechat_title import SHORT_TITLE_LIMIT, shorten_title, title_length
 
@@ -75,6 +75,9 @@ class WeChatChannelsUploader(CreatorStudioUploader):
     def check_rejection(self, page):
         if self.confirmation and self.submitted:
             return
+        login_message = login_page_message(page, self.account.platform)
+        if login_message:
+            raise PlatformRejected('AUTH_REQUIRED', login_message)
         check_network_page(page.url)
         address = urlsplit(page.url)
         if address.hostname != self.channel.host or not wechat_platform_path(address.path):

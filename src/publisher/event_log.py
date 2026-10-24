@@ -52,6 +52,16 @@ def display_event(event):
     return f"[{event['time']}] [{event.get('level','INFO')}] " + (f'[{identity}] ' if identity else '') + event['message']
 
 
+def event_group(event):
+    """Route old cloud events by their stage too, without rewriting history."""
+    stage=event.get('stage','')
+    message=event.get('message','')
+    if (event.get('category')=='cloud' or stage.startswith('云盘') or stage in ('开始下载','日期目录容错')
+            or re.match(r'^\[(?:云盘[^\]]*|开始下载|日期目录容错)\]',message)):
+        return 'common'
+    return event.get('platform','common')
+
+
 class PublishEventLog:
     def __init__(self, root, maximum=10*1024**2, backups=9):
         self.folder = Path(root)/'logs'

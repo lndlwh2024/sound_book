@@ -15,7 +15,7 @@ from PySide6.QtCore import QThread, Signal
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 
 from .browser_workflow import BrowserPublishWorkflow
-from .page_access import check_network_page, wechat_platform_path
+from .page_access import check_network_page, wechat_platform_path, login_page_message
 from .channel_probe import CREATOR_NOTICES_JS
 from .creator_studio import CreatorStudioUploader, rejection
 from .dom_readiness import publishing_dom_state as account_dom_state, structure_ready
@@ -115,6 +115,9 @@ class AccountPreflight(BrowserPublishWorkflow):
         return self._wait_until(page, label, condition, min(seconds, self.seconds))
 
     def _check_duration_notice(self, page):
+        login_message = login_page_message(page, self.target.platform)
+        if login_message:
+            raise PlatformRejected('AUTH_REQUIRED', login_message)
         check_network_page(page.url)
         address = urlsplit(page.url)
         if self.target.platform == 'youtube' and google_login_rejected(page.url):
@@ -134,14 +137,16 @@ class AccountPreflight(BrowserPublishWorkflow):
             raise PlatformRejected('AUTH_REQUIRED', '当前页面要求登录，请点击“登录 / 获取平台昵称”完成登录，再重新启动。')
 
     def verify_page(self, page):
-        self._check_stop()
-        self._check_duration_notice(page)
-        if self.target.platform == 'youtube':
-            # Channel ID is the stable identity; remarks/nicknames may differ.
-            YouTubeUploader.verify_channel(self, page, self.seconds)
-        else:
-            CreatorStudioUploader.verify_identity(self,page)
-        self._check_duration_notice(page)
+        def verify_current_document():
+            self._check_stop()
+            self._check_duration_notice(page)
+            if self.target.platform == 'youtube':
+                YouTubeUploader.verify_channel(self, page, self.seconds)
+            else:
+                CreatorStudioUploader.verify_identity(self,page)
+            self._check_duration_notice(page)
+            return True
+        self.wait(page, '核对当前登录和发布入口', verify_current_document, self.seconds)
 
     def check(self, playwright, headless=False):
         context, page, passed = None, None, False
@@ -179,19 +184,27 @@ class AccountPreflight(BrowserPublishWorkflow):
         except UploadStopped:
             raise
         except RuntimeError as error:
+            login_message = login_page_message(page, self.target.platform)
+            if login_message:
+                return PreflightResult(self.target.key, target_name(self.target), 'AUTH_REQUIRED', login_message)
             return PreflightResult(self.target.key, target_name(self.target), 'FAILED',
                 str(error) + '。请检查网络和页面状态；昵称未识别时查看本人账号区域诊断，不据此判断登录失效。')
         except Exception as error:
             self.log(f'[登录检查异常] {type(error).__name__}：{error}')
+            login_message = login_page_message(page, self.target.platform)
+            if login_message:
+                return PreflightResult(self.target.key, target_name(self.target), 'AUTH_REQUIRED', login_message)
             return PreflightResult(self.target.key, target_name(self.target), 'FAILED',
-                f'未能确认当前登录状态：{type(error).__name__}。请检查网络、关闭该账号其他浏览器，再登录或采集 DOM 后重试。')
+                '登录检查未完成，尚未开始上传。浏览器页面关闭或加载异常，详情已记录；'
+                '请重新检查该账号，未据此认定登录失效。')
         finally:
             if not passed:
                 self._capture_failure_page(page, '部署前检查未通过')
             if context:
                 browser=context.browser
                 try:
-                    context.close()
+                    from .media_browser import close_media_context
+                    close_media_context(context)
                 except Exception as error:
                     self.log('[部署前会话关闭异常] '+str(error)+'；继续关闭本次检查专用浏览器')
                 if browser and browser.is_connected():
@@ -217,12 +230,12 @@ class DeploymentPreflightWorker(QThread):
         self.stopping = threading.Event()
         self.results = []
 
-    def emit_log(self,message):
+    def emit_log(self,message,**extra):
         self.log.emit(message)
         target=getattr(self,'current_target',None)
         context=({'platform':target.platform,'account_id':target.account.account_id,
             'account_name':target.account.account_name} if target else {})
-        event = self.events.write(message, task_id=self.task_id, **context)
+        event = self.events.write(message, task_id=self.task_id, **context, **extra)
         try:
             self.diagnostics.record_event(event)
         except OSError as error:
@@ -261,7 +274,8 @@ class DeploymentPreflightWorker(QThread):
                         operation.complete('CANCELLED', '部署前检查被停止')
                         raise
                     self.results.append(result)
-                    self.emit_log(prefix + '：' + STATUS_TEXT.get(result.status, result.status) + '；' + result.message)
+                    self.emit_log(prefix + '：' + STATUS_TEXT.get(result.status, result.status) + '；' + result.message,
+                                  level='INFO' if result.passed else 'ERROR')
                     operation.complete(result.status, result.message)
                     if not result.passed:
                         # A terminal failure ends the plan. Do not open another

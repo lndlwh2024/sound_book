@@ -236,7 +236,8 @@ def test_worker_failed_attempt_keeps_all_logs_but_successful_platform_has_no_bun
     assert logs and '完整中间流程' in logs[0].read_text(encoding='utf-8')
     assert '[任务结束]' in logs[0].read_text(encoding='utf-8')
     dom = json.loads(next((folder/'YouTube').glob('*/*.dom.json')).read_text(encoding='utf-8'))
-    assert 'capture_error' in dom and '无可用截图' in dom['capture_error']
+    assert 'capture_error' in dom and '登录失效' in dom['capture_error']
+    assert '本次未保存' in dom['capture_error']
 
 
 def test_queue_hides_unselected_platform_columns_without_reindexing_or_changing_archive(panel):

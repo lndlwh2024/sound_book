@@ -7,7 +7,7 @@ from PySide6.QtCore import QThread, Signal
 from .multi_deploy import MultiTargetLedger, archive_completed_file, CHINA_TIME, LEGACY_FAILED_MESSAGE, legacy_import_needed
 from .douyin.daemon import is_file_fully_written
 from .media import selected_extensions
-from .status import fresh_result
+from .status import BLOCKING, fresh_result
 from .upload_quota import DailyUploadQuota
 from datetime import datetime
 
@@ -160,8 +160,18 @@ class ScanCleanupWorker(QThread):
                     if len(digest)!=64 or any(c not in '0123456789abcdef' for c in digest):
                         continue
                     for key,result in item.get('results',{}).items():
-                        if result.get('status') in ('SUCCESS','IGNORED') and not ledger.result(digest,key):
+                        previous=ledger.result(digest,key)
+                        if result.get('status') in ('SUCCESS','IGNORED') and (not previous or previous.get('history_block_backfill')):
                             ledger.set_result(digest,key,result['status'],'沿用历史任务的已确认结果',result.get('info'))
+                        elif result.get('status') in BLOCKING and (not previous or previous.get('history_block_backfill')):
+                            # Old versions saved inherited account blocks only
+                            # in reports. Repair missing entries without resetting
+                            # an explicit manual retry or a newer ledger result.
+                            ledger.set_result(digest,key,result['status'],result.get('message',''),result.get('info'),
+                                history_block_backfill=True,task_id=result.get('task_id',report.get('task_id','')),
+                                attempt_count=int(result.get('attempt_count') or 0),
+                                requires_review=bool(result.get('requires_review')),
+                                updated_at=result.get('updated_at') or report.get('finished_at') or report.get('started_at'))
             except (OSError,ValueError,KeyError,TypeError) as error:
                 raise ValueError(f'历史任务记录读取失败，停止清理以避免重复投稿：{path}：{error}') from error
 

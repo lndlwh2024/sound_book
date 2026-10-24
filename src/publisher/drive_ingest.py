@@ -518,8 +518,9 @@ class DriveWatchWorker(QThread):
     def emit_log(self,message):
         self.log.emit(message)
         target=getattr(self,'current_target',None)
-        context=({'platform':target.platform,'account_id':target.account.account_id,
+        context=({'binding_platform':target.platform,'account_id':target.account.account_id,
             'account_name':target.account.account_name} if target else {})
+        context.update(platform='common',category='cloud')
         context['task_id']=getattr(self,'task_id','')
         self.event_logged.emit(self.events.write(message,**context))
 

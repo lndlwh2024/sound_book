@@ -132,7 +132,8 @@ def test_create_persistent_context_mock(tmp_path: Path):
     assert "--disable-blink-features=AutomationControlled" in call_kwargs["args"]
     assert "--disable-setuid-sandbox" not in call_kwargs["args"]
     assert "--no-sandbox" not in call_kwargs["args"]
-    assert "channel" not in call_kwargs
+    assert call_kwargs['channel']=='chromium'
+    assert '--restore-last-session' in call_kwargs['args']
     assert "user_agent" not in call_kwargs
 
 

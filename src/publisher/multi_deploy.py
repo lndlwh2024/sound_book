@@ -16,7 +16,7 @@ from .douyin.uploader import DouyinUploader, compute_file_md5
 from .youtube import YouTubeUploader
 from .creator_studio import XiaohongshuUploader, KuaishouUploader
 from .wechat_channels import WeChatChannelsUploader
-from .status import BLOCKING, RETRYABLE, result_status_text, fresh_result
+from .status import BLOCKING, RETRYABLE, STATUS_TEXT, result_status_text, fresh_result
 from .upload_quota import DailyUploadQuota, DailyQuotaReached
 from .event_log import redact
 from .archive import archive_completed_file
@@ -478,7 +478,8 @@ class MultiDeployWorker(QThread):
                     self.diagnostic_states.add((job['digest'], target.key, result.get('status', state)))
                     evidence = operation.capture_summary()
                     details = ('；采集异常='+'；'.join(evidence['errors'])) if evidence['errors'] else ''
-                    self.emit_log(f'[失败诊断归档] {state}：{folder}；DOM文件={evidence["dom_files"]}；'
+                    self.emit_log(f'[失败诊断归档] {STATUS_TEXT.get(state,state)}（{state}）；原因={message}；'
+                        f'保存目录={folder}；DOM文件={evidence["dom_files"]}；'
                         f'截图={evidence["screenshots"]}{details}', platform=target.platform)
                 except OSError as error:
                     self.emit_log('[失败诊断保存异常] '+str(error), platform=target.platform)
@@ -580,7 +581,16 @@ class MultiDeployWorker(QThread):
             if attempts and item['status'] in ('FAILED1','FAILED2'):
                 item['blocking_message']=block['message']
             else:
-                item.update(status=block['status'],message=block['message'])
+                item.update(self.ledger.set_result(job['digest'],target.key,block['status'],block['message'],
+                    previous.get('info'),attempt_count=used,requires_review=False,
+                    task_id=self.report['task_id'],blocked_by={k:block[k] for k in ('source_file','first_seen') if k in block}))
+            source='（来源文件：'+block['source_file']+'）' if block.get('source_file') else ''
+            self.failure_operation.not_started_reason=(f'本文件因账号{STATUS_TEXT.get(block["status"],block["status"])}暂停，'
+                '尚未上传文件；沿用本轮账号检查结果'+source+'：'+block['message'])
+            notice=(job['digest'],target.key,'blocked',block['status'])
+            if notice not in self.limit_notices:
+                self.emit_log('[本文件暂停] '+self.failure_operation.not_started_reason,level='ERROR')
+                self.limit_notices.add(notice)
             self.save_report()
             return block['status']
         path=job['path']
@@ -778,7 +788,7 @@ class MultiDeployWorker(QThread):
             level='INFO' if state==SUCCESS else 'ERROR')
         account_block=(info or {}).get('account_block') if isinstance(info,dict) else None
         if blocking_state:
-            self.blocked[target.key]={'status':blocking_state,'message':message}
+            self.blocked[target.key]={'status':blocking_state,'message':message,'source_file':path.name,'first_seen':now()}
             if blocking_state=='ACCOUNT_LIMIT':
                 self.ledger.block(target.key,blocking_state,message)
             self.emit_log(f'[停止该账号] {target.key}：{message}；其他账号继续')

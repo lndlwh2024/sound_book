@@ -187,7 +187,18 @@ class DouyinUploader(BrowserPublishWorkflow):
         if self._progress_callback:
             self._progress_callback(message)
 
+    def _check_login_page(self, page):
+        response=getattr(self,'_publish_result',None)
+        if not (response and str(response.get('code'))=='0'):
+            from ..page_access import login_page_message
+            login_message=login_page_message(page,'douyin')
+            if login_message:
+                self.account.status='EXPIRED'
+                self.last_outcome='AUTH_REQUIRED'
+                raise RuntimeError(login_message)
+
     def _check_duration_notice(self, page):
+        self._check_login_page(page)
         notices = page.get_by_text(DURATION_LIMIT_NOTICE)
         for index in range(notices.count()):
             notice = notices.nth(index)
@@ -312,6 +323,7 @@ class DouyinUploader(BrowserPublishWorkflow):
                     # 检查是否处于登录状态
                     if "login" in page.url.lower():
                         self.account.status = "EXPIRED"
+                        self.last_outcome = 'AUTH_REQUIRED'
                         return False, "账号登录态已失效，请重新扫码登录", None
 
                     # 步骤 1: 注入视频文件
@@ -409,6 +421,7 @@ class DouyinUploader(BrowserPublishWorkflow):
             return False, f"投稿接口业务码{self._publish_result['code']}：{self._publish_result['message']}"
         if self.account_limit_reason:
             return False, self.account_limit_reason
+        self._check_login_page(page)
         quota_notice = page.get_by_text(re.compile(r'(今日|今天).*(投稿|发布).*(上限|限额)'))
         for index in range(quota_notice.count()):
             if quota_notice.nth(index).is_visible():

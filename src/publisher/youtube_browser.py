@@ -87,7 +87,7 @@ def start_manual_login(profile, start_url='https://studio.youtube.com/'):
     try:
         process = subprocess.Popen([
             str(browser.executable), '--user-data-dir='+str(dedicated.resolve()),
-            '--no-first-run', '--no-default-browser-check', '--disable-background-mode',
+            '--no-first-run', '--no-default-browser-check', '--disable-background-mode', '--restore-last-session',
             start_url,
         ], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except OSError:
@@ -134,10 +134,10 @@ def launch_youtube_context(playwright, profile, **kwargs):
                            '不可用，请恢复安装；为保留登录状态，未回退至内置浏览器。')
     if profile_busy(browser_profile(profile,channel)):
         raise RuntimeError('YouTube 手工登录浏览器尚未释放账号目录，请点击“登录完成，验证频道”或关闭该专用浏览器窗口后重试。')
-    from .media_browser import browser_window_options
-    return playwright.chromium.launch_persistent_context(
+    from .media_browser import persistent_context_options, prepare_persistent_context
+    return prepare_persistent_context(playwright.chromium.launch_persistent_context(
         str(browser_profile(profile, channel)), channel=channel,
-        executable_path=str(browser.executable), **browser_window_options(kwargs))
+        executable_path=str(browser.executable), **persistent_context_options(kwargs,browser_profile(profile,channel))))
 
 
 def google_login_rejected(url):

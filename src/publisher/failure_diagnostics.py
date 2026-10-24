@@ -135,6 +135,7 @@ class FailureOperation:
         self.captures = {}
         self.capture_details = {}
         self.folder = None
+        self.not_started_reason = ''
 
     def capture(self, page, stage='', reason='', role='last'):
         moment = datetime.now(CHINA_TIME)
@@ -152,6 +153,10 @@ class FailureOperation:
                 raise RuntimeError('浏览器页面已关闭，无法取得最后页面')
             from .media_browser import browser_window_metrics
             data['browser_window'] = browser_window_metrics(page)
+            from .media_browser import browser_session_metrics
+            initial=getattr(page.context,'_shusheng_session_start',{})
+            if isinstance(initial,dict):
+                data['browser_session']={'at_start':initial,'at_capture':browser_session_metrics(page.context)}
             # Preserve the last visible page even when DOM extraction fails.
             try:
                 try:
@@ -176,6 +181,8 @@ class FailureOperation:
                 data['frames'].append(item)
         except Exception as error:
             data['capture_error'] = str(error)
+        if data['frames']:
+            data['url'] = data['frames'][0]['url']  # Navigation may have settled while the screenshot was taken.
         data['dom_status'] = 'saved' if any('nodes' in f for f in data['frames']) else 'unavailable'
         data['screenshot_status'] = 'saved' if data['screenshot'] else 'unavailable'
         self.capture_details[role] = data
@@ -196,7 +203,7 @@ class FailureOperation:
             if data.get('dom_status') != 'saved':
                 errors.append(f'{role}：未取得可用的页面 DOM，请查看采集错误')
         if not self.captures:
-            errors.append('本次未取得可采集的浏览器页面')
+            errors.append(self.not_started_reason or '本次没有保存最后页面的截图或DOM；请查看上面的具体失败原因')
         return {'dom_files':sum(bool(p[0] and p[0].exists()) for p in self.captures.values()),
                 'screenshots':sum(bool(p[1] and p[1].exists()) for p in self.captures.values()),
                 'errors':errors}
@@ -223,9 +230,9 @@ class FailureOperation:
             path = folder / (stem + '.dom.json')
             _json(path, {'task_id': self.task.task_id, 'operation_id': self.operation_id,
                 'platform': self.platform, 'account_id': self.account_id, 'file_name': self.file_name,
-                'stage': '未取得浏览器页面',
+                'stage': '本次未保存页面证据',
                 'timestamp': moment.isoformat(), 'frames': [],
-                'capture_error': '本次未取得浏览器页面（未启动、已关闭或启动失败）；无可用截图，不使用其他任务的截图代替'})
+                'capture_error': self.not_started_reason or '本次未保存截图或DOM；具体失败原因：'+message})
             files.append(path.name)
         logs = folder / (stem + '.log')
         if self.task.log_path.exists():

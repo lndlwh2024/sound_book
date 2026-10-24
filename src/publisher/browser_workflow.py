@@ -4,7 +4,8 @@ Platform adapters supply DOM reading, configuration and confirmation evidence.
 Douyin defaults retain its original event-pump, stages and readiness behaviour.
 """
 import time
-from playwright.sync_api import Page, TimeoutError as PlaywrightTimeoutError
+from playwright.sync_api import Page, Error as PlaywrightError, TimeoutError as PlaywrightTimeoutError
+from .page_access import transient_navigation_error
 
 
 class BrowserPublishWorkflow:
@@ -29,7 +30,8 @@ class BrowserPublishWorkflow:
                 page.wait_for_timeout(5000)
             except Exception as error:
                 self._progress('[关闭延迟] 页面已退出或连接断开：'+str(error)[:150])
-        context.close()
+        from .media_browser import close_media_context
+        close_media_context(context)
 
     def _save_diagnostics(self, page, stage, reason):
         self._progress(f'[阶段失败] {stage}：{reason}')
@@ -40,12 +42,18 @@ class BrowserPublishWorkflow:
         deadline, last_log = time.monotonic() + seconds, 0
         while time.monotonic() < deadline:
             self._check_stop()
-            self._check_duration_notice(page)
             try:
+                self._check_duration_notice(page)
                 result = condition()
                 if result:
                     return result
             except PlaywrightTimeoutError:
+                pass
+            except PlaywrightError as error:
+                if not transient_navigation_error(error):
+                    raise
+                # A redirect destroys the old document. Re-check its replacement
+                # within the original deadline; never classify it as lost login.
                 pass
             if time.monotonic() - last_log >= 30:
                 self._progress(f'[等待] {label}；浏览器保持打开')
@@ -105,9 +113,13 @@ class BrowserPublishWorkflow:
             remaining -= step
             self._check_stop()
             if self._video_selected:
-                self._check_duration_notice(page)
-                if not self._publish_armed:
-                    self._read_upload_state(page)
+                try:
+                    self._check_duration_notice(page)
+                    if not self._publish_armed:
+                        self._read_upload_state(page)
+                except PlaywrightError as error:
+                    if not transient_navigation_error(error):
+                        raise
 
     def _wait_for_upload_ready(self, page, timeout_secs=1800, ready_stable_seconds=0):
         deadline = time.monotonic() + timeout_secs

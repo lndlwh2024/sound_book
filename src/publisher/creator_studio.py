@@ -82,6 +82,10 @@ class CreatorStudioUploader(BrowserPublishWorkflow):
             raise PlatformRejected(*self.platform_error)
         if self.confirmation and self.submitted:
             return
+        from .page_access import login_page_message
+        login_message=login_page_message(page,self.account.platform)
+        if login_message:
+            raise PlatformRejected('AUTH_REQUIRED',login_message)
         check_network_page(page.url)
         address=urlsplit(page.url)
         if address.hostname!=self.channel.host or re.search(r'/(login|signin)(?:/|$)',address.path):
@@ -538,6 +542,10 @@ class CreatorStudioUploader(BrowserPublishWorkflow):
                     self.log('[发布确认] 平台已明确确认本次投稿成功')
                     return True,'平台已确认发布成功，等待统一归档',self.result_hint()
                 except Exception as failure:
+                    from .page_access import login_page_message
+                    login_message=login_page_message(page,self.account.platform)
+                    if login_message and not self.confirmation and not isinstance(failure,(UploadStopped,PlatformRejected)):
+                        failure=PlatformRejected('AUTH_REQUIRED',login_message)
                     if not self.confirmation:
                         self._capture_failure_page(page, failure)
                     if not isinstance(failure,UploadStopped) and page and not page.is_closed():
@@ -546,7 +554,7 @@ class CreatorStudioUploader(BrowserPublishWorkflow):
                             self.log(f'[诊断] 阶段 {self.stage}：{report}')
                         except Exception as error:
                             self.log('[诊断保存失败] '+str(error)[:200])
-                    raise
+                    raise failure
                 finally:
                     if context:
                         try:

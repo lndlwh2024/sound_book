@@ -36,7 +36,7 @@ def fresh_result(previous):
             previous['status']='RECOVERY_REQUIRED'
         elif previous.get('status')=='FAILED2' or int(previous.get('attempt_count') or 0)>=2:
             previous['status']='FAILED2'
-        else:
+        elif previous.get('status') not in BLOCKING | {'FAILED', 'FAILED1'}:
             previous.update(status='PENDING')
     previous['attempts'] = []
     return previous

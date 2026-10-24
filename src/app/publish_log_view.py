@@ -2,7 +2,7 @@
 from PySide6.QtWidgets import QWidget,QVBoxLayout,QHBoxLayout,QPlainTextEdit,QTabBar,QStackedWidget,QPushButton
 from PySide6.QtGui import QSyntaxHighlighter,QColor,QTextCharFormat
 from ..publisher.platforms import VISIBLE_CHANNELS
-from ..publisher.event_log import display_event
+from ..publisher.event_log import display_event, event_group
 
 
 class LogHighlighter(QSyntaxHighlighter):
@@ -49,9 +49,13 @@ class PublishLogView(QWidget):
 
     def append_event(self,event):
         text=display_event(event)
-        self.views['all'].appendPlainText(text)
-        key=event.get('platform','common')
-        if key in self.views:self.views[key].appendPlainText(text)
+        key=event_group(event)
+        for view in [self.views['all'],*([self.views[key]] if key in self.views else [])]:
+            scroll=view.verticalScrollBar()
+            position=scroll.value()
+            at_bottom=position>=scroll.maximum()-2
+            view.appendPlainText(text)
+            scroll.setValue(scroll.maximum() if at_bottom else position)
 
     def appendPlainText(self,message):
         panel=next((p for p in getattr(self.controller,'panels',[]) if p.platform==self.platform),None)

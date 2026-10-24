@@ -136,6 +136,11 @@ class YouTubeUploader(BrowserPublishWorkflow):
 
 
     def check_rejection(self, page):
+        if getattr(self,'last_outcome','')!='SUCCESS':
+            from .page_access import login_page_message
+            login_message=login_page_message(page,'youtube')
+            if login_message:
+                raise PlatformRejected('AUTH_REQUIRED',login_message)
         for status, pattern in [
             ('ACCOUNT_LIMIT', r'每日上传数量限制|每日上传上限|今天.*上传.*上限|Daily upload limit'),
             ('PERMANENT_REJECT', r'视频过长|文件过大|无效的文件格式|不支持.*文件格式|Video too long|Invalid file format'),
@@ -650,6 +655,10 @@ class YouTubeUploader(BrowserPublishWorkflow):
                         'video_id': self.video_id, 'url': f'https://www.youtube.com/watch?v={self.video_id}',
                         'visibility': self.account.visibility, 'channel_id': self.account.channel_id, 'title': title}
                 except Exception as failure:
+                    from .page_access import login_page_message
+                    login_message=login_page_message(page,'youtube')
+                    if login_message and not isinstance(failure,(UploadStopped,PlatformRejected)):
+                        failure=PlatformRejected('AUTH_REQUIRED',login_message)
                     self._capture_failure_page(page, failure)
                     if page and not page.is_closed():
                         try:
@@ -658,7 +667,7 @@ class YouTubeUploader(BrowserPublishWorkflow):
                             self.log(f'[诊断] 阶段{self.stage}：{report}')
                         except Exception as error:
                             self.log(f'[诊断保存失败] {error}')
-                    raise
+                    raise failure
                 finally:
                     if context:
                         try:
@@ -704,4 +713,5 @@ class YouTubeUploader(BrowserPublishWorkflow):
             finally:
                 if not confirmed:
                     self._capture_failure_page(locals().get('page'), '历史投稿结果未确认')
-                context.close()
+                from .media_browser import close_media_context
+                close_media_context(context)
