@@ -928,7 +928,7 @@ class MultiDeployWorker(QThread):
                 next_scan=(datetime.now(CHINA_TIME)+timedelta(seconds=self.poll_seconds)).strftime('%Y-%m-%d %H:%M:%S')
                 self.report['status']='WAITING_QUOTA' if quota_wait else 'RUNNING'
                 self.status.emit(f'每日限额等待；提高对应账号上限或次日继续' if quota_wait else f'等待本地视频（每{interval}检查）；'+(summary or '成功不重传；失败2需手动重试'))
-                self.emit_log(f'[等待本地视频] 每{interval}检查本地文件；下次 {next_scan}（北京时间）；网盘刷新使用各账号已保存的间隔；成功不重传；失败2需手动重试；限额账号等待跨日或提高上限')
+                self.emit_log(f'[等待本地视频] 每{interval}检查本地文件；下次 {next_scan}（北京时间）；网盘按公共轮询间隔独立检查；成功不重传；失败2需手动重试；限额账号等待跨日或提高上限',level='INFO')
                 self.save_report()
                 current=datetime.now(CHINA_TIME)
                 until_midnight=((current+timedelta(days=1)).replace(hour=0,minute=0,second=0,microsecond=0)-current).total_seconds()

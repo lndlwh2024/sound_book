@@ -327,6 +327,7 @@ class DriveIngestor:
         return digest
 
     def poll(self, target):
+        self.last_scans=[]
         binding = DriveBinding.read(target.account.drive_binding)
         if not binding.enabled or not target.account.enabled:
             return
@@ -368,6 +369,9 @@ class DriveIngestor:
     def poll_day(self, target, binding, directory, day, is_today):
         prefix = '今日' if is_today else '补扫'
         folder, files = self.client.today_files(binding.folder_id, day)
+        listing={'day':day,'folder_found':bool(folder),'folder_id':folder.get('id') if folder else None,
+                 'entries_seen':len(files),'media_files':[],'pending_files':[]}
+        self.last_scans=[*getattr(self,'last_scans',[]),listing][-2:]
         self.log(f'[云盘连接已核验] {target.key} / {day}；目录列表请求成功；读取{len(files)}个条目')
         if not folder:
             self.status(target.key, f'{prefix}：{day} 未找到'+('，等待创建' if is_today else '，跳过'))
@@ -384,11 +388,21 @@ class DriveIngestor:
                 continue
             if file.get('mimeType', '').startswith('application/vnd.google-apps.'):
                 continue  # No shortcuts/exports; binary media only.
+            file_state={'name':file['name'],'size':file.get('size'),'md5_ready':bool(file.get('md5Checksum')),
+                        'can_download':file.get('capabilities',{}).get('canDownload',True)}
+            if len(listing['media_files'])<30:
+                listing['media_files'].append(file_state)
             if not file.get('size') or int(file['size']) <= 0 or not file.get('md5Checksum'):
                 complete = False
+                reason='云端尚未提供完整文件大小或MD5，等待文件就绪后重试'
+                if len(listing['pending_files'])<30:
+                    listing['pending_files'].append({'name':file['name'],'reason':reason})
+                self.log(f'[云盘文件未就绪] {target.key} / {file["name"]}；{reason}')
                 continue  # Still being produced, or not a downloadable binary.
             if file.get('capabilities', {}).get('canDownload') is False:
                 complete = False
+                if len(listing['pending_files'])<30:
+                    listing['pending_files'].append({'name':file['name'],'reason':'云盘返回不可下载权限'})
                 self.log(f'[云盘不可下载] {target.key} / {file["name"]}')
                 continue
             entry = self.journal.reserve(target, file, self.cloud_account)
@@ -396,6 +410,7 @@ class DriveIngestor:
             path = Path(entry['path'])
             marker = path.with_name('.' + path.name + '.shusheng-pending')
             if entry['state'] == 'DOWNLOADED':
+                file_state.update(journal_state='DOWNLOADED',local_exists=path.is_file())
                 if marker.exists():
                     marker.unlink(missing_ok=True)
                     if path.exists():
@@ -482,11 +497,14 @@ class DriveIngestor:
                 raise
             except (DriveError, OSError) as error:
                 complete = False
+                if len(listing['pending_files'])<30:
+                    listing['pending_files'].append({'name':file['name'],'reason':str(error)})
                 self.log(f'[云盘文件未就绪] {target.key} / {file["name"]}：{error}；保留任务，下轮重试')
             finally:
                 partial.unlink(missing_ok=True)
                 if not owns_final or not path.exists():
                     marker.unlink(missing_ok=True)
+        listing['complete']=complete
         self.status(target.key, f'{prefix}：{day} 已找到 · '+('检查完成' if complete else '部分文件待重试'))
         return complete
 
@@ -498,7 +516,7 @@ class DriveWatchWorker(QThread):
     file_ready = Signal(str)
     authorization_error = Signal(str, int)
 
-    def __init__(self, root, credentials, parent=None, client=None):
+    def __init__(self, root, credentials, parent=None, client=None, clock=None):
         super().__init__(parent)
         self.root, self.credentials = root, credentials
         from .event_log import event_log
@@ -514,6 +532,10 @@ class DriveWatchWorker(QThread):
         self.storage_policy = None
         self.failures = {}
         self.poll_seconds = 15
+        self.clock=clock or (lambda:datetime.now(CHINA_TIME))
+        self.pause_reason='等待启动'
+        self.scan_history=[]
+        self.active_scan=None
 
     def emit_log(self,message):
         self.log.emit(message)
@@ -524,9 +546,9 @@ class DriveWatchWorker(QThread):
         context['task_id']=getattr(self,'task_id','')
         self.event_logged.emit(self.events.write(message,**context))
 
-    def configure(self, targets, paused=False, poll_seconds=15):
+    def configure(self, targets, paused=False, poll_seconds=15, pause_reason=''):
         DriveBinding.read({'poll_seconds':poll_seconds})
-        token = (paused, poll_seconds, tuple(sorted((t.key, t.account.target_dir, t.account.enabled,
+        token = (paused, poll_seconds, pause_reason, tuple(sorted((t.key, t.account.target_dir, t.account.enabled,
             tuple(t.account.media_types), json.dumps(t.account.drive_binding,sort_keys=True)) for t in targets)))
         with self.lock:
             if token == self.configuration:
@@ -535,6 +557,7 @@ class DriveWatchWorker(QThread):
             self.targets = [replace(t, account=replace(t.account, drive_binding=dict(t.account.drive_binding))) for t in targets]
             self.paused = paused
             self.poll_seconds = poll_seconds
+            self.pause_reason=pause_reason or ('监听已暂停' if paused else '')
             self.revision += 1
         self.wake.set()
 
@@ -547,6 +570,17 @@ class DriveWatchWorker(QThread):
         self.stopping.set()
         self.wake.set()
 
+    def snapshot(self):
+        with self.lock:
+            today=self.clock().astimezone(CHINA_TIME).date().isoformat()
+            return {'running':self.isRunning(),'paused':self.paused,'pause_reason':self.pause_reason,
+                'current_day':today,
+                'poll_seconds':self.poll_seconds,'target_keys':[t.key for t in self.targets],
+                'active_scan':dict(self.active_scan) if self.active_scan else None,
+                'last_scans':list(self.scan_history),
+                'next_checks':[{'key':key[0],'day':key[-1],'in_seconds':max(0,round(due-time.monotonic(),1))}
+                    for key,due in self.next_poll.items() if key[-1]==today]}
+
     def run(self):
         try:
             self.watch_loop()
@@ -555,7 +589,7 @@ class DriveWatchWorker(QThread):
 
     def watch_loop(self):
         ingestor = DriveIngestor(self.root, self.client, log=self.emit_log,
-            status=self.binding_status.emit, ready=self.file_ready.emit, storage_policy=self.storage_policy)
+            status=self.binding_status.emit, ready=self.file_ready.emit, storage_policy=self.storage_policy,clock=self.clock)
         while not self.stopping.is_set():
             with self.lock:
                 targets, paused, revision = list(self.targets), self.paused, self.revision
@@ -563,10 +597,11 @@ class DriveWatchWorker(QThread):
                 immediate = self.immediate.copy()
                 self.immediate.clear()
             if self.credentials.connected():
+                today=self.clock().astimezone(CHINA_TIME).date().isoformat()
                 for target in targets:
                     self.current_target=target
                     binding = DriveBinding.read(target.account.drive_binding)
-                    signature = (target.key, binding.folder_id, target.account.target_dir, tuple(target.account.media_types),poll_seconds)
+                    signature = (target.key, binding.folder_id, target.account.target_dir, tuple(target.account.media_types),poll_seconds,today)
                     if not binding.enabled or (paused and target.key not in immediate):
                         continue
                     if target.key not in immediate and time.monotonic() < self.next_poll.get(signature, 0):
@@ -577,24 +612,42 @@ class DriveWatchWorker(QThread):
                             return (self.stopping.is_set() or revision != self.revision
                                 or generation != self.credentials.generation or not self.credentials.connected())
                     ingestor.stopped = cancelled
+                    scan={'target_key':target.key,'day':today,'started_at':self.clock().isoformat()}
+                    with self.lock:
+                        self.active_scan=scan
                     try:
                         completed = ingestor.poll(target)
+                        scan.update(status='COMPLETE' if completed is not False else 'PENDING',
+                                    listing=list(getattr(ingestor,'last_scans',[])))
                         if completed is False:
                             self.failures[signature] = self.failures.get(signature, 0) + 1
                         else:
                             self.failures.pop(signature, None)
                     except InterruptedError:
+                        scan.update(status='CANCELLED',message='监听配置变化、暂停或用户停止，本轮检查已取消')
                         break
                     except DriveAuthRequired as error:
+                        scan.update(status='AUTH_REQUIRED',message=str(error))
                         self.authorization_error.emit(str(error), generation)
                         self.binding_status.emit(target.key, '授权失效，请重新连接')
                         self.failures[signature] = self.failures.get(signature, 0) + 1
                     except Exception as error:
+                        scan.update(status='FAILED',message=str(error))
                         self.failures[signature] = self.failures.get(signature, 0) + 1
                         self.binding_status.emit(target.key, '检查失败：' + str(error))
                         self.emit_log(f'[云盘检查失败] {target.key}：{error}；其他绑定继续，云端不修改')
+                    finally:
+                        scan['finished_at']=self.clock().isoformat()
+                        with self.lock:
+                            self.active_scan=None
+                            other=[s for s in self.scan_history if s['target_key']!=target.key]
+                            recent=[s for s in self.scan_history if s['target_key']==target.key][-1:]
+                            self.scan_history=[*other,*recent,dict(scan)][-128:]
                     failures = self.failures.get(signature, 0)
                     delay = max(poll_seconds,min(300,poll_seconds*2**min(failures-1,5))) if failures else poll_seconds
-                    self.next_poll[signature] = time.monotonic() + delay
+                    with self.lock:
+                        self.next_poll={key:due for key,due in self.next_poll.items() if key[-1]==today}
+                        self.failures={key:value for key,value in self.failures.items() if key[-1]==today}
+                        self.next_poll[signature] = time.monotonic() + delay
             self.wake.wait(.5)
             self.wake.clear()

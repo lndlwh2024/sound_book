@@ -59,6 +59,8 @@ def main(argv=None):
     # One publisher per user even when a second executable names another data dir.
     guard = SingleInstance(data_root(), activate, app)
     if not guard.acquire():
+        if guard.upgrade_notice and not args.autostart:
+            QMessageBox.information(None,'本次新版尚未启动',guard.upgrade_notice)
         return 0
     try:
         from src.publisher.self_check import setup_logging

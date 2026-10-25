@@ -237,15 +237,15 @@ class ChannelProbeWorker(QThread):
                     # Separate factory: no Douyin stealth scripts or launch tweaks for new sites.
                     if self.account.platform == 'douyin':
                         context = DouyinBrowserManager.create_persistent_context(playwright, self.profile,
-                            headless=False, viewport={'width':1440,'height':900}, timeout=10000)
+                            headless=False, viewport={'width':1440,'height':900}, timeout=30000)
                     elif self.account.platform == 'youtube':
                         context = launch_youtube_context(playwright, self.profile,
-                            headless=False, viewport={'width':1440,'height':900}, timeout=10000)
+                            headless=False, viewport={'width':1440,'height':900}, timeout=30000)
                         self.status.emit(youtube_runtime_summary(context, self.profile))
                     else:
                         from ..publisher.media_browser import launch_media_context
                         context = launch_media_context(playwright,
-                            str(self.profile), headless=False, viewport={'width': 1440, 'height': 900}, timeout=10000)
+                            str(self.profile), headless=False, viewport={'width': 1440, 'height': 900}, timeout=30000)
                     if self.closing.is_set():
                         return
                     page = context.pages[0] if context.pages else context.new_page()
@@ -534,6 +534,7 @@ class MultiPlatformPublisherPanel(QWidget):
         self.cleanup_worker = None
         self.cleanup_cache = {}
         self._pending_deployment = None
+        self._cloud_watch_targets = None
         self._deferred_preflight = set()
         self._preflight_file_paths = None
         self.results = {}
@@ -727,7 +728,10 @@ class MultiPlatformPublisherPanel(QWidget):
             return
         deploying = bool(self.worker and self.worker.isRunning() and not self.worker.stopping.is_set()
             and self.worker.file_paths is None)
-        chosen = {t.key for t in self.worker.targets} if deploying else None
+        requested=getattr(self,'_cloud_watch_targets',None)
+        chosen = {t.key for t in self.worker.targets} if deploying else requested
+        watching=deploying or requested is not None
+        paused=not watching or bool(self.worker and self.worker.isRunning() and self.worker.pause_requested.is_set())
         targets = [t for t in self.all_targets() if DriveBinding.read(t.account.drive_binding).enabled
             and self.store.cloud_ingest_enabled
             and (chosen is None or t.key in chosen)]
@@ -743,10 +747,42 @@ class MultiPlatformPublisherPanel(QWidget):
         if self.drive_watch_worker:
             report=getattr(self.worker,'report',{}) if self.worker else {}
             self.drive_watch_worker.task_id=report.get('task_id','') if isinstance(report,dict) else ''
-            self.drive_watch_worker.configure(targets, paused=not deploying or self.worker.pause_requested.is_set(),
-                                             poll_seconds=self.store.cloud_poll_seconds)
+            reason='等待用户启动监听' if not watching else '用户已暂停' if paused else ''
+            self.drive_watch_worker.configure(targets,paused=paused,poll_seconds=self.store.cloud_poll_seconds,
+                                             pause_reason=reason)
         for panel in self.panels:
             panel.refresh_cloud_badges()
+            self.refresh_cloud_summary(panel)
+
+    def refresh_cloud_summary(self,panel,today=None):
+        from datetime import datetime
+        from ..publisher.event_log import CHINA_TIME
+        from ..publisher.drive_config import DriveBinding
+        account=panel.current()
+        if not account:
+            return
+        key=panel.platform+':'+account.account_id
+        previous=self.drive_states.get(key,'等待首次检查')
+        day=re.search(r'\d{4}-\d{2}-\d{2}',previous)
+        today=today or datetime.now(CHINA_TIME).date().isoformat()
+        worker=self.drive_watch_worker
+        state=worker.snapshot() if worker and callable(getattr(worker,'snapshot',None)) else {}
+        if not isinstance(state,dict):
+            state={}
+        reason=('云盘接入已关闭' if not self.store.cloud_ingest_enabled else
+                '此账号未启用监听' if not DriveBinding.read(account.drive_binding).enabled else
+                '云盘未连接' if not self.drive_credentials.connected() else
+                '监听未运行' if not worker or not worker.isRunning() else
+                state.get('pause_reason') or '监听已暂停' if state.get('paused') else
+                '此账号未在监听范围' if key not in state.get('target_keys',[]) else '')
+        if reason:
+            text=reason+('（上次检查 '+day.group()+'）' if day else '')
+        elif day and day.group()!=today:
+            text=f'当前 {today}，待检查（上次 {day.group()}）'
+        else:
+            text=previous
+        panel.source_state.setText('Google云盘：'+text)
+        panel.drive.today.setText(text)
 
     def drive_authorization_error(self, error, generation):
         if generation != self.drive_credentials.generation:
@@ -916,12 +952,16 @@ class MultiPlatformPublisherPanel(QWidget):
         return chosen if dialog.exec() == QDialog.Accepted else []
 
     def start_deployment(self, checked=False, file_paths=None):
+        if self.busy():
+            self._cloud_watch_targets=None
         if self.cleanup_worker:
             self.cleanup_worker.stop()
+            self.sync_drive_watch()
             self.show_status('正在取消扫描清理；尚未启动部署')
             return
         if self.preflight_worker:
             self.preflight_worker.stop()
+            self.sync_drive_watch()
             self.show_status('正在取消部署前检查；尚未开始上传')
             self.sync_deployment_buttons()
             return
@@ -944,6 +984,10 @@ class MultiPlatformPublisherPanel(QWidget):
             return
         if file_paths is not None and not self.confirm_retry_budget(targets,file_paths):
             return
+        # A requested cloud listener does not depend on creator-site login.
+        # Manual selected-file uploads keep their existing local-only scope.
+        self._cloud_watch_targets={t.key for t in targets} if file_paths is None else None
+        self.sync_drive_watch()
         self._pending_deployment=(targets,list(file_paths) if file_paths is not None else None)
         self.begin_cleanup(targets,force=False)
 
@@ -1311,7 +1355,8 @@ class MultiPlatformPublisherPanel(QWidget):
                 task_id=self.preflight_worker.task_id
             elif self.worker and self.worker.isRunning():
                 task_id=self.worker.report['task_id']
-            result=export_diagnostics(self.store.root,self.publish_events.folder,filename,task_id=task_id)
+            result=export_diagnostics(self.store.root,self.publish_events.folder,filename,task_id=task_id,
+                                      runtime_context=self.diagnostic_context())
             counts=result['counts']
             message=(f'仅任务 {result["selected_task_id"]}；日志 {counts["normal_logs"]} 份，'
                 f'DOM {counts["dom"]} 份，截图 {counts["screenshots"]} 张；采集/文件异常 {len(result["warnings"])} 项，'
@@ -1320,6 +1365,20 @@ class MultiPlatformPublisherPanel(QWidget):
             QMessageBox.information(self,'诊断包已导出',message)
         except (OSError,ValueError) as error:
             QMessageBox.warning(self,'日志导出失败',str(error))
+
+    def diagnostic_context(self):
+        """Latest shared-listener state, not another task's historical log."""
+        from ..publisher.drive_config import DriveBinding
+        worker=self.drive_watch_worker
+        cloud={'enabled':self.store.cloud_ingest_enabled,'connected':self.drive_credentials.connected(),
+               'poll_seconds':self.store.cloud_poll_seconds,'requested_targets':sorted(self._cloud_watch_targets or ()),
+               'watcher':worker.snapshot() if worker and callable(getattr(worker,'snapshot',None)) else None,'bindings':[]}
+        for target in self.all_targets():
+            binding=DriveBinding.read(target.account.drive_binding)
+            cloud['bindings'].append({'key':target.key,'watch_enabled':binding.enabled,'folder_id':binding.folder_id,
+                'folder_path':binding.folder_path,'local_directory':target.account.target_dir,
+                'last_status':self.drive_states.get(target.key,'尚无检查记录')})
+        return {'cloud_watch':cloud}
 
     def show_status(self, message):
         for panel in self.panels:
@@ -1432,6 +1491,7 @@ class MultiPlatformPublisherPanel(QWidget):
         if not hasattr(self,'panels'):
             return
         for panel in self.panels:
+            self.refresh_cloud_summary(panel)
             for column, platform in enumerate(PUBLISH_ORDER, 5):
                 panel.table_queue.setColumnHidden(column, platform not in VISIBLE_CHANNELS or platform not in getattr(self, '_queue_platforms', self.selected_channels()))
             account=panel.current()

@@ -56,7 +56,7 @@ def _compact(value):
     return value
 
 
-def export_diagnostics(root, log_folder, destination, task_id=None):
+def export_diagnostics(root, log_folder, destination, task_id=None, runtime_context=None):
     root, log_folder, destination = Path(root).resolve(), Path(log_folder).resolve(), Path(destination)
     log_folder.relative_to(root)
     cutoff = datetime.now(CHINA_TIME).isoformat()
@@ -207,6 +207,12 @@ def export_diagnostics(root, log_folder, destination, task_id=None):
                for k, timestamp in failures.items() if k not in archived]
     from ..version import __version__
     summary = {'task': metadata, 'snapshot_at': cutoff, 'exporter_version': __version__, 'failures': summary_results}
+    from .runtime_diagnostics import runtime_identity
+    summary['runtime']=runtime_identity()
+    if runtime_context is not None:
+        summary['runtime_context']=runtime_context
+    if metadata.get('app_version') and metadata['app_version']!=__version__:
+        warnings.append({'error':f'本任务来自 {metadata["app_version"]}，当前导出程序为 {__version__}；请勿混淆任务与导出器版本'})
     for path in sorted((root/'publish_reports').glob('publish_task_*_'+_safe(task_id)[:8]+'.json'), reverse=True):
         if not _regular(path, root):
             continue
@@ -228,7 +234,7 @@ def export_diagnostics(root, log_folder, destination, task_id=None):
                 'selection': selection, 'task': metadata, 'counts': counts,
                 'capture_retention': '每个平台/账号/文件/失败阶段仅保留最后两次截图与DOM',
                 'omitted_capture_count': omitted, 'warnings': warnings, 'missing_failure_archives': missing,
-                'files': inventory, 'privacy': '仅本任务日志、摘要和失败证据；不包含账号配置、Cookie、令牌或浏览器目录'}
+                'files': inventory, 'privacy': '仅本任务日志、摘要、失败证据及必要的运行程序/云盘监听状态；不包含完整账号配置、Cookie、令牌或浏览器目录'}
             archive.writestr('diagnostic-manifest.json', json.dumps(_clean(manifest), ensure_ascii=False, indent=2))
             archive.writestr('诊断包说明.txt', '书声最新任务诊断包\n任务编号：'+task_id+'\n'
                 'task-events.jsonl 为本次唯一任务日志；task-summary.json 为任务摘要。\n'

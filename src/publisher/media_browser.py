@@ -1,6 +1,7 @@
 """Shared browser factory; the publisher bundles a version-matched media browser."""
 import os
 import sys
+import time
 from pathlib import Path
 from .portable import resource_root
 
@@ -61,7 +62,19 @@ def launch_media_context(playwright, user_data_dir, **kwargs):
         # Keep the same full Chromium runtime in visible and headless modes.
         kwargs['channel']='chromium'
     kwargs = persistent_context_options(kwargs,user_data_dir)
-    return prepare_persistent_context(playwright.chromium.launch_persistent_context(str(user_data_dir), **kwargs))
+    return open_persistent_context(playwright.chromium,str(user_data_dir),**kwargs)
+
+
+def open_persistent_context(chromium,user_data_dir,**options):
+    options.setdefault('timeout',30000)
+    context=chromium.launch_persistent_context(str(user_data_dir),**options)
+    try:
+        return prepare_persistent_context(context,user_data_dir)
+    except Exception:
+        # A normalization failure must not leave an unreturned browser owning
+        # the account directory and blocking its next login/upload attempt.
+        context.close()
+        raise
 
 
 def persistent_context_options(options,user_data_dir=None):
@@ -71,29 +84,45 @@ def persistent_context_options(options,user_data_dir=None):
     if '--restore-last-session' not in args:
         args.append('--restore-last-session')
     result['args'] = args
-    # Playwright's extra startup tab has a fresh sessionStorage namespace.
-    # Let Chrome restore the original tab instead of replacing it with that tab.
-    profile=Path(user_data_dir)/'Default' if user_data_dir is not None else None
-    restoring=(profile is None or any((profile/'Sessions').glob('Session_*'))
-               or any((profile/name).is_file() for name in ('Current Session','Last Session')))
-    ignored=result.get('ignore_default_args',[])
-    if restoring and isinstance(ignored,(list,tuple)):
-        result['ignore_default_args']=list(dict.fromkeys([*ignored,'about:blank']))
+    # Session files can remain after the last window was closed. They do not
+    # guarantee a restorable tab. Always retain Playwright's startup page so
+    # launch can finish even when Chrome has nothing to restore.
     return result
 
 
-def prepare_persistent_context(context):
+def prepare_persistent_context(context,user_data_dir=None):
     context._shusheng_native_session = True
     # Chrome restores the original tab's sessionStorage; Playwright may also
     # create an empty startup tab. Keep the original, preventing tab growth.
     pages=list(context.pages)
-    keeper=next((p for p in reversed(pages) if isinstance(p.url,str) and p.url.startswith(('https://','http://'))),
-                pages[0] if pages else None)
+    profile=Path(user_data_dir)/'Default' if user_data_dir is not None else None
+    restoring=bool(profile and (any((profile/'Sessions').glob('Session_*'))
+                    or any((profile/name).is_file() for name in ('Current Session','Last Session'))))
+    deadline=time.monotonic()+(3 if restoring else 0)
+    while True:
+        pages=list(context.pages)
+        ranked=[]
+        for index,page in enumerate(pages):
+            if not isinstance(page.url,str):continue
+            try:
+                history=page.evaluate('history.length')
+                ranked.append((history if isinstance(history,int) else 0,
+                    page.url.startswith(('https://','http://')), -index,page))
+            except Exception:
+                continue  # A restored tab may still be replacing its document.
+        selected=max(ranked,key=lambda row:row[:3]) if ranked else None
+        if not restoring or selected and (selected[0]>1 or selected[1]) or time.monotonic()>=deadline:
+            break
+        if not pages:break
+        pages[0].wait_for_timeout(100)
+    keeper=selected[-1] if selected else (pages[0] if pages else context.new_page())
     for page in pages:
         if page!=keeper:
             page.close()
     if keeper and isinstance(keeper.url,str) and keeper.url!='about:blank':
-        keeper.goto('about:blank',wait_until='commit',timeout=2000)
+        keeper.goto('about:blank',wait_until='domcontentloaded',timeout=5000)
+    elif keeper and isinstance(keeper.url,str):
+        keeper.wait_for_load_state('domcontentloaded',timeout=5000)
     context._shusheng_session_start = browser_session_metrics(context)
     return context
 
@@ -117,7 +146,7 @@ def close_media_context(context):
         for page in list(context.pages) if getattr(context, '_shusheng_native_session', False) is True else []:
             if isinstance(page.url, str) and page.url != 'about:blank' and not page.is_closed():
                 try:
-                    page.goto('about:blank', wait_until='commit', timeout=2000)
+                    page.goto('about:blank', wait_until='domcontentloaded', timeout=5000)
                 except Exception:
                     pass  # Closing an already disconnected browser remains safe.
     finally:

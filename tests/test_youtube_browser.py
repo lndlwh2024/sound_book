@@ -35,7 +35,7 @@ def test_legacy_login_remains_on_its_original_bundled_profile(tmp_path):
     playwright = MagicMock()
     browsers.launch_youtube_context(playwright, tmp_path, headless=False)
     playwright.chromium.launch_persistent_context.assert_called_once_with(str(tmp_path), headless=False,
-        no_viewport=True,args=['--start-maximized','--restore-last-session'],channel='chromium')
+        no_viewport=True,args=['--start-maximized','--restore-last-session'],channel='chromium',timeout=30000)
     assert not (tmp_path/browsers.MARKER).exists()
 
 

@@ -287,13 +287,17 @@ class PublisherPanel(MultiPlatformPublisherPanel):
         if self._shutting_down or not hasattr(self, 'state'):
             return
         if self.automatic and not self.state.auto_watch and self.drive_watch_worker:
-            self.drive_watch_worker.configure([], paused=True)
+            self.drive_watch_worker.configure([],paused=True,poll_seconds=self.store.cloud_poll_seconds,
+                                             pause_reason='未启用自动恢复云盘监听')
+            for panel in self.panels:self.refresh_cloud_summary(panel)
             return
         # Independently restore cloud-only work; no uploader is needed for downloading.
         if self.state.auto_watch and self.state.intent == 'RUNNING' and self.store.cloud_ingest_enabled:
             targets = [t for t in self.all_targets() if t.key in self.state.targets]
-            if self.drive_watch_worker and not (self.worker and self.worker.isRunning()):
-                self.drive_watch_worker.configure(targets, paused=False)
+            if (self.drive_watch_worker and not (self.worker and self.worker.isRunning())
+                    and self._cloud_watch_targets is None):
+                self.drive_watch_worker.configure(targets,paused=False,poll_seconds=self.store.cloud_poll_seconds)
+        for panel in self.panels:self.refresh_cloud_summary(panel)
 
     def launch_deployment(self, targets, file_paths):
         super().launch_deployment(targets, file_paths)
@@ -314,6 +318,7 @@ class PublisherPanel(MultiPlatformPublisherPanel):
             self.show_status('恢复配置读取失败，请先检查配置；未覆盖原文件')
             return
         self.state.intent = 'STOPPED'
+        self._cloud_watch_targets=None
         self.save_state()
         self.automatic = False
         self.restore_timer.stop()
@@ -323,7 +328,8 @@ class PublisherPanel(MultiPlatformPublisherPanel):
                 worker.stop()
         self.sync_drive_watch()
         if self.drive_watch_worker:
-            self.drive_watch_worker.configure([], paused=True)
+            self.drive_watch_worker.configure([],paused=True,poll_seconds=self.store.cloud_poll_seconds,
+                                             pause_reason='用户停止监听和部署')
         self.sync_deployment_buttons()
         self.show_status('已停止监听和部署；正在进行的操作将安全结束')
         self.log_message('[用户操作] 停止监听和部署；保存停止意图')

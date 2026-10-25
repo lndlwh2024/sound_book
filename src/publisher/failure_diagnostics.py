@@ -148,6 +148,8 @@ class FailureOperation:
                 'timestamp': moment.isoformat(), 'stage': stage, 'reason': reason,
                 'role': role, 'url': '', 'frames': [], 'screenshot': None}
         try:
+            if page is None:
+                raise RuntimeError('本次未取得浏览器页面对象；请查看同次任务的浏览器启动或连接错误，不能据此判断账号未登录')
             data['url'] = safe_url(page.url)
             if page.is_closed():
                 raise RuntimeError('浏览器页面已关闭，无法取得最后页面')

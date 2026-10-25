@@ -197,6 +197,20 @@ def test_missing_media_codecs_blocks_before_navigation_or_upload(tmp_path,monkey
     assert not (tmp_path/'target_ledger.json').exists()
 
 
+def test_browser_launch_timeout_is_not_reported_as_lost_login(tmp_path):
+    from playwright.sync_api import TimeoutError
+    chosen=target(tmp_path,'douyin');messages=[]
+    checker=preflight.AccountPreflight(chosen,log=messages.append)
+    playwright=MagicMock()
+    playwright.chromium.launch_persistent_context.side_effect=TimeoutError('BrowserType.launch_persistent_context: Timeout 30000ms exceeded')
+    result=checker.check(playwright)
+    assert result.status=='FAILED'
+    assert '浏览器启动超时（30秒）' in result.message and '尚未进入平台登录检查' in result.message
+    assert any('阶段=启动账号浏览器' in message for message in messages)
+    assert playwright.chromium.launch_persistent_context.call_args.kwargs['timeout']==30000
+    assert chosen.account.login_status=='AUTHORIZED'
+
+
 def test_missing_prerequisites_never_launches_browser_or_creates_task_state(tmp_path,monkeypatch):
     factory = MagicMock()
     monkeypatch.setattr(preflight,'sync_playwright',factory)

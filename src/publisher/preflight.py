@@ -150,9 +150,10 @@ class AccountPreflight(BrowserPublishWorkflow):
 
     def check(self, playwright, headless=False):
         context, page, passed = None, None, False
+        step='启动账号浏览器'
         try:
             self._check_stop()
-            kwargs = dict(headless=headless, viewport={'width': 1440, 'height': 900}, timeout=10000)
+            kwargs = dict(headless=headless, viewport={'width': 1440, 'height': 900}, timeout=30000)
             if self.target.platform == 'douyin':
                 context = DouyinBrowserManager.create_persistent_context(playwright, Path(self.target.profile), **kwargs)
             elif self.target.platform == 'youtube':
@@ -162,6 +163,7 @@ class AccountPreflight(BrowserPublishWorkflow):
                 from .media_browser import launch_media_context
                 context = launch_media_context(playwright,self.target.profile, **kwargs)
             page = context.pages[0] if context.pages else context.new_page()
+            step='检查浏览器视频解码'
             from .media_browser import media_capabilities
             capabilities = media_capabilities(page)
             if not capabilities or not capabilities.get('h264') or not capabilities.get('aac'):
@@ -169,10 +171,12 @@ class AccountPreflight(BrowserPublishWorkflow):
             self.log('[浏览器媒体检查] H.264/AAC 支持通过；浏览器版本 '+str(context.browser.version))
             page.set_default_timeout(1000)
             self._check_stop()
+            step='打开平台发布页'
             try:
                 page.goto(self.channel.url, wait_until='domcontentloaded', timeout=10000)
             except PlaywrightTimeoutError:
                 self.log('页面加载较慢，继续检查当前登录页；尚未开始上传')
+            step='检查平台登录和发布权限'
             self.verify_page(page)
             self._check_stop()
             passed = True
@@ -190,12 +194,17 @@ class AccountPreflight(BrowserPublishWorkflow):
             return PreflightResult(self.target.key, target_name(self.target), 'FAILED',
                 str(error) + '。请检查网络和页面状态；昵称未识别时查看本人账号区域诊断，不据此判断登录失效。')
         except Exception as error:
-            self.log(f'[登录检查异常] {type(error).__name__}：{error}')
+            self.log(f'[登录检查异常] 阶段={step}；{type(error).__name__}：{error}')
             login_message = login_page_message(page, self.target.platform)
             if login_message:
                 return PreflightResult(self.target.key, target_name(self.target), 'AUTH_REQUIRED', login_message)
+            if context is None:
+                detail=('浏览器启动超时（30秒）' if isinstance(error,PlaywrightTimeoutError)
+                        else '浏览器启动失败（'+type(error).__name__+'）')
+                return PreflightResult(self.target.key,target_name(self.target),'FAILED',
+                    detail+'，尚未进入平台登录检查，未开始上传。请关闭该账号残留的浏览器窗口后重试；原登录目录已保留。')
             return PreflightResult(self.target.key, target_name(self.target), 'FAILED',
-                '登录检查未完成，尚未开始上传。浏览器页面关闭或加载异常，详情已记录；'
+                step+'未完成，尚未开始上传（'+type(error).__name__+'）。详情已记录；'
                 '请重新检查该账号，未据此认定登录失效。')
         finally:
             if not passed:

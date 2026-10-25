@@ -504,7 +504,7 @@ class CreatorStudioUploader(BrowserPublishWorkflow):
                     self.log('[启动浏览器] '+self.channel.name)
                     from .media_browser import launch_media_context
                     context=launch_media_context(p,str(self.profile),headless=self.headless,
-                        viewport={'width':1440,'height':900},timeout=10000)
+                        viewport={'width':1440,'height':900},timeout=30000)
                     context.set_default_timeout(1000)
                     page=context.pages[0] if context.pages else context.new_page()
                     self.attach_responses(page)
