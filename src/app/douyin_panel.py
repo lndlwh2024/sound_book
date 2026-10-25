@@ -76,7 +76,8 @@ class DouyinProbeWorker(QThread):
             profile_path.mkdir(parents=True, exist_ok=True)
             with sync_playwright() as p:
                 context = DouyinBrowserManager.create_persistent_context(
-                    p, profile_path, headless=False, viewport={"width": 1440, "height": 900}
+                    p, profile_path, headless=False, viewport={"width": 1440, "height": 900},
+                    page_timing_log=logger.info
                 )
                 page = context.new_page() if not context.pages else context.pages[0]
                 DouyinBrowserManager.inject_stealth(page)

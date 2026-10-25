@@ -107,7 +107,8 @@ class DouyinBrowserManager:
         profile_path: Path,
         headless: bool = False,
         viewport: Optional[dict] = None,
-        timeout: Optional[int] = None
+        timeout: Optional[int] = None,
+        page_timing_log=None
     ) -> BrowserContext:
         """Use the shared runtime factory while retaining this account's profile."""
         profile_path = Path(profile_path).resolve()
@@ -122,6 +123,8 @@ class DouyinBrowserManager:
 
         if timeout is not None:
             launch_kwargs["timeout"] = timeout
+        if callable(page_timing_log):
+            launch_kwargs["page_timing_log"] = page_timing_log
         from ..media_browser import launch_media_context
         context = launch_media_context(playwright_instance, **launch_kwargs)
         return context
@@ -139,7 +142,8 @@ class DouyinBrowserManager:
         try:
             with sync_playwright() as p:
                 context: BrowserContext = self.create_persistent_context(
-                    p, profile_path, headless=False, viewport={"width": 1280, "height": 800}
+                    p, profile_path, headless=False, viewport={"width": 1280, "height": 800},
+                    page_timing_log=logger.info
                 )
                 page = context.new_page() if not context.pages else context.pages[0]
                 self.inject_stealth(page)

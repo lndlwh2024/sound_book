@@ -901,6 +901,7 @@ class PlatformAccountPanel(QWidget):
             return
         account = self.current()
         self.dialog = ChannelProbeDialog(account,self.repository.profile(account),self.store.root/'dom_reports',self)
+        self.dialog.worker.event_logged.connect(self.controller.receive_log_event)
         self.dialog.identity_found.connect(lambda result:self.apply_identity(account,result))
         self.dialog.custom_nickname_requested.connect(lambda:self.set_custom_nickname(account=account))
         self.dialog.worker.captured.connect(self.refresh_dom_state)

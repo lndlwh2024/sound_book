@@ -66,9 +66,13 @@ def launch_media_context(playwright, user_data_dir, **kwargs):
 
 
 def open_persistent_context(chromium,user_data_dir,**options):
+    page_timing_log=options.pop('page_timing_log',None)
     options.setdefault('timeout',30000)
     context=chromium.launch_persistent_context(str(user_data_dir),**options)
     try:
+        if callable(page_timing_log):
+            from .page_dwell import attach_page_dwell
+            attach_page_dwell(context,page_timing_log)
         return prepare_persistent_context(context,user_data_dir)
     except Exception:
         # A normalization failure must not leave an unreturned browser owning
@@ -143,6 +147,8 @@ def browser_session_metrics(context):
 def close_media_context(context):
     """Restore authentication next time, without reopening old upload documents."""
     try:
+        from .page_dwell import finish_page_dwell
+        finish_page_dwell(context,'浏览器结束（关闭前）')
         for page in list(context.pages) if getattr(context, '_shusheng_native_session', False) is True else []:
             if isinstance(page.url, str) and page.url != 'about:blank' and not page.is_closed():
                 try:

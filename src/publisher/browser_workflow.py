@@ -6,6 +6,29 @@ Douyin defaults retain its original event-pump, stages and readiness behaviour.
 import time
 from playwright.sync_api import Page, Error as PlaywrightError, TimeoutError as PlaywrightTimeoutError
 from .page_access import transient_navigation_error
+from .page_dwell import set_page_stage, finish_page_stage
+
+
+def _stage_error_outcome(error):
+    # Importing adapter exceptions here would create a workflow/adapter cycle.
+    # These are the cooperative stop types used by the existing adapters.
+    stopped=any(base.__name__ in ('PublishCancelled','UploadStopped')
+                for base in type(error).__mro__)
+    return '中断' if stopped or not isinstance(error,Exception) else '失败'
+
+
+def _start_page_stage(page,stage):
+    try:
+        set_page_stage(page,stage)
+    except Exception:
+        pass  # Observability must not prevent the original browser action.
+
+
+def _finish_page_stage(page,stage,outcome):
+    try:
+        finish_page_stage(page,stage,outcome=outcome)
+    except Exception:
+        pass  # Preserve the action's return value or original failure.
 
 
 class BrowserPublishWorkflow:
@@ -38,28 +61,37 @@ class BrowserPublishWorkflow:
 
     def _wait_until(self, page, label, condition, seconds=60):
         self.stage = label
-        self._progress(label)
-        deadline, last_log = time.monotonic() + seconds, 0
-        while time.monotonic() < deadline:
-            self._check_stop()
-            try:
-                self._check_duration_notice(page)
-                result = condition()
-                if result:
-                    return result
-            except PlaywrightTimeoutError:
-                pass
-            except PlaywrightError as error:
-                if not transient_navigation_error(error):
-                    raise
-                # A redirect destroys the old document. Re-check its replacement
-                # within the original deadline; never classify it as lost login.
-                pass
-            if time.monotonic() - last_log >= 30:
-                self._progress(f'[等待] {label}；浏览器保持打开')
-                last_log = time.monotonic()
-            self._pause(page, 300)
-        raise RuntimeError(f'{label}超时；原文件保留')
+        outcome='失败'
+        _start_page_stage(page,label)
+        try:
+            self._progress(label)
+            deadline, last_log = time.monotonic() + seconds, 0
+            while time.monotonic() < deadline:
+                self._check_stop()
+                try:
+                    self._check_duration_notice(page)
+                    result = condition()
+                    if result:
+                        outcome='完成'
+                        return result
+                except PlaywrightTimeoutError:
+                    pass
+                except PlaywrightError as error:
+                    if not transient_navigation_error(error):
+                        raise
+                    # A redirect destroys the old document. Re-check its replacement
+                    # within the original deadline; never classify it as lost login.
+                    pass
+                if time.monotonic() - last_log >= 30:
+                    self._progress(f'[等待] {label}；浏览器保持打开')
+                    last_log = time.monotonic()
+                self._pause(page, 300)
+            raise RuntimeError(f'{label}超时；原文件保留')
+        except BaseException as error:
+            outcome=_stage_error_outcome(error)
+            raise
+        finally:
+            _finish_page_stage(page,label,outcome)
 
     def _wait_for_confirmation(self, page, probe, timeout_secs=600, poll_ms=1000):
         """Douyin's acknowledgement loop; the adapter supplies its own proof.
@@ -164,15 +196,25 @@ class BrowserPublishWorkflow:
 
     def _required_stage(self, page: Page, name: str, action):
         self.stage = name
-        self._progress(name)
-        self._check_stop()
-        started = time.monotonic()
+        outcome='失败'
+        _start_page_stage(page,name)
         try:
-            return action()
-        except self.stage_interruptions:
+            self._progress(name)
+            self._check_stop()
+            started = time.monotonic()
+            try:
+                result=action()
+                outcome='完成'
+                return result
+            except self.stage_interruptions:
+                raise
+            except Exception as error:
+                self._save_diagnostics(page, name, str(error))
+                raise RuntimeError(f"{name}失败，未执行发布：{error}") from error
+            finally:
+                self._progress(f"[阶段耗时] {name}：{time.monotonic() - started:.1f} 秒")
+        except BaseException as error:
+            outcome=_stage_error_outcome(error)
             raise
-        except Exception as error:
-            self._save_diagnostics(page, name, str(error))
-            raise RuntimeError(f"{name}失败，未执行发布：{error}") from error
         finally:
-            self._progress(f"[阶段耗时] {name}：{time.monotonic() - started:.1f} 秒")
+            _finish_page_stage(page,name,outcome)

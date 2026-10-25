@@ -614,7 +614,7 @@ class YouTubeUploader(BrowserPublishWorkflow):
             with sync_playwright() as p:
                 try:
                     context = launch_youtube_context(p, self.profile, headless=self.headless,
-                        viewport={'width': 1440, 'height': 900}, timeout=30000)
+                        viewport={'width': 1440, 'height': 900}, timeout=30000,page_timing_log=self.log)
                     self.log(youtube_runtime_summary(context, self.profile))
                     context.set_default_timeout(1000)
                     page = context.pages[0] if context.pages else context.new_page()
@@ -701,7 +701,7 @@ class YouTubeUploader(BrowserPublishWorkflow):
         confirmed = False
         with sync_playwright() as p:
             context = launch_youtube_context(p, self.profile, headless=self.headless,
-                viewport={'width': 1440, 'height': 900}, timeout=30000)
+                viewport={'width': 1440, 'height': 900}, timeout=30000,page_timing_log=self.log)
             self.log(youtube_runtime_summary(context, self.profile))
             try:
                 page = context.pages[0] if context.pages else context.new_page()

@@ -153,7 +153,8 @@ class AccountPreflight(BrowserPublishWorkflow):
         step='启动账号浏览器'
         try:
             self._check_stop()
-            kwargs = dict(headless=headless, viewport={'width': 1440, 'height': 900}, timeout=30000)
+            kwargs = dict(headless=headless, viewport={'width': 1440, 'height': 900}, timeout=30000,
+                          page_timing_log=self.log)
             if self.target.platform == 'douyin':
                 context = DouyinBrowserManager.create_persistent_context(playwright, Path(self.target.profile), **kwargs)
             elif self.target.platform == 'youtube':

@@ -303,7 +303,7 @@ class DouyinUploader(BrowserPublishWorkflow):
                 try:
                     context: BrowserContext = DouyinBrowserManager.create_persistent_context(
                         p, self.profile_path, headless=self.headless, viewport={"width": 1440, "height": 900},
-                        timeout=30000
+                        timeout=30000, page_timing_log=self._progress
                     )
                     self._check_stop()
                     context.set_default_timeout(2000)

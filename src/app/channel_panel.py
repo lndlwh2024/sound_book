@@ -101,6 +101,7 @@ def size_queue_columns(table):
 
 
 class ChannelProbeWorker(QThread):
+    event_logged = Signal(dict)
     ready = Signal()
     pages_changed = Signal(list)
     captured = Signal(str, str)
@@ -120,6 +121,15 @@ class ChannelProbeWorker(QThread):
         self.manual_active = threading.Event()
         self.manual_finish = threading.Event()
         self.verify_after_manual = False
+        self.timing_log_root = Path(output).parent
+
+    def record_page_timing(self, message):
+        self.status.emit(message)
+        from ..publisher.event_log import event_log
+        event = event_log(self.timing_log_root).write(message, platform=self.account.platform,
+            account_id=self.account.account_id, account_name=self.account.account_name,
+            category='browser_timing')
+        self.event_logged.emit(event)
 
     def request_google_manual(self):
         if self.account.platform == 'youtube':
@@ -237,15 +247,18 @@ class ChannelProbeWorker(QThread):
                     # Separate factory: no Douyin stealth scripts or launch tweaks for new sites.
                     if self.account.platform == 'douyin':
                         context = DouyinBrowserManager.create_persistent_context(playwright, self.profile,
-                            headless=False, viewport={'width':1440,'height':900}, timeout=30000)
+                            headless=False, viewport={'width':1440,'height':900}, timeout=30000,
+                            page_timing_log=self.record_page_timing)
                     elif self.account.platform == 'youtube':
                         context = launch_youtube_context(playwright, self.profile,
-                            headless=False, viewport={'width':1440,'height':900}, timeout=30000)
+                            headless=False, viewport={'width':1440,'height':900}, timeout=30000,
+                            page_timing_log=self.record_page_timing)
                         self.status.emit(youtube_runtime_summary(context, self.profile))
                     else:
                         from ..publisher.media_browser import launch_media_context
                         context = launch_media_context(playwright,
-                            str(self.profile), headless=False, viewport={'width': 1440, 'height': 900}, timeout=30000)
+                            str(self.profile), headless=False, viewport={'width': 1440, 'height': 900}, timeout=30000,
+                            page_timing_log=self.record_page_timing)
                     if self.closing.is_set():
                         return
                     page = context.pages[0] if context.pages else context.new_page()
