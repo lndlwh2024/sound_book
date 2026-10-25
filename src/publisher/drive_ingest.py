@@ -555,6 +555,8 @@ class DriveWatchWorker(QThread):
                 return
             self.configuration = token
             self.targets = [replace(t, account=replace(t.account, drive_binding=dict(t.account.drive_binding))) for t in targets]
+            keys={t.key for t in self.targets}
+            self.next_poll={key:due for key,due in self.next_poll.items() if key[0] in keys}
             self.paused = paused
             self.poll_seconds = poll_seconds
             self.pause_reason=pause_reason or ('监听已暂停' if paused else '')

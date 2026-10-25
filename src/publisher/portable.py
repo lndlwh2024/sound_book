@@ -39,7 +39,7 @@ def atomic_write(path, value):
 @dataclass
 class RunState:
     schema: int = 1
-    auto_watch: bool = False
+    auto_watch: bool = False  # Legacy field retained for reading old state; no longer gates Drive.
     auto_deploy: bool = False
     intent: str = 'STOPPED'
     targets: list[str] = field(default_factory=list)

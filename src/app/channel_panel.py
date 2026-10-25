@@ -534,7 +534,6 @@ class MultiPlatformPublisherPanel(QWidget):
         self.cleanup_worker = None
         self.cleanup_cache = {}
         self._pending_deployment = None
-        self._cloud_watch_targets = None
         self._deferred_preflight = set()
         self._preflight_file_paths = None
         self.results = {}
@@ -589,6 +588,7 @@ class MultiPlatformPublisherPanel(QWidget):
         self.render_timer.timeout.connect(self.render_results)
         self.timer.timeout.connect(self.refresh_queues)
         self.timer.start(5000)
+        self.sync_drive_watch()
 
     def update_drive_connection(self):
         connected = self.drive_credentials.connected()
@@ -726,15 +726,9 @@ class MultiPlatformPublisherPanel(QWidget):
         from ..publisher.drive_ingest import DriveWatchWorker
         if self._shutting_down or not hasattr(self,'panels'):
             return
-        deploying = bool(self.worker and self.worker.isRunning() and not self.worker.stopping.is_set()
-            and self.worker.file_paths is None)
-        requested=getattr(self,'_cloud_watch_targets',None)
-        chosen = {t.key for t in self.worker.targets} if deploying else requested
-        watching=deploying or requested is not None
-        paused=not watching or bool(self.worker and self.worker.isRunning() and self.worker.pause_requested.is_set())
-        targets = [t for t in self.all_targets() if DriveBinding.read(t.account.drive_binding).enabled
-            and self.store.cloud_ingest_enabled
-            and (chosen is None or t.key in chosen)]
+        connected=self.drive_credentials.connected()
+        targets = ([t for t in self.all_targets() if DriveBinding.read(t.account.drive_binding).enabled]
+                   if self.store.cloud_ingest_enabled and connected else [])
         if targets and self.drive_watch_worker is None:
             worker = DriveWatchWorker(self.store.root, self.drive_credentials, self)
             worker.storage_policy = self.storage_policy
@@ -745,10 +739,10 @@ class MultiPlatformPublisherPanel(QWidget):
             worker.authorization_error.connect(self.drive_authorization_error)
             worker.start()
         if self.drive_watch_worker:
-            report=getattr(self.worker,'report',{}) if self.worker else {}
-            self.drive_watch_worker.task_id=report.get('task_id','') if isinstance(report,dict) else ''
-            reason='等待用户启动监听' if not watching else '用户已暂停' if paused else ''
-            self.drive_watch_worker.configure(targets,paused=paused,poll_seconds=self.store.cloud_poll_seconds,
+            self.drive_watch_worker.task_id=''
+            reason=('云盘接入已关闭' if not self.store.cloud_ingest_enabled else
+                    '云盘未连接' if not connected else '没有启用监听的账号' if not targets else '')
+            self.drive_watch_worker.configure(targets,paused=not targets,poll_seconds=self.store.cloud_poll_seconds,
                                              pause_reason=reason)
         for panel in self.panels:
             panel.refresh_cloud_badges()
@@ -795,9 +789,8 @@ class MultiPlatformPublisherPanel(QWidget):
         if self.drive_states.get(key)!=text:
             platform,_,account_id=key.partition(':')
             account=next((a for a in self.repository.accounts(platform) if a.account_id==account_id),None)
-            report=getattr(self.worker,'report',{}) if self.worker else {}
             self.log_message('[云盘状态] '+text,platform='common',category='cloud',binding_platform=platform,
-                task_id=report.get('task_id','') if isinstance(report,dict) else '',account_id=account_id,
+                task_id='',account_id=account_id,
                 account_name=account.account_name if account else '')
         self.drive_states[key] = text
         for panel in self.panels:
@@ -814,9 +807,6 @@ class MultiPlatformPublisherPanel(QWidget):
             self.worker.wake_requested.set()
 
     def check_drive_now(self, panel):
-        if self.cleanup_worker or self.preflight_worker:
-            self.log_message('[云盘检查] 请等待扫描清理或部署前检查完成')
-            return
         if not self.store.cloud_ingest_enabled or not self.drive_credentials.connected() or not panel.save_current():
             return
         self.sync_drive_watch()
@@ -952,8 +942,6 @@ class MultiPlatformPublisherPanel(QWidget):
         return chosen if dialog.exec() == QDialog.Accepted else []
 
     def start_deployment(self, checked=False, file_paths=None):
-        if self.busy():
-            self._cloud_watch_targets=None
         if self.cleanup_worker:
             self.cleanup_worker.stop()
             self.sync_drive_watch()
@@ -984,10 +972,6 @@ class MultiPlatformPublisherPanel(QWidget):
             return
         if file_paths is not None and not self.confirm_retry_budget(targets,file_paths):
             return
-        # A requested cloud listener does not depend on creator-site login.
-        # Manual selected-file uploads keep their existing local-only scope.
-        self._cloud_watch_targets={t.key for t in targets} if file_paths is None else None
-        self.sync_drive_watch()
         self._pending_deployment=(targets,list(file_paths) if file_paths is not None else None)
         self.begin_cleanup(targets,force=False)
 
@@ -1299,8 +1283,8 @@ class MultiPlatformPublisherPanel(QWidget):
             worker.log.connect(self.log_message)
 
     def receive_log_event(self,event):
-        # Cloud ingestion has a separate worker but belongs to the active task.
-        # Preserve its events in the same spool before normal logs can rotate.
+        # Preserve explicitly task-scoped events before normal log rotation.
+        # Independent cloud events have no publishing task ID.
         for worker in (getattr(self,'preflight_worker',None),getattr(self,'worker',None)):
             diagnostics=getattr(worker,'diagnostics',None)
             if (diagnostics and diagnostics.task_id==event.get('task_id') and worker.isRunning()
@@ -1371,7 +1355,7 @@ class MultiPlatformPublisherPanel(QWidget):
         from ..publisher.drive_config import DriveBinding
         worker=self.drive_watch_worker
         cloud={'enabled':self.store.cloud_ingest_enabled,'connected':self.drive_credentials.connected(),
-               'poll_seconds':self.store.cloud_poll_seconds,'requested_targets':sorted(self._cloud_watch_targets or ()),
+               'poll_seconds':self.store.cloud_poll_seconds,'mode':'independent',
                'watcher':worker.snapshot() if worker and callable(getattr(worker,'snapshot',None)) else None,'bindings':[]}
         for target in self.all_targets():
             binding=DriveBinding.read(target.account.drive_binding)

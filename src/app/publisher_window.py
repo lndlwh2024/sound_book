@@ -62,7 +62,7 @@ class PublisherWindow(QMainWindow):
         menu.addSeparator()
         menu.addAction('打开主窗口', self.show_main_window)
         menu.addAction('运行设置', self.open_tray_settings)
-        menu.addAction('停止监听和部署', self.panel.stop_saved_tasks)
+        menu.addAction('停止部署（云盘监听继续）', self.panel.stop_saved_tasks)
         menu.addSeparator()
         menu.addAction('退出书声发布版', self.request_exit)
         self.tray.setContextMenu(menu)
@@ -98,6 +98,10 @@ class PublisherWindow(QMainWindow):
             state = '监听中 / 等待任务'
         else:
             state = '已停止'
+        if not self.closing:
+            worker=self.panel.drive_watch_worker
+            cloud=bool(worker and worker.isRunning() and not worker.paused and worker.targets)
+            state='部署'+state+'；云盘'+('监听中' if cloud else '未运行')
         self.tray_status.setText('书声发布版 · ' + state)
         self.tray.setToolTip('书声发布版 · ' + state)
 

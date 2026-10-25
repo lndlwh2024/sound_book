@@ -81,6 +81,11 @@ def export_diagnostics(root, log_folder, destination, task_id=None, runtime_cont
             metadata = {'task_id': task_id, 'started_at': starts[task_id], 'status': 'UNKNOWN'}
             selection = 'legacy_first_retained_event'
             warnings.append({'error': '旧版本没有任务索引，按各任务最早保留日志判定；开始时间可能受历史轮转影响'})
+    if not task_id and isinstance(runtime_context,dict) and runtime_context.get('cloud_watch'):
+        from ..version import __version__
+        task_id='cloud-snapshot-'+uuid.uuid4().hex
+        metadata={'task_id':task_id,'started_at':cutoff,'status':'SNAPSHOT','app_version':__version__}
+        selection='current_cloud_snapshot'
     if not task_id:
         raise ValueError('尚无可导出的任务，请先执行一次部署检查或发布任务')
     if not isinstance(task_id, str):

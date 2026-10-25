@@ -282,23 +282,6 @@ class PublisherPanel(MultiPlatformPublisherPanel):
             self.save_state()
         super().toggle_pause()
 
-    def sync_drive_watch(self):
-        super().sync_drive_watch()
-        if self._shutting_down or not hasattr(self, 'state'):
-            return
-        if self.automatic and not self.state.auto_watch and self.drive_watch_worker:
-            self.drive_watch_worker.configure([],paused=True,poll_seconds=self.store.cloud_poll_seconds,
-                                             pause_reason='未启用自动恢复云盘监听')
-            for panel in self.panels:self.refresh_cloud_summary(panel)
-            return
-        # Independently restore cloud-only work; no uploader is needed for downloading.
-        if self.state.auto_watch and self.state.intent == 'RUNNING' and self.store.cloud_ingest_enabled:
-            targets = [t for t in self.all_targets() if t.key in self.state.targets]
-            if (self.drive_watch_worker and not (self.worker and self.worker.isRunning())
-                    and self._cloud_watch_targets is None):
-                self.drive_watch_worker.configure(targets,paused=False,poll_seconds=self.store.cloud_poll_seconds)
-        for panel in self.panels:self.refresh_cloud_summary(panel)
-
     def launch_deployment(self, targets, file_paths):
         super().launch_deployment(targets, file_paths)
         self.state.intent = 'STOPPED' if file_paths is not None else 'RUNNING'
@@ -313,12 +296,11 @@ class PublisherPanel(MultiPlatformPublisherPanel):
         self.save_state()
 
     def stop_saved_tasks(self):
-        """Stop both download watching and uploads without closing the app."""
+        """Stop publishing; cloud ingestion follows its own shared/account switches."""
         if self.state_error:
             self.show_status('恢复配置读取失败，请先检查配置；未覆盖原文件')
             return
         self.state.intent = 'STOPPED'
-        self._cloud_watch_targets=None
         self.save_state()
         self.automatic = False
         self.restore_timer.stop()
@@ -327,12 +309,9 @@ class PublisherPanel(MultiPlatformPublisherPanel):
             if worker:
                 worker.stop()
         self.sync_drive_watch()
-        if self.drive_watch_worker:
-            self.drive_watch_worker.configure([],paused=True,poll_seconds=self.store.cloud_poll_seconds,
-                                             pause_reason='用户停止监听和部署')
         self.sync_deployment_buttons()
-        self.show_status('已停止监听和部署；正在进行的操作将安全结束')
-        self.log_message('[用户操作] 停止监听和部署；保存停止意图')
+        self.show_status('已停止部署；云盘按监听配置继续轮询和下载')
+        self.log_message('[用户操作] 停止部署；保存部署停止意图，云盘监听独立运行')
 
     def restore_deployment(self, force=False):
         try:
@@ -464,12 +443,11 @@ class PublisherWorkspace(QWidget):
         layout.addWidget(QLabel('原机可继续制作；同一平台的同一发布账号只交给一台电脑自动部署。'))
         auto_start = QCheckBox('登录 Windows 后延迟90秒自动启动（当前用户）')
         auto_start.setChecked(windows_startup.installed())
-        watch = QCheckBox('下次启动自动恢复云盘监听')
-        watch.setChecked(self.panel.state.auto_watch)
         deploy = QCheckBox('下次启动自动恢复上次选定账号的部署')
         deploy.setChecked(self.panel.state.auto_deploy)
-        for control in (auto_start, watch, deploy):
+        for control in (auto_start, deploy):
             layout.addWidget(control)
+        layout.addWidget(QLabel('云盘按公共接入开关和各账号监听配置独立轮询、下载，程序启动后即生效。'))
         space = QHBoxLayout()
         budget, reserve = QSpinBox(), QSpinBox()
         for control, value in ((budget, self.panel.state.media_budget_gb), (reserve, self.panel.state.min_free_gb)):
@@ -481,7 +459,7 @@ class PublisherWorkspace(QWidget):
         space.addWidget(QLabel('磁盘保留空间'))
         space.addWidget(reserve)
         layout.addLayout(space)
-        layout.addWidget(QLabel('主动停止或暂停后保持停止；首次授权和各平台登录需在这台电脑完成。'))
+        layout.addWidget(QLabel('部署停止或暂停后保持该状态；停止云盘下载请关闭公共接入开关或账号监听。'))
         review = QPushButton('核验中断投稿')
         review.clicked.connect(self.review)
         layout.addWidget(review)
@@ -499,7 +477,7 @@ class PublisherWorkspace(QWidget):
             self.panel.restore_deployment(force=True)
         resume.clicked.connect(resume_saved)
         layout.addWidget(resume)
-        stop_tasks = QPushButton('停止监听和部署（保存停止意图）')
+        stop_tasks = QPushButton('停止部署（云盘监听继续）')
         def stop_saved():
             self.panel.stop_saved_tasks()
             dialog.accept()
@@ -515,7 +493,7 @@ class PublisherWorkspace(QWidget):
                 if not getattr(sys, 'frozen', False):
                     arguments.insert(0, str(Path(__file__).resolve().parents[2] / 'publisher_app.py'))
                 windows_startup.set_enabled(auto_start.isChecked(), sys.executable, arguments)
-                self.panel.state.auto_watch, self.panel.state.auto_deploy = watch.isChecked(), deploy.isChecked()
+                self.panel.state.auto_deploy = deploy.isChecked()
                 self.panel.state.media_budget_gb, self.panel.state.min_free_gb = budget.value(), reserve.value()
                 self.panel.save_state()
                 self.panel.storage_policy.maximum = budget.value()*1024**3
