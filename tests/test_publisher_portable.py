@@ -22,8 +22,18 @@ def app():
     return QApplication.instance() or QApplication([])
 
 
+class StubShutdown:
+    """Widget tests never arm a process-exit watchdog against their pytest owner."""
+    def __init__(self,*args,**kwargs):self.ready=False;self.started=None
+    def begin(self):self.started=0
+    def poll(self,inventory):self.ready=not any(item.get('running') for item in inventory);return self.ready
+    def status(self):return '正在测试退出'
+    def flush(self):pass
+
+
 @pytest.fixture
-def window(tmp_path):
+def window(tmp_path,monkeypatch):
+    monkeypatch.setattr('src.app.publisher_window.ShutdownController',StubShutdown)
     result = PublisherWindow(tmp_path)
     yield result
     result.panel.state.intent = 'STOPPED'

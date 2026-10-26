@@ -31,9 +31,11 @@ def panel(tmp_path,monkeypatch):
     monkeypatch.setattr(ui.QMessageBox,'warning',MagicMock())
     yield widget
     widget.prepare_shutdown()
-    for worker in (widget.cleanup_worker,widget.snapshot_worker,widget.drive_watch_worker,widget.drive_auth_worker):
-        if worker:
-            worker.wait(3000)
+    # A failed assertion may leave the new asynchronous preflight active.
+    # Drain every real child thread before destroying the native Qt parent.
+    from PySide6.QtCore import QThread
+    for worker in widget.findChildren(QThread):
+        assert worker.wait(3000), f'fixture线程未退出：{type(worker).__name__}'
     QApplication.processEvents()
     widget.close()
     # Release Qt-owned signal/child cycles before the next theme/layout test.
@@ -188,6 +190,7 @@ def test_xiaohongshu_collection_uses_shared_field_and_preserves_identity(all_pla
 def test_identity_updates_captured_account_without_changing_id_profile_or_selection(panel,index):
     current=panel.panels[index]
     captured=current.current()
+    previous_auth=(captured.login_status,captured.last_auth_time)
     original_id,profile=captured.account_id,panel.repository.profile(captured)
     other=panel.repository.add(current.platform,'第二账号')
     current.reload()
@@ -198,7 +201,7 @@ def test_identity_updates_captured_account_without_changing_id_profile_or_select
     saved=panel.repository.accounts(current.platform)[0]
     assert saved.platform_nickname=='平台真实昵称' and saved.account_name=='平台真实昵称'
     assert saved.account_id==original_id and panel.repository.profile(saved)==profile
-    assert saved.login_status=='AUTHORIZED' and saved.last_auth_time
+    assert (saved.login_status,saved.last_auth_time)==previous_auth
 
 
 def test_youtube_wrong_channel_does_not_override_binding(panel):
@@ -265,17 +268,31 @@ def test_captured_dom_updates_form_without_bypassing_login_preflight(all_platfor
     panel.choose_targets=MagicMock(return_value=[PublishTarget(platform,account,panel.repository.profile(account))])
     factory=MagicMock()
     monkeypatch.setattr(ui,'MultiDeployWorker',factory)
+    # Prerequisites now run in the preflight worker, and an invalid account is
+    # passed to the task with an initial block instead of a global modal stop.
+    import threading
+    from src.publisher.preflight import PreflightResult,prerequisite_results
+    check=MagicMock(targets=panel.choose_targets.return_value,stopping=threading.Event(),unsafe_resources_message='')
+    check.isRunning.return_value=True
+    check.results=prerequisite_results(check.targets,panel.store.root/'dom_reports')
+    assert len(check.results)==1 and '登录' in check.results[0].message
+    check_factory=MagicMock(return_value=check)
+    monkeypatch.setattr(ui,'DeploymentPreflightWorker',check_factory)
     warning=MagicMock()
     monkeypatch.setattr(ui.QMessageBox,'warning',warning)
     panel.start_deployment()
     finish_cleanup(panel)
     factory.assert_not_called()
-    assert '登录' in warning.call_args.args[-1]
-    assert '当前账号尚未采集' not in warning.call_args.args[-1]
+    check.start.assert_called_once()
+    panel.preflight_finished()
+    factory.assert_called_once()
+    assert factory.call_args.kwargs['initial_blocks'][check.targets[0].key]['status']=='CONFIG_REQUIRED'
+    assert '当前账号尚未采集' not in factory.call_args.kwargs['initial_blocks'][check.targets[0].key]['message']
+    warning.assert_not_called()
+    panel.worker=None
+    factory.reset_mock()
     # Existing DOM remains usable. Completing local login prerequisites starts
     # only the check; the deployment still waits for live validation to finish.
-    import threading
-    from src.publisher.preflight import PreflightResult
     profile = Path(panel.repository.profile(account))
     profile.mkdir(parents=True)
     (profile/'test-marker').write_text('local',encoding='utf-8')
@@ -284,7 +301,8 @@ def test_captured_dom_updates_form_without_bypassing_login_preflight(all_platfor
     check.targets=panel.choose_targets.return_value
     check.stopping=threading.Event()
     check.results=[PreflightResult(check.targets[0].key,platform,'SUCCESS','通过')]
-    monkeypatch.setattr(ui,'DeploymentPreflightWorker',MagicMock(return_value=check))
+    check.unsafe_resources_message=''
+    check_factory.return_value=check
     warning.reset_mock()
     panel.start_deployment()
     finish_cleanup(panel)
@@ -292,6 +310,7 @@ def test_captured_dom_updates_form_without_bypassing_login_preflight(all_platfor
     factory.assert_not_called()
     panel.preflight_finished()
     factory.assert_called_once()
+    assert factory.call_args.kwargs['initial_blocks']=={}
     factory.return_value.start.assert_called_once()
     warning.assert_not_called()
     panel.worker=None

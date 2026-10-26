@@ -9,12 +9,14 @@ STATUS_TEXT = {'SUCCESS':'已成功', 'FAILED':'失败', 'FAILED1':'失败1', 'F
                'UNCONFIRMED':'待上传', 'CANCELLED':'待上传', 'RETRYING':'重试中',
                'IGNORED':'不再跟踪',
                'PENDING':'待上传', 'IN_PROGRESS':'上传中', 'DAILY_LIMIT':'待上传', 'ACCOUNT_LIMIT':'账号限额',
+               'MANUAL_HOLD':'人工归档待确认',
                'DURATION_LIMIT':'超长跳过', 'PERMANENT_REJECT':'永久跳过', 'CONFIG_REQUIRED':'配置未完成',
                'AUTH_REQUIRED':'需要登录', 'ACCOUNT_RESTRICTED':'账号受限',
                'VERIFICATION_REQUIRED':'需要验证', 'PLATFORM_BUSY':'平台繁忙',
-               'IDENTITY_MISMATCH':'账号不符', 'FILE_CHANGED':'文件变化', 'RECOVERY_REQUIRED':'中断待核验'}
+               'IDENTITY_MISMATCH':'账号不符', 'FILE_CHANGED':'文件变化', 'RECOVERY_REQUIRED':'中断待核验',
+               'PREFLIGHT_FAILED':'检查失败'}
 BLOCKING = {'ACCOUNT_LIMIT', 'AUTH_REQUIRED', 'ACCOUNT_RESTRICTED', 'IDENTITY_MISMATCH',
-            'CONFIG_REQUIRED', 'VERIFICATION_REQUIRED', 'PLATFORM_BUSY'}
+            'CONFIG_REQUIRED', 'VERIFICATION_REQUIRED', 'PLATFORM_BUSY', 'PREFLIGHT_FAILED'}
 RETRYABLE = {'FAILED', 'FAILED1'}
 
 
@@ -36,7 +38,7 @@ def fresh_result(previous):
             previous['status']='RECOVERY_REQUIRED'
         elif previous.get('status')=='FAILED2' or int(previous.get('attempt_count') or 0)>=2:
             previous['status']='FAILED2'
-        elif previous.get('status') not in BLOCKING | {'FAILED', 'FAILED1'}:
+        elif previous.get('status') not in BLOCKING | {'FAILED', 'FAILED1', 'MANUAL_HOLD'}:
             previous.update(status='PENDING')
     previous['attempts'] = []
     return previous

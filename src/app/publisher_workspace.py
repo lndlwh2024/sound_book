@@ -227,6 +227,7 @@ class PublisherPanel(MultiPlatformPublisherPanel):
             panel.shared_drive.layout().setContentsMargins(10,6,10,6)
             for control in (panel.shared_drive.enabled,panel.shared_drive.change_button,
                             panel.shared_drive.interval,panel.shared_drive.interval_label,
+                            panel.shared_drive.check_all_button,
                             panel.shared_drive.connected_button,panel.shared_drive.disconnected_button):
                 control.setFixedHeight(32)
             panel.table_queue.setColumnHidden(2,True)
@@ -337,21 +338,9 @@ class PublisherPanel(MultiPlatformPublisherPanel):
             self.show_status('自动恢复等待：原部署账号被关闭、删除或目录尚未配置；未替换为其他账号')
             return
         chosen = [targets[key] for key in self.state.targets]
-        if any(not Path(t.account.target_dir).is_dir() for t in chosen):
-            self.show_status('自动恢复等待：本地媒体目录不可访问')
-            self.schedule_retry()
-            return
-        if any(key in self.state.targets for _, key, _ in self.pending_reviews()):
-            self.show_status('自动恢复等待：请在运行设置中核验中断投稿，未重新上传')
-            return
-        from ..publisher.preflight import prerequisite_results, failure_message
-        from ..publisher.upload_quota import DailyUploadQuota
-        quota = DailyUploadQuota(self.store.root)
-        eligible = [t for t in chosen if quota.snapshot(t.key, t.account.daily_upload_limit)['remaining']]
-        reason = failure_message(prerequisite_results(eligible, self.store.root / 'dom_reports'))
-        if reason:
-            self.log_message('[自动恢复等待] ' + reason)
-            return  # Login / DOM needs a person, not a repeating popup.
+        # Use the same per-account preflight as a manual start. Incomplete
+        # configuration blocks its owner; strict recovery protects submitted
+        # files without preventing unrelated accounts from continuing.
         self.automatic = self.restoring = not force
         self._pending_deployment = (chosen, None)
         self.begin_cleanup(chosen, force=False)
@@ -362,24 +351,7 @@ class PublisherPanel(MultiPlatformPublisherPanel):
             self.retry_seconds = min(300, self.retry_seconds * 2)
 
     def preflight_finished(self):
-        # Automatic startup reports failures inline, never blocks on a modal dialog.
-        worker = self.preflight_worker
-        if self.automatic and worker:
-            from ..publisher.preflight import failure_message
-            reason = failure_message(worker.results)
-            passed = {r.key for r in worker.results if r.passed}
-            if worker.stopping.is_set() or reason or passed != {t.key for t in worker.targets}:
-                self.preflight_worker = None
-                worker.deleteLater()
-                self.sync_deployment_buttons()
-                self.show_status('自动恢复等待：' + (reason or '部署检查未完成'))
-                self.log_message('[自动恢复等待] '+(reason or '部署检查未完成'))
-                needs_person=any(r.nickname_missing or r.status in (
-                    'CONFIG_REQUIRED','AUTH_REQUIRED','IDENTITY_MISMATCH',
-                    'VERIFICATION_REQUIRED','ACCOUNT_RESTRICTED','ACCOUNT_LIMIT') for r in worker.results)
-                if not needs_person:
-                    self.schedule_retry()
-                return
+        # Automatic restore shares the account isolation and live health rules.
         super().preflight_finished()
 
     def pending_reviews(self):
@@ -463,6 +435,14 @@ class PublisherWorkspace(QWidget):
         review = QPushButton('核验中断投稿')
         review.clicked.connect(self.review)
         layout.addWidget(review)
+        idle_check=QPushButton('登录空闲验收（不上传内容）')
+        def open_idle_check():
+            from .idle_login_dialog import IdleLoginDialog
+            if not hasattr(self,'idle_login_dialog'):self.idle_login_dialog=IdleLoginDialog(self)
+            self.idle_login_dialog.show()
+            self.idle_login_dialog.raise_()
+        idle_check.clicked.connect(open_idle_check)
+        layout.addWidget(idle_check)
         resume = QPushButton('恢复已保存的账号任务')
         def resume_saved():
             if self.state_error:

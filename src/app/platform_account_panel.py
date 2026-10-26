@@ -14,6 +14,7 @@ from ..publisher.platforms import CHANNELS
 from ..publisher.titles import TITLE_SOURCES, title_source, custom_title
 from ..publisher.media import MEDIA_TYPES, media_type
 from ..publisher.dom_readiness import publishing_dom_state as account_dom_state
+from ..publisher.account_health import account_health_view
 
 TABLE_STYLE = '''QTableWidget {background:#1A202C;border:1px solid #2D3748;color:#CBD5E0;}
 QHeaderView::section {background:#2D3748;color:#E2E8F0;padding:4px;font-weight:bold;}'''
@@ -139,6 +140,7 @@ class PlatformAccountPanel(QWidget):
         self.shared_drive.enabled.toggled.connect(parent.set_cloud_ingest_enabled)
         self.shared_drive.set_interval(self.store.cloud_poll_seconds)
         self.shared_drive.interval.valueChanged.connect(parent.set_cloud_poll_seconds)
+        self.shared_drive.check_all_button.clicked.connect(parent.check_all_drive_now)
         self.shared_drive.connected_button.clicked.connect(lambda:parent.connect_drive(self))
         self.shared_drive.change_button.clicked.connect(lambda:parent.connect_drive(self))
         self.shared_drive.disconnected_button.clicked.connect(parent.confirm_disconnect_drive)
@@ -384,6 +386,11 @@ class PlatformAccountPanel(QWidget):
         upload.clicked.connect(self.upload_selected)
         upload.setStyleSheet('background:#D69E2E;color:white;font-weight:bold;')
         queue_buttons.addWidget(scan)
+        self.restore_hold_button=QPushButton('恢复人工暂停')
+        self.restore_hold_button.setToolTip('选择已持久隔离的文件，校验原云盘账号和目录后恢复；不会标记发布成功')
+        self.restore_hold_button.clicked.connect(lambda:self.controller.restore_manual_holds(self))
+        self.restore_hold_button.setEnabled(False)
+        queue_buttons.addWidget(self.restore_hold_button)
         queue_buttons.addStretch()
         queue_buttons.addWidget(upload)
         queue_layout.addLayout(queue_buttons)
@@ -455,7 +462,7 @@ class PlatformAccountPanel(QWidget):
         return next((a for a in self._accounts if a.account_id==identity),None)
 
     def account_label(self, account):
-        state = '已登录' if account.login_status=='AUTHORIZED' else '登录已确认' if account.login_status=='USER_CONFIRMED' else '未核对'
+        state = account_health_view(self.repository,account)['label']
         name = account.custom_nickname or account.platform_nickname or account.account_name
         if account.custom_nickname:
             name += '（自定义）'
@@ -506,8 +513,13 @@ class PlatformAccountPanel(QWidget):
             '账号已启用 · 云盘已断开' if not connected else
             '账号已启用 · 云盘已暂停' if active and worker.pause_requested.is_set() else
             '账号已启用 · 云盘监听中' if self.platform+':'+account.account_id in keys else '账号已启用 · 云盘待启动')
+        health=account_health_view(self.repository,account)
+        if account.enabled and health['state'] not in ('UNVERIFIED','SUCCESS'):
+            reason=' '.join(health['message'].split())
+            text=health['label']+'：'+reason[:16]+('…' if len(reason)>16 else '')
         self.account_status.setText(text)
-        self.account_status.setStyleSheet('color:'+('#4CBD87' if account.enabled else '#A6BDD3')+';font-size:12px;')
+        self.account_status.setToolTip(health['tooltip'])
+        self.account_status.setStyleSheet('color:'+(health['color'] if account.enabled else '#A6BDD3')+';font-size:12px;')
 
     def set_account_enabled(self, identity, enabled):
         account = next((a for a in self._accounts if a.account_id == identity),None)
@@ -548,8 +560,7 @@ class PlatformAccountPanel(QWidget):
         self.identity.setText(account.identity_note or account.platform_uid if account else '')
         self.nickname.setText(('自定义昵称：'+account.custom_nickname if account.custom_nickname else
             '平台昵称：'+(account.platform_nickname or '尚未获取')) if account else '平台昵称：尚未获取')
-        self.state.setText('登录状态：'+({'AUTHORIZED':'已登录','USER_CONFIRMED':'登录已确认'}.get(account.login_status,'尚未核对') if account else '尚未登录'))
-        self.state.setStyleSheet('color:#38A169;' if account and account.login_status in ('AUTHORIZED','USER_CONFIRMED') else 'color:#E53E3E;')
+        self.refresh_account_health(account)
         self.enabled.setChecked(account.enabled if account else True)
         self.drive.load(account.drive_binding if account else {})
         if hasattr(self.controller,'drive_credentials'):
@@ -592,8 +603,30 @@ class PlatformAccountPanel(QWidget):
         if hasattr(self,'nickname_button'):
             self.nickname_button.setEnabled(account is not None)
         self.refresh_cloud_badges()
+
         self.scan_queue()
         self.refresh_dom_state()
+
+    def refresh_account_health(self,account=None):
+        """Refresh live status only; never reload or save unfinished form edits."""
+        current=self.current()
+        if account is not None and (current is None or current.account_id!=account.account_id):
+            return
+        account=account or current
+        health=account_health_view(self.repository,account)
+        self.state.setText('登录状态：'+health['label'])
+        self.state.setStyleSheet('color:'+health['color']+';')
+        self.state.setToolTip(health['tooltip'])
+        if account is None:
+            text='添加账号后可配置目录与部署参数'
+        elif not account.enabled:
+            text='账号已关闭 · 配置与历史记录保留'
+        else:
+            reason=' '.join(health['message'].split())
+            text=health['label']+'：'+reason[:16]+('…' if len(reason)>16 else '')
+        self.account_status.setText(text)
+        self.account_status.setToolTip(health['tooltip'])
+        self.account_status.setStyleSheet('color:'+(health['color'] if account and account.enabled else '#A6BDD3')+';font-size:12px;')
 
     def refresh_dom_state(self, *_):
         account = self.current()
@@ -624,6 +657,10 @@ class PlatformAccountPanel(QWidget):
         account = self.current()
         if not account:
             return False
+        latest=next((a for a in self.repository.accounts(self.platform) if a.account_id==account.account_id),None)
+        if latest is None:
+            return False
+        account.login_status,account.last_auth_time=latest.login_status,latest.last_auth_time
         account.target_dir = self.directory.text().strip()
         account.identity_note = self.identity.text().strip()
         account.media_types = [key for key,check in self.media_checks.items() if check.isChecked()]
@@ -706,15 +743,17 @@ class PlatformAccountPanel(QWidget):
         self.table_queue.setItem(row,QUEUE_DATE_COLUMN,item)
 
     def apply_queue_snapshot(self, files, provenance=None):
-        from ..publisher.drive_ingest import queue_provenance
-        files=[(path,stat) for path,stat in files if path.is_file()]
+        from ..publisher.drive_ingest import queue_provenance,canonical_local_path
         if provenance is None:
             provenance=queue_provenance(self.store.root,files)
+        files=[(path,stat) for path,stat in files if path.is_file()
+               or provenance.get(canonical_local_path(path),{}).get('manual_hold')]
         signature = (tuple((str(path), stat.st_size, stat.st_mtime_ns) for path, stat in files),
                      json.dumps(provenance,sort_keys=True))
         if getattr(self, '_queue_signature', None) == signature:
             return
         self._queue_signature = signature
+        self.restore_hold_button.setEnabled(any(value.get('manual_hold') for value in provenance.values()))
         selected_path = self.queue_file_path(self.table_queue.currentRow())
         self.table_queue.setRowCount(0)
         for row, (path, stat) in enumerate(files):
@@ -726,7 +765,9 @@ class PlatformAccountPanel(QWidget):
                 item.setTextAlignment(Qt.AlignLeft|Qt.AlignVCenter if column==1 else Qt.AlignCenter)
                 self.table_queue.setItem(row,column,item)
             item = self.table_queue.item(row,1)
-            item.setToolTip(str(path))
+            held=provenance.get(canonical_local_path(path),{})
+            item.setToolTip(str(path)+('\n人工暂停；隔离位置：'+held.get('held_path','') if held.get('manual_hold') else ''))
+            item.setData(Qt.UserRole+4,held.get('hold_id') if held.get('manual_hold') else None)
             item.setData(Qt.UserRole,str(path))
             item.setData(Qt.UserRole+1,(stat.st_size,stat.st_mtime_ns))
             self.set_video_date(row,path,provenance)
@@ -806,6 +847,10 @@ class PlatformAccountPanel(QWidget):
             QMessageBox.warning(self,'上传','请先停止当前任务')
             return
         row = self.table_queue.currentRow()
+        selected=self.table_queue.item(row,1)
+        if selected and selected.data(Qt.UserRole+4):
+            QMessageBox.information(self,'人工暂停','该文件已人工暂停；请使用“恢复人工暂停”明确恢复后再继续发布')
+            return
         path = self.queue_file_path(row)
         if not path or not self.save_current():
             return
@@ -814,6 +859,9 @@ class PlatformAccountPanel(QWidget):
             self.controller.start_deployment(file_paths=[path])
 
     def apply_identity(self, account, identity):
+        account=next((a for a in self.repository.accounts(self.platform) if a.account_id==account.account_id),None)
+        if account is None:
+            return False
         uid = identity.get('channel_id') or identity.get('platform_uid','')
         if self.platform=='youtube' and not re.fullmatch(r'UC[\w-]{22}',uid):
             self.logs.appendPlainText('尚未读到实际 YouTube 频道ID；未保存为已登录，请先进入正确频道再读取昵称')
@@ -826,8 +874,6 @@ class PlatformAccountPanel(QWidget):
         account.platform_uid = uid or account.platform_uid
         if self.platform=='youtube' and uid:
             account.channel_id = uid
-        account.login_status = 'AUTHORIZED'
-        account.last_auth_time = time.strftime('%Y-%m-%d %H:%M:%S')
         try:
             self.repository.save(account)
         except (OSError,ValueError) as error:
@@ -836,7 +882,7 @@ class PlatformAccountPanel(QWidget):
         index=self.accounts.findData(account.account_id)
         if index>=0: self.accounts.setItemText(index,self.account_label(account))
         self._accounts = [account if a.account_id==account.account_id else a for a in self._accounts]
-        self.logs.appendPlainText(f'[平台昵称] 已获取：{identity["nickname"]}；账号ID与浏览器目录保持原值')
+        self.logs.appendPlainText(f'[平台昵称] 已获取：{identity["nickname"]}；登录状态仍由实际入口检查决定，账号ID与浏览器目录保持原值')
         if self.current() and self.current().account_id==account.account_id:
             self.load_current()
         return True
@@ -902,14 +948,13 @@ class PlatformAccountPanel(QWidget):
         account = self.current()
         self.dialog = ChannelProbeDialog(account,self.repository.profile(account),self.store.root/'dom_reports',self)
         self.dialog.worker.event_logged.connect(self.controller.receive_log_event)
+        self.dialog.worker.account_state_changed.connect(self.controller.receive_account_state)
         self.dialog.identity_found.connect(lambda result:self.apply_identity(account,result))
         self.dialog.custom_nickname_requested.connect(lambda:self.set_custom_nickname(account=account))
         self.dialog.worker.captured.connect(self.refresh_dom_state)
         self.dialog.finished.connect(self.refresh_dom_state)
         def confirmed():
-            if account.login_status!='AUTHORIZED':
-                account.login_status='USER_CONFIRMED'
-                self.repository.save(account)
+            self.logs.appendPlainText('[人工核对] 已记录核对操作；仍需实际入口检查，不改写登录检查结果')
             if self.current() and self.current().account_id==account.account_id:
                 self.load_current()
         self.dialog.login_confirmed.connect(confirmed)

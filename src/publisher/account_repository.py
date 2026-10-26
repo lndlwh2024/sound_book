@@ -62,6 +62,30 @@ class PlatformAccountRepository:
         else:
             self.store.delete(account)
 
+    def set_login_status(self,platform,account_id,status,*,checked_at=None):
+        """Persist only live authentication fields, without editing quota/config."""
+        if platform=='douyin':
+            original=self.douyin_manager.get_account(account_id)
+            if original is None:return None
+            old=original.status,original.last_auth_time
+            original.status=status
+            if checked_at is not None:original.last_auth_time=checked_at
+            if not self.douyin_manager.update_account(original):
+                original.status,original.last_auth_time=old
+                raise OSError('抖音登录检查结果保存失败')
+            return next((a for a in self.accounts(platform) if a.account_id==account_id),None)
+        original=next((a for a in self.store.for_channel(platform) if a.account_id==account_id),None)
+        if original is None:return None
+        old=original.login_status,original.last_auth_time
+        original.login_status=status
+        if checked_at is not None:original.last_auth_time=checked_at
+        try:
+            self.store.save()
+        except Exception:
+            original.login_status,original.last_auth_time=old
+            raise
+        return original
+
     def sync_nickname(self, platform, account_id, nickname):
         """Update just the live stable-ID account; never recreate removed accounts."""
         from .identity import validated_custom_nickname

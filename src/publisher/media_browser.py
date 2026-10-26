@@ -66,6 +66,14 @@ def launch_media_context(playwright, user_data_dir, **kwargs):
 
 
 def open_persistent_context(chromium,user_data_dir,**options):
+    from .account_batch_session import current_account_session
+    batch=current_account_session()
+    if batch and not batch.closing:
+        existing=batch.existing(user_data_dir)
+        if existing is not None:
+            return existing
+        chromium=batch.runtime().chromium
+        options['page_timing_log']=batch.emit
     page_timing_log=options.pop('page_timing_log',None)
     options.setdefault('timeout',30000)
     context=chromium.launch_persistent_context(str(user_data_dir),**options)
@@ -73,7 +81,10 @@ def open_persistent_context(chromium,user_data_dir,**options):
         if callable(page_timing_log):
             from .page_dwell import attach_page_dwell
             attach_page_dwell(context,page_timing_log)
-        return prepare_persistent_context(context,user_data_dir)
+        result=prepare_persistent_context(context,user_data_dir)
+        if batch and not batch.closing:
+            batch.register(result,user_data_dir)
+        return result
     except Exception:
         # A normalization failure must not leave an unreturned browser owning
         # the account directory and blocking its next login/upload attempt.
@@ -146,6 +157,10 @@ def browser_session_metrics(context):
 
 def close_media_context(context):
     """Restore authentication next time, without reopening old upload documents."""
+    from .account_batch_session import current_account_session, borrowed_batch_context
+    if borrowed_batch_context(context):
+        current_account_session().release_listeners()
+        return
     try:
         from .page_dwell import finish_page_dwell
         finish_page_dwell(context,'浏览器结束（关闭前）')

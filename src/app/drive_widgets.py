@@ -81,6 +81,9 @@ class SharedDriveWidget(QGroupBox):
         self.interval.setKeyboardTracking(False)
         self.interval.setToolTip('所有平台账号共用的云盘轮询间隔；立即检查仍可单独触发')
         row.addWidget(self.interval)
+        self.check_all_button=QPushButton('立即轮询')
+        self.check_all_button.setToolTip('立即检查全部已保存且有效的监听绑定；正在执行时合并为一次后续轮询，不保存其他未保存表单')
+        row.addWidget(self.check_all_button)
         row.addStretch()
         self.connected_button, self.disconnected_button = QPushButton('连接'), QPushButton('断开')
         for button in (self.connected_button,self.disconnected_button):
@@ -92,7 +95,7 @@ class SharedDriveWidget(QGroupBox):
                 QPushButton {padding:3px 7px;background:#315F89;color:#FFFFFF;}
                 QPushButton:disabled {background:#303743;color:#788493;border:1px solid #414956;}
             ''')
-        controls = (*controls,self.interval,self.interval_label)
+        controls = (*controls,self.interval,self.interval_label,self.check_all_button)
         height = max(36, *(control.sizeHint().height() for control in controls))
         for control in controls:
             control.setFixedHeight(height)
@@ -117,6 +120,7 @@ class SharedDriveWidget(QGroupBox):
         self.disconnected_button.setEnabled(not pending and connected)
         self.change_button.setVisible(True)
         self.change_button.setEnabled(connected and enabled and not pending)
+        self.check_all_button.setEnabled(connected and enabled and not pending)
 
 
 class DriveBindingWidget(QGroupBox):

@@ -309,7 +309,7 @@ def test_handoff_timeout_reports_action_and_cancel_does_not_hang(tmp_path,monkey
     worker._run_automated.assert_not_called()
 
 
-def test_completed_manual_login_verifies_and_persists_account_identity(tmp_path,monkeypatch):
+def test_completed_manual_login_persists_identity_without_implicit_authorization(tmp_path,monkeypatch):
     from src.publisher.account_repository import PlatformAccountRepository
     from src.publisher.douyin.config import DouyinAccountManager
     from src.app.platform_account_panel import PlatformAccountPanel
@@ -346,7 +346,7 @@ def test_completed_manual_login_verifies_and_persists_account_identity(tmp_path,
         reloaded=ChannelAccountStore(store.root).for_channel('youtube')[0]
         assert len(rounds)==2
         assert reloaded.account_id==account.account_id
-        assert reloaded.login_status=='AUTHORIZED'
+        assert reloaded.login_status!='AUTHORIZED'  # A nickname alone is not an upload-entry check.
         assert reloaded.channel_id==channel and reloaded.platform_nickname=='已登录测试频道'
         assert not worker.verify_after_manual and app
     finally:

@@ -5,6 +5,7 @@ from pathlib import Path
 from urllib.parse import urlsplit, parse_qs
 
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
+from .account_batch_session import account_playwright, bind_page_event
 from .browser_workflow import BrowserPublishWorkflow
 from .page_access import check_network_page
 from .channel_probe import ChannelDOMProbe
@@ -82,16 +83,16 @@ class YouTubeUploader(BrowserPublishWorkflow):
             message=f'[网络{kind}] {endpoint}：{reason}'
             self.network_errors.append(message)
             self.log(message)
-        page.on('requestfailed',lambda request:record('失败',request.url,request.failure))
-        page.on('response',lambda response:record('响应异常',response.url,'HTTP '+str(response.status))
+        bind_page_event(page,'requestfailed',lambda request:record('失败',request.url,request.failure))
+        bind_page_event(page,'response',lambda response:record('响应异常',response.url,'HTTP '+str(response.status))
                 if response.status>=400 else None)
-        page.on('pageerror',lambda error:self.log('[页面脚本异常] '+str(error)[:500]))
+        bind_page_event(page,'pageerror',lambda error:self.log('[页面脚本异常] '+str(error)[:500]))
         console_errors=set()
         def console(message):
             if message.type=='error' and message.text not in console_errors and len(console_errors)<20:
                 console_errors.add(message.text)
                 self.log('[浏览器控制台错误] '+message.text[:700])
-        page.on('console',console)
+        bind_page_event(page,'console',console)
 
     def open_saved_draft(self,page,info):
         identity=info.get('video_id','')
@@ -593,6 +594,7 @@ class YouTubeUploader(BrowserPublishWorkflow):
 
     def upload_single_video(self, video):
         context, page = None, None
+        self._publish_context_released=False
         self.last_outcome, self.submitted, self.video_id = 'FAILED', False, ''
         self.is_short=False
         self._video_selected,self._publish_armed,self._upload_activity_seen=False,False,False
@@ -611,7 +613,7 @@ class YouTubeUploader(BrowserPublishWorkflow):
             if self.account.visibility not in ('public', 'private', 'unlisted'):
                 raise PlatformRejected('CONFIG_REQUIRED', '公开范围配置无效')
             self.profile.mkdir(parents=True, exist_ok=True)
-            with sync_playwright() as p:
+            with account_playwright(sync_playwright) as p:
                 try:
                     context = launch_youtube_context(p, self.profile, headless=self.headless,
                         viewport={'width': 1440, 'height': 900}, timeout=30000,page_timing_log=self.log)
@@ -699,7 +701,7 @@ class YouTubeUploader(BrowserPublishWorkflow):
         self.video_id = info['video_id']
         self.is_short=bool(info.get('is_short'))
         confirmed = False
-        with sync_playwright() as p:
+        with account_playwright(sync_playwright) as p:
             context = launch_youtube_context(p, self.profile, headless=self.headless,
                 viewport={'width': 1440, 'height': 900}, timeout=30000,page_timing_log=self.log)
             self.log(youtube_runtime_summary(context, self.profile))

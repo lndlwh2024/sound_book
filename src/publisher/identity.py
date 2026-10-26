@@ -13,7 +13,7 @@ def validated_custom_nickname(value):
     return value
 
 
-def sync_current_nickname(page, account, platform, log=lambda message: None, changed=None):
+def sync_current_nickname(page, account, platform, log=lambda message: None, changed=None, *, passive=True):
     """Nickname is optional display metadata, never an upload credential."""
     def note(message):
         try:
@@ -22,7 +22,7 @@ def sync_current_nickname(page, account, platform, log=lambda message: None, cha
             pass
     try:
         identity = extract_platform_identity(page, platform)
-        if not identity and platform == 'douyin':
+        if not identity and platform == 'douyin' and not passive:
             identity = refresh_platform_identity(page, platform, seconds=.4)
         if not identity:
             return None

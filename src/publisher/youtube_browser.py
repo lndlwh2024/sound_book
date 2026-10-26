@@ -128,6 +128,12 @@ def launch_youtube_context(playwright, profile, **kwargs):
     if channel is None:
         from .media_browser import launch_media_context
         return launch_media_context(playwright,str(profile), **kwargs)
+    from .account_batch_session import current_account_session
+    batch=current_account_session()
+    if batch and not batch.closing:
+        existing=batch.existing(browser_profile(profile,channel))
+        if existing is not None:
+            return existing
     browser = next((b for b in installed_browsers() if b.channel == channel), None)
     if browser is None:
         raise RuntimeError('YouTube 专用'+({'chrome':'Chrome', 'msedge':'Edge'}[channel])+

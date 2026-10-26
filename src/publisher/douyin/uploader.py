@@ -18,6 +18,7 @@ from urllib.parse import urlsplit
 from playwright.sync_api import sync_playwright, BrowserContext, Page, TimeoutError as PlaywrightTimeoutError
 
 from ..browser_workflow import BrowserPublishWorkflow
+from ..account_batch_session import account_playwright, bind_page_event
 from ..archive import archive_completed_file
 from ..titles import resolve_title, resolve_series
 from .models import DouyinAccountConfig, PublishLedgerRecord
@@ -106,6 +107,7 @@ class DouyinUploader(BrowserPublishWorkflow):
         self.supports_upload_boundary = True
         self._network_events = []
         self.account_limit_reason = None
+        self.account_block = None
         self._video_selected = False
         self._upload_activity_seen = False
         self._publish_armed = False
@@ -154,8 +156,8 @@ class DouyinUploader(BrowserPublishWorkflow):
                          'error': request.failure}
                 self._network_events.append(event)
                 self._progress(f"[网络诊断] {event['url']}：{request.failure}")
-        page.on('response', on_response)
-        page.on('requestfailed', on_failed)
+        bind_page_event(page,'response', on_response)
+        bind_page_event(page,'requestfailed', on_failed)
 
     def _navigate_upload_page(self, page):
         self._progress('正在打开上传页：主文档响应最多45秒，实际上传控件最多90秒')
@@ -168,10 +170,7 @@ class DouyinUploader(BrowserPublishWorkflow):
         if urlsplit(page.url).hostname != 'creator.douyin.com':
             raise RuntimeError('45秒内未进入抖音创作者中心，未选择文件；请检查网络或重新登录')
         def upload_ready():
-            if 'login' in page.url.lower():
-                self.account.status='EXPIRED'
-                self.last_outcome='AUTH_REQUIRED'
-                raise RuntimeError('抖音登录已失效，未选择文件，请重新登录')
+            self._check_login_page(page)
             from ..page_structure import file_input_selector
             inputs=page.locator(file_input_selector('douyin'))
             return any('image' not in (inputs.nth(i).get_attribute('accept') or '').lower()
@@ -193,9 +192,19 @@ class DouyinUploader(BrowserPublishWorkflow):
             from ..page_access import login_page_message
             login_message=login_page_message(page,'douyin')
             if login_message:
+                from ..page_access import LoginObservation
+                observation=getattr(self,'_login_observation',None)
+                if observation is None:
+                    observation=self._login_observation=LoginObservation(8)
+                if not observation.observe(page,login_message):
+                    raise PlaywrightTimeoutError('正在等待抖音自动恢复登录，尚未确认失效')
                 self.account.status='EXPIRED'
+                self.account_block={'status':'AUTH_REQUIRED','message':login_message}
                 self.last_outcome='AUTH_REQUIRED'
                 raise RuntimeError(login_message)
+            observation=getattr(self,'_login_observation',None)
+            if observation is not None:
+                observation.observe(page,'')
 
     def _check_duration_notice(self, page):
         self._check_login_page(page)
@@ -280,12 +289,15 @@ class DouyinUploader(BrowserPublishWorkflow):
         self.last_outcome = "FAILED"
         self._network_events = []
         self.account_limit_reason = None
+        self.account_block = None
         self._video_selected = False
         self._upload_activity_seen = False
         self._publish_armed = False
         self._publish_result = None
+        self._login_observation = None
 
         logger.info(f"开始上传视频: {video_path.name} | 归属书名: 《{book_name}》 | 集数: 第{episode_num}集")
+        self._publish_context_released = False
 
         try:
             self._check_stop()
@@ -298,7 +310,7 @@ class DouyinUploader(BrowserPublishWorkflow):
             else:
                 self._progress('[时长检查] 本地时长读取失败，将检查平台提示')
             self._progress("正在启动浏览器（启动调用最长等待 10 秒）")
-            with sync_playwright() as p:
+            with account_playwright(sync_playwright) as p:
                 context, page = None, None
                 try:
                     context: BrowserContext = DouyinBrowserManager.create_persistent_context(
@@ -321,10 +333,7 @@ class DouyinUploader(BrowserPublishWorkflow):
                     self._pause(page, 3000)
 
                     # 检查是否处于登录状态
-                    if "login" in page.url.lower():
-                        self.account.status = "EXPIRED"
-                        self.last_outcome = 'AUTH_REQUIRED'
-                        return False, "账号登录态已失效，请重新扫码登录", None
+                    self._check_login_page(page)
 
                     # 步骤 1: 注入视频文件
                     from ..identity import sync_current_nickname
@@ -388,7 +397,10 @@ class DouyinUploader(BrowserPublishWorkflow):
                 finally:
                     if context and (page is None or not page.is_closed()):
                         if not (self._publish_result and str(self._publish_result.get('code')) == '0'):
-                            self._capture_failure_page(page, '抖音上传退出前未确认成功')
+                            reason=('[AUTH_REQUIRED] '+self.account_block['message']
+                                if self.account_block and self.account_block['status']=='AUTH_REQUIRED'
+                                else '抖音上传退出前未确认成功')
+                            self._capture_failure_page(page, reason)
                         try:
                             self._close_publish_context(context, page, publish_submitted)
                         except Exception:

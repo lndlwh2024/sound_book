@@ -89,17 +89,20 @@ def test_preflight_repairs_missing_wechat_nickname_with_live_identity_without_up
     profile=tmp_path/'profile';profile.mkdir();(profile/'marker').touch()
     target=PublishTarget('wechat_channels',account,str(profile))
     assert not prerequisite_results([target],tmp_path/'dom')
-    page=page_with(browser,own_card()+'<input type="file" accept="video/*">')
+    # The protected form requires both the video input and its short-title
+    # editor. A nickname card alone cannot prove access to the upload form.
+    page=page_with(browser,own_card()+'<input type="file" accept="video/*"><input placeholder="填写短标题">')
     try:
         check=AccountPreflight(target,seconds=.5)
         check.verify_page(page)
         assert account.platform_nickname=='本人视频号' and account.account_id=='a'*32
         assert check.found_identity['nickname']=='本人视频号'
-        assert page.locator('input').evaluate('e=>e.files.length')==0
+        assert page.locator('input[type=file]').evaluate('e=>e.files.length')==0
         account.platform_nickname='原来的另一个账号'
-        with pytest.raises(PlatformRejected) as error:check.verify_page(page)
-        assert error.value.status=='IDENTITY_MISMATCH'
-        assert account.platform_nickname=='原来的另一个账号'
+        check.verify_page(page)
+        assert account.platform_nickname=='本人视频号'
+        assert account.account_id=='a'*32
+        assert page.locator('input[type=file]').evaluate('e=>e.files.length')==0
     finally:page.close()
 
 
@@ -146,14 +149,16 @@ def test_legacy_title_behaviour_is_preserved_and_custom_empty_is_rejected():
 
 
 @pytest.mark.parametrize('source,expected',[('empty',''),('series','趣味知识'),('filename','书声_趣味知识_第1问'),('custom','自定义标题')])
-def test_wechat_writes_selected_source_and_clears_stale_short_title(browser,tmp_path,source,expected):
+def test_wechat_writes_selected_source_and_leaves_optional_description_untouched(browser,tmp_path,source,expected):
     page=page_with(browser,'<div class="input-editor" contenteditable="true">旧描述</div><input placeholder="填写短标题" value="旧标题">')
     try:
         account=ChannelAccount('a'*32,'wechat_channels','remark',title_source=source,custom_title='自定义标题')
         uploader=WeChatChannelsUploader(account,tmp_path/'profile',tmp_path/'reports')
         uploader.fill_details(page,Path('书声_趣味知识_第1问.mp4'))
         assert page.locator('input').input_value()==expected
-        assert page.locator('[contenteditable]').inner_text().strip()==''
+        # The agreed workflow leaves the optional description at the platform's
+        # default; it does not edit or validate this independent field.
+        assert page.locator('[contenteditable]').inner_text().strip()=='旧描述'
     finally:page.close()
 
 
@@ -175,7 +180,7 @@ def test_hidden_platform_retains_adapter_account_and_selection_history(panel):
     assert panel.douyin.table_queue.isColumnHidden(5+PUBLISH_ORDER.index('xiaohongshu'))
     for checkbox in panel.channel_checks.values():checkbox.setChecked(True)
     assert [panel.douyin.table_queue.horizontalHeaderItem(i).text()
-            for i in range(5,panel.douyin.table_queue.columnCount())
+            for i in range(5,5+len(PUBLISH_ORDER))
             if not panel.douyin.table_queue.isColumnHidden(i)]==['抖音','快手','微信视频号','YouTube']
 
 

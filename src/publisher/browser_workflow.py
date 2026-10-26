@@ -46,8 +46,12 @@ class BrowserPublishWorkflow:
 
     def _close_publish_context(self, context, page, submitted=False):
         """Keep a submitted page alive while its final browser events settle."""
+        if getattr(self, '_publish_context_released', False):
+            return
         if submitted and page and not page.is_closed():
-            self._progress('[关闭延迟] 已点击发布，页面保留5秒后关闭')
+            from .account_batch_session import borrowed_batch_context
+            self._progress('[发布后等待] 已点击发布，保留页面5秒等待最后事件；'+
+                           ('随后继续本账号批次' if borrowed_batch_context(context) else '随后关闭浏览器'))
             try:
                 # Do not re-run upload/rejection checks or cancel confirmed success.
                 page.wait_for_timeout(5000)
@@ -55,6 +59,7 @@ class BrowserPublishWorkflow:
                 self._progress('[关闭延迟] 页面已退出或连接断开：'+str(error)[:150])
         from .media_browser import close_media_context
         close_media_context(context)
+        self._publish_context_released = True
 
     def _save_diagnostics(self, page, stage, reason):
         self._progress(f'[阶段失败] {stage}：{reason}')

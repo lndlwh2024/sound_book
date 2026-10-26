@@ -1,6 +1,30 @@
 """Browser error documents are network evidence, never proof of expired login."""
 import re
+import time
 from urllib.parse import urlsplit
+
+
+class LoginObservation:
+    """Require a persistent login destination/prompt, not a transient SPA shell."""
+    def __init__(self, seconds=8):
+        self.seconds=max(0,float(seconds))
+        self.candidate=None
+
+    def observe(self,page,message):
+        if not message:
+            self.candidate=None
+            return False
+        address=urlsplit(page.url)
+        key=(address.hostname,address.path,message)
+        now=time.monotonic()
+        if self.candidate is None or self.candidate[0]!=key:
+            self.candidate=(key,now)
+        return now-self.candidate[1]>=self.seconds
+
+
+def transient_network_error(error):
+    return bool(re.search(r'net::ERR_(?:INTERNET_DISCONNECTED|CONNECTION_(?:RESET|CLOSED|TIMED_OUT|FAILED)|'
+        r'NETWORK_CHANGED|TIMED_OUT|PROXY_CONNECTION_FAILED|TUNNEL_CONNECTION_FAILED)',str(error),re.I))
 
 
 def transient_navigation_error(error):

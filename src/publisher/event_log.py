@@ -15,9 +15,10 @@ _lock = threading.RLock()
 
 
 def redact(text):
+    # Remove bearer values before the key/value pattern can consume their prefix.
+    text = re.sub(r'(?i)Bearer\s+[^\s,;&}"\']+', 'Bearer [已隐藏]', str(text))
     text = re.sub(r'''(?i)(["']?(?:access_token|refresh_token|id_token|client_secret|authorization|cookie)["']?\s*[:=]\s*)["']?[^\s,;&}"']+''',
                   r'\1[已隐藏]', str(text))
-    text = re.sub(r'(?i)Bearer\s+\S+', 'Bearer [已隐藏]', text)
     def url(match):
         try:
             parsed = urlsplit(match.group())

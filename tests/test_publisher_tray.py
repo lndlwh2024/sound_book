@@ -15,20 +15,17 @@ def install_fake_tray(window, monkeypatch):
     return tray
 
 
-def test_close_hides_window_without_stopping_running_work(window,monkeypatch):
+def test_explicit_minimize_hides_without_stopping_running_work(window,monkeypatch):
     tray = install_fake_tray(window,monkeypatch)
     window.panel.state.intent='RUNNING'
     window.panel.prepare_shutdown=MagicMock(return_value=True)
     window.show();QApplication.processEvents()
-    assert not window.close()
+    window.minimize_to_tray()
     assert not window.isVisible() and not window.closing
     window.panel.prepare_shutdown.assert_not_called()
     assert window.panel.state.intent=='RUNNING'
-    tray.showMessage.assert_called_once()
     window.show_main_window();QApplication.processEvents()
     assert window.isVisible()
-    window.close()
-    tray.showMessage.assert_called_once()
     # Restore the real method for the fixture's cleanup.
     del window.panel.prepare_shutdown
 
@@ -71,3 +68,13 @@ def test_no_tray_does_not_hide_an_inaccessible_background_window(window,monkeypa
     window.show()
     window.close()
     assert window.closing
+
+
+def test_window_x_really_exits_even_when_tray_is_available(window,monkeypatch):
+    tray=install_fake_tray(window,monkeypatch)
+    window.panel.state.intent='STOPPED'
+    window.show();QApplication.processEvents()
+    window.close()
+    assert window.closing and not window.isVisible()
+    assert window.shutdown_controller.started is not None
+    tray.hide.assert_called_once()

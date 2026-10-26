@@ -3,6 +3,7 @@ import argparse
 import json
 import os
 import subprocess
+import shutil
 import tempfile
 import time
 from pathlib import Path
@@ -13,9 +14,12 @@ def main():
     parser.add_argument('--package', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
     args = parser.parse_args()
-    executable = args.package.resolve() / 'ShuShengPublisher.exe'
-    with tempfile.TemporaryDirectory(prefix='书声冷启动测试_') as folder:
+    args.output.parent.mkdir(parents=True,exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix='书声冷启动测试_',dir=args.output.parent.resolve()) as folder:
         root = Path(folder)
+        copied=root/'old-package'
+        shutil.copytree(args.package.resolve(),copied)
+        executable=copied/'ShuShengPublisher.exe'
         environment = dict(os.environ)
         for name in ('PYTHONHOME', 'PYTHONPATH', 'PLAYWRIGHT_BROWSERS_PATH', 'PLAYWRIGHT_NODEJS_PATH'):
             environment.pop(name, None)
@@ -44,13 +48,35 @@ def main():
             assert first.poll() is None and lock.exists(), 'Standalone GUI did not stay running'
             second = launch()
             assert second.wait(timeout=15) == 0 and first.poll() is None, 'Second instance was not rejected cleanly'
-            first.terminate()
-            first.wait(timeout=10)
+            def request_exit():
+                response=subprocess.run([str(executable),'--request-exit'],env=environment,cwd=root,
+                    creationflags=flags,timeout=15)
+                assert response.returncode==0,'Owned exit request was not accepted'
+            request_exit()
+            assert first.wait(timeout=25)==0,'Real GUI exit did not complete normally'
+            renamed=root/'renamed-package'
+            copied.rename(renamed)
+            executable=renamed/'ShuShengPublisher.exe'
             third = launch()
             time.sleep(4)
             assert third.poll() is None, 'Dead-process lock did not recover'
+            request_exit()
+            assert third.wait(timeout=25)==0,'Replacement instance did not exit normally'
+            assert renamed.resolve().relative_to(root.resolve()).parts
+            shutil.rmtree(renamed)
+            # The helper lives outside the old package, but its control-folder
+            # cwd must also be released before TemporaryDirectory cleans up.
+            control=root/'user/ShuShengPublisher/shutdown'
+            deadline=time.monotonic()+8
+            while time.monotonic()<deadline:
+                requests=list(control.glob('*/request.json'))
+                if len(requests)==2 and all((path.parent/'result.json').exists() for path in requests):break
+                time.sleep(.1)
+            assert len(requests)==2 and all((path.parent/'result.json').exists() for path in requests),'Exit helper did not finish'
+            time.sleep(.3)
             report['package_checks'] = {'clean_path':True,'empty_user_data':True,
-                'standalone_window':True,'single_instance':True,'dead_lock_recovery':True}
+                'standalone_window':True,'single_instance':True,'dead_lock_recovery':True,
+                'real_exit':True,'old_package_rename_delete':True,'replacement_instance':True}
         finally:
             for process in processes:
                 if process.poll() is None:

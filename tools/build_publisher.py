@@ -100,6 +100,8 @@ def main():
                    'docs/PUBLISHER_INDEPENDENT_CLOUD_20261025.md',
                    'docs/PUBLISHER_PAGE_TIMING_20261025.md',
                    'docs/PUBLISHER_NEXT_ITERATION_20261025.md',
+                   'docs/PUBLISHER_ACCOUNT_BATCH_EXIT_20261026.md',
+                   'docs/PUBLISHER_DELIVERY_20261026.md',
                    'requirements-publisher.txt', 'requirements-publisher-lock.txt'):
         shutil.copy2(ROOT/source, output/Path(source).name)
     (output/'自检.cmd').write_text('@echo off\r\ncd /d "%~dp0"\r\nstart /wait "" ShuShengPublisher.exe --self-check --output "%~dp0self-check.json"\r\nnotepad "%~dp0self-check.json"\r\n', encoding='utf-8')

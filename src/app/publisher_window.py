@@ -3,6 +3,7 @@ from PySide6.QtCore import QTimer
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QMainWindow, QSystemTrayIcon, QMenu, QStyle, QMessageBox
 from ..version import __version__
+from ..publisher.shutdown import ShutdownController
 from .publisher_workspace import PublisherWorkspace, PublisherPanel, PUBLISHER_STYLE
 
 
@@ -25,6 +26,7 @@ class PublisherWindow(QMainWindow):
         self.close_timer.timeout.connect(self.close)
         self._exit_requested = False
         self._tray_notice_shown = False
+        self.shutdown_controller = None
         self.tray = None
         self.setup_tray()
         QTimer.singleShot(1500, self.startup)
@@ -38,6 +40,7 @@ class PublisherWindow(QMainWindow):
         self.workspace.state_error = value
 
     def startup(self):
+        if self.closing:return
         return self.workspace.startup()
 
     def settings(self):
@@ -61,6 +64,7 @@ class PublisherWindow(QMainWindow):
         self.tray_status.setEnabled(False)
         menu.addSeparator()
         menu.addAction('打开主窗口', self.show_main_window)
+        menu.addAction('最小化到托盘', self.minimize_to_tray)
         menu.addAction('运行设置', self.open_tray_settings)
         menu.addAction('停止部署（云盘监听继续）', self.panel.stop_saved_tasks)
         menu.addSeparator()
@@ -78,6 +82,33 @@ class PublisherWindow(QMainWindow):
         self.showNormal()
         self.raise_()
         self.activateWindow()
+
+    def minimize_to_tray(self):
+        if self.tray and QSystemTrayIcon.isSystemTrayAvailable() and not self.closing:
+            self.hide()
+
+    def _shutdown_profiles(self):
+        from ..publisher.media_browser import media_browser_executable
+        from ..publisher.youtube_browser import selected_channel,browser_profile,installed_browsers
+        from ..publisher.platforms import CHANNELS
+        result=[]
+        media=media_browser_executable()
+        installed={browser.channel:browser.executable for browser in installed_browsers()}
+        for platform in CHANNELS:
+            for account in self.panel.repository.accounts(platform):
+                profile=self.panel.repository.profile(account)
+                channel=selected_channel(profile) if platform=='youtube' else None
+                if channel and channel in installed:
+                    result.append({'path':str(browser_profile(profile,channel)),'image':str(installed[channel])})
+                elif media:
+                    result.append({'path':str(profile),'image':str(media)})
+        return result
+
+    def _shutdown_inventory(self):
+        method=getattr(self.panel,'shutdown_inventory',None)
+        if callable(method):return method()
+        names=('worker','preflight_worker','cleanup_worker','snapshot_worker','drive_watch_worker','drive_auth_worker')
+        return [{'name':name,'running':bool(getattr(self.panel,name,None) and getattr(self.panel,name).isRunning())} for name in names]
 
     def open_tray_settings(self):
         self.show_main_window()
@@ -110,15 +141,9 @@ class PublisherWindow(QMainWindow):
         self.close()
 
     def closeEvent(self, event):
-        if not self.closing and not self._exit_requested and self.tray and QSystemTrayIcon.isSystemTrayAvailable():
-            event.ignore()
-            self.hide()
-            if not self._tray_notice_shown:
-                self.tray.showMessage('书声发布版仍在运行',
-                    '云盘监听和部署继续。点击托盘图标打开窗口，右键菜单可停止任务或退出。',
-                    QSystemTrayIcon.Information, 5000)
-                self._tray_notice_shown = True
-            return
+        # X and the tray Exit command both mean a real exit. Hiding is an
+        # explicit tray action, so a user cannot mistake a hidden owner for exit.
+        stopped=None
         if not self.closing:
             if self.panel.state.intent == 'RUNNING':
                 answer = QMessageBox(self)
@@ -136,13 +161,23 @@ class PublisherWindow(QMainWindow):
                     self.panel.state.intent = 'STOPPED'
                     self.panel.save_state()
             self.closing = True
-        if self.panel.prepare_shutdown():
+            try:
+                profiles=self._shutdown_profiles()
+            except Exception:
+                profiles=[]
+            self.shutdown_controller=ShutdownController(self.directory,profiles)
+            stopped=self.panel.prepare_shutdown()
+            self.shutdown_controller.begin()
+            if not self.isVisible():self.showNormal()
+        if stopped is None:stopped=self.panel.prepare_shutdown()
+        ready=(self.shutdown_controller.poll(self._shutdown_inventory()) if self.shutdown_controller else stopped)
+        if stopped and ready:
             self.close_timer.stop()
             if self.tray:
                 self.tray_timer.stop()
                 self.tray.hide()
             event.accept()
         else:
-            self.panel.show_status('正在安全关闭后台任务；请等待在途操作返回')
+            self.panel.show_status(self.shutdown_controller.status() if self.shutdown_controller else '正在安全关闭后台任务')
             self.close_timer.start()
             event.ignore()

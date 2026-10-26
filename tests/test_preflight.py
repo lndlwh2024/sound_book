@@ -224,7 +224,7 @@ def test_missing_prerequisites_never_launches_browser_or_creates_task_state(tmp_
     assert not (tmp_path/'publish_reports').exists()
 
 
-def test_one_failure_blocks_whole_plan_without_opening_later_platforms(tmp_path,monkeypatch):
+def test_one_failure_preserves_other_accounts_and_checks_later_platforms(tmp_path,monkeypatch):
     chosen = [target(tmp_path,p) for p in CHANNELS]
     for t in chosen:
         capture(tmp_path,t)
@@ -236,9 +236,13 @@ def test_one_failure_blocks_whole_plan_without_opening_later_platforms(tmp_path,
     monkeypatch.setattr(preflight,'sync_playwright',MagicMock())
     monkeypatch.setattr(preflight.AccountPreflight,'check',check)
     worker = preflight.DeploymentPreflightWorker(chosen,tmp_path)
+    delivered=[]
+    worker.result_ready.connect(delivered.append)
     chosen[0].account.account_name='检查中改备注'
     worker.run()
-    assert calls == [t.key for t in chosen[:3]]
+    assert calls == [t.key for t in chosen]
+    assert [result.key for result in delivered] == calls
+    assert [result.status for result in delivered] == ['SUCCESS','SUCCESS','AUTH_REQUIRED','SUCCESS','SUCCESS']
     assert '快手 / 备注' in preflight.failure_message(worker.results)
     assert worker.targets[0].account.account_name=='备注'
     assert not (tmp_path/'target_ledger.json').exists()

@@ -61,6 +61,12 @@ def export_diagnostics(root, log_folder, destination, task_id=None, runtime_cont
     log_folder.relative_to(root)
     cutoff = datetime.now(CHINA_TIME).isoformat()
     warnings, inventory = [], []
+    cloud_scan=None
+    try:
+        from .cloud_diagnostics import latest_cloud_scan
+        cloud_scan=latest_cloud_scan(root)
+    except (OSError,ValueError) as error:
+        warnings.append({'error':'最新独立云盘日志不可读取：'+str(error)})
     log_paths = [p for p in sorted(log_folder.glob('publisher-events*.jsonl')) if _regular(p, root)]
     metadata, selection = {}, 'explicit_active_task' if task_id else 'latest_task'
     latest = root/'.diagnostics/latest-task.json'
@@ -81,7 +87,7 @@ def export_diagnostics(root, log_folder, destination, task_id=None, runtime_cont
             metadata = {'task_id': task_id, 'started_at': starts[task_id], 'status': 'UNKNOWN'}
             selection = 'legacy_first_retained_event'
             warnings.append({'error': '旧版本没有任务索引，按各任务最早保留日志判定；开始时间可能受历史轮转影响'})
-    if not task_id and isinstance(runtime_context,dict) and runtime_context.get('cloud_watch'):
+    if not task_id and (cloud_scan or isinstance(runtime_context,dict) and runtime_context.get('cloud_watch')):
         from ..version import __version__
         task_id='cloud-snapshot-'+uuid.uuid4().hex
         metadata={'task_id':task_id,'started_at':cutoff,'status':'SNAPSHOT','app_version':__version__}
@@ -132,7 +138,7 @@ def export_diagnostics(root, log_folder, destination, task_id=None, runtime_cont
     if legacy_logs:
         collect(max(legacy_logs, key=lambda p: p.name))
     records.sort(key=lambda e: (e.get('timestamp', ''), e.get('id', '')))
-    if not records:
+    if not records and not cloud_scan:
         warnings.append({'error': '本任务没有可读的日志，未以历史任务日志补齐'})
 
     captures, results = defaultdict(list), []
@@ -158,11 +164,45 @@ def export_diagnostics(root, log_folder, destination, task_id=None, runtime_cont
             return
         payload[name] = content
         if category:
-            counts[category] += 1
+            counts[category] = counts.get(category,0)+1
     def add_json(name, data, category=None):
-        add(name, json.dumps(_clean(data), ensure_ascii=False, indent=2).encode('utf-8'), category)
+        from .cloud_diagnostics import clean_cloud_diagnostic
+        add(name, json.dumps(clean_cloud_diagnostic(data), ensure_ascii=False, indent=2).encode('utf-8'), category)
     if records:
         add('task-events.jsonl', ''.join(json.dumps(_clean(e), ensure_ascii=False)+'\n' for e in records).encode('utf-8'), 'normal_logs')
+    # Only sanitized comparisons tied to this task; never walk auth/profile history.
+    for path in sorted(task_folder.glob('auth-diff-*.json')):
+        if not _regular(path,root):continue
+        try:
+            data=_read_json(path)
+            if data.get('task_id') not in (None,task_id) or data.get('captured_at','')>cutoff:continue
+            add_json('auth/'+path.name,data,'auth_summaries')
+        except (OSError,ValueError) as error:
+            warnings.append({'file':path.name,'error':str(error)})
+    if cloud_scan:
+        cloud_meta,cloud_folder=cloud_scan
+        add_json('cloud-scan-summary.json',cloud_meta)
+        for name in ('events.previous.jsonl','events.jsonl'):
+            path=cloud_folder/name
+            if not _regular(path,root):continue
+            rows=[]
+            with path.open('rb') as stream:
+                remaining=path.stat().st_size
+                while remaining>0:
+                    line=stream.readline(remaining);remaining-=len(line)
+                    if not line:break
+                    try:
+                        event=json.loads(line.decode('utf-8-sig'))
+                        if (event.get('cloud_scan_id')==cloud_meta['scan_id']
+                                and event.get('timestamp','')<=cutoff):
+                            from .cloud_diagnostics import clean_cloud_diagnostic
+                            rows.append(clean_cloud_diagnostic(event))
+                    except (ValueError,UnicodeError,AttributeError):continue
+            if rows:
+                add('cloud/'+name,''.join(json.dumps(e,ensure_ascii=False)+'\n' for e in rows).encode('utf-8'),'cloud_logs')
+        if not counts.get('cloud_logs'):
+            warnings.append({'error':'最新一次独立云盘扫描尚无可读原始日志；仅导出该次扫描摘要，未使用历史扫描补齐',
+                             'cloud_scan_id':cloud_meta['scan_id']})
     omitted = 0
     for group in captures.values():
         # A capture can exist in both staging and its completed archive.
@@ -214,6 +254,8 @@ def export_diagnostics(root, log_folder, destination, task_id=None, runtime_cont
     summary = {'task': metadata, 'snapshot_at': cutoff, 'exporter_version': __version__, 'failures': summary_results}
     from .runtime_diagnostics import runtime_identity
     summary['runtime']=runtime_identity()
+    if cloud_scan:
+        summary['cloud_scan']={k:cloud_scan[0].get(k) for k in ('scan_id','started_at','finished_at','status','reason')}
     if runtime_context is not None:
         summary['runtime_context']=runtime_context
     if metadata.get('app_version') and metadata['app_version']!=__version__:
@@ -239,10 +281,11 @@ def export_diagnostics(root, log_folder, destination, task_id=None, runtime_cont
                 'selection': selection, 'task': metadata, 'counts': counts,
                 'capture_retention': '每个平台/账号/文件/失败阶段仅保留最后两次截图与DOM',
                 'omitted_capture_count': omitted, 'warnings': warnings, 'missing_failure_archives': missing,
-                'files': inventory, 'privacy': '仅本任务日志、摘要、失败证据及必要的运行程序/云盘监听状态；不包含完整账号配置、Cookie、令牌或浏览器目录'}
+                'files': inventory, 'privacy': '仅本任务日志、摘要、失败证据、脱敏认证对比和最新一次独立云盘扫描日志；不包含完整账号配置、Cookie、令牌、密钥或浏览器目录'}
             archive.writestr('diagnostic-manifest.json', json.dumps(_clean(manifest), ensure_ascii=False, indent=2))
             archive.writestr('诊断包说明.txt', '书声最新任务诊断包\n任务编号：'+task_id+'\n'
                 'task-events.jsonl 为本次唯一任务日志；task-summary.json 为任务摘要。\n'
+                'cloud/仅含cloud-scan-summary.json所标识的最新一次独立云盘扫描原始日志，不混入其他扫描；auth/仅为本任务脱敏认证对比。\n'
                 '每个平台、账号、文件、失败阶段仅保留最后两次截图与DOM，运行中导出为当时快照。\n'
                 '缺失信息见 diagnostic-manifest.json；不会使用其他任务证据补齐。\n')
         temporary.replace(destination)

@@ -59,6 +59,13 @@ class DriveJournal:
             db.execute('''CREATE TABLE IF NOT EXISTS file_provenance (
                 identity TEXT PRIMARY KEY, source_day TEXT NOT NULL DEFAULT '',
                 downloaded_at TEXT NOT NULL DEFAULT '', size_bytes INTEGER, mtime_ns INTEGER)''')
+            db.execute('''CREATE TABLE IF NOT EXISTS manual_holds (
+                hold_id TEXT PRIMARY KEY,binding TEXT NOT NULL,cloud_id TEXT NOT NULL,sha256 TEXT NOT NULL,
+                md5 TEXT NOT NULL,size_bytes INTEGER NOT NULL,original_path TEXT NOT NULL,held_path TEXT NOT NULL,
+                source_day TEXT NOT NULL DEFAULT '',target_keys TEXT NOT NULL,created_at TEXT NOT NULL,
+                active INTEGER NOT NULL DEFAULT 1,released_at TEXT NOT NULL DEFAULT '')''')
+            db.execute('CREATE INDEX IF NOT EXISTS files_scope_state ON files(binding,state,cloud_id)')
+            db.execute('CREATE INDEX IF NOT EXISTS manual_hold_content ON manual_holds(binding,md5,size_bytes,active)')
 
     def pin_legacy_account(self, cloud_account):
         """Freeze the verified pre-upgrade owner before any future reconnection."""
@@ -328,6 +335,7 @@ class DriveIngestor:
 
     def poll(self, target):
         self.last_scans=[]
+        self.cloud_account=''
         binding = DriveBinding.read(target.account.drive_binding)
         if not binding.enabled or not target.account.enabled:
             return
@@ -344,6 +352,8 @@ class DriveIngestor:
         if self.stopped():
             raise InterruptedError()
         self.journal.prepare_account(self.cloud_account)
+        from .manual_hold import discover_manual_holds
+        discover_manual_holds(self.root,[target],stopped=self.stopped,log=self.log,cloud_account=self.cloud_account)
         today = self.clock().astimezone(CHINA_TIME).date()
         day = self.journal.resume_day(target, today, self.cloud_account)
         self.journal.save_scan_day(target, day, self.cloud_account)
@@ -404,6 +414,13 @@ class DriveIngestor:
                 if len(listing['pending_files'])<30:
                     listing['pending_files'].append({'name':file['name'],'reason':'云盘返回不可下载权限'})
                 self.log(f'[云盘不可下载] {target.key} / {file["name"]}')
+                continue
+            from .manual_hold import find_cloud_manual_hold
+            hold=find_cloud_manual_hold(self.root,target,self.cloud_account,file)
+            if hold:
+                file_state.update(journal_state='MANUAL_HOLD',hold_id=hold['hold_id'],held_path=hold['held_path'])
+                self.log(f'[云盘人工暂停] {target.key} / {file["name"]}；隔离编号={hold["hold_id"]}；'
+                         '同云盘账号、目录、本地目录及内容，不下载、不计发布成功；请从恢复人工暂停入口明确恢复')
                 continue
             entry = self.journal.reserve(target, file, self.cloud_account)
             self.journal.record_source_day(entry['identity'], day)
@@ -536,6 +553,10 @@ class DriveWatchWorker(QThread):
         self.pause_reason='等待启动'
         self.scan_history=[]
         self.active_scan=None
+        self._cloud_scan=None
+        self.cloud_account=''
+        self.cloud_account_generation=None
+        self.check_all_pending=False
 
     def emit_log(self,message):
         self.log.emit(message)
@@ -544,7 +565,12 @@ class DriveWatchWorker(QThread):
             'account_name':target.account.account_name} if target else {})
         context.update(platform='common',category='cloud')
         context['task_id']=getattr(self,'task_id','')
-        self.event_logged.emit(self.events.write(message,**context))
+        if self._cloud_scan:context['cloud_scan_id']=self._cloud_scan.scan_id
+        event=self.events.write(message,**context)
+        if self._cloud_scan:
+            try:self._cloud_scan.record(event)
+            except OSError:pass  # The ordinary cloud log still remains available.
+        self.event_logged.emit(event)
 
     def configure(self, targets, paused=False, poll_seconds=15, pause_reason=''):
         DriveBinding.read({'poll_seconds':poll_seconds})
@@ -557,6 +583,8 @@ class DriveWatchWorker(QThread):
             self.targets = [replace(t, account=replace(t.account, drive_binding=dict(t.account.drive_binding))) for t in targets]
             keys={t.key for t in self.targets}
             self.next_poll={key:due for key,due in self.next_poll.items() if key[0] in keys}
+            self.immediate.intersection_update(keys)
+            if not keys:self.check_all_pending=False
             self.paused = paused
             self.poll_seconds = poll_seconds
             self.pause_reason=pause_reason or ('监听已暂停' if paused else '')
@@ -567,6 +595,14 @@ class DriveWatchWorker(QThread):
         with self.lock:
             self.immediate.add(key)
         self.wake.set()
+
+    def check_all_now(self):
+        """Queue one shared request; never interrupt or parallelize an active round."""
+        with self.lock:
+            if self.paused or not self.targets or self.check_all_pending:return False
+            self.check_all_pending=True
+        self.wake.set()
+        return True
 
     def stop(self):
         self.stopping.set()
@@ -579,6 +615,9 @@ class DriveWatchWorker(QThread):
                 'current_day':today,
                 'poll_seconds':self.poll_seconds,'target_keys':[t.key for t in self.targets],
                 'active_scan':dict(self.active_scan) if self.active_scan else None,
+                'cloud_account':self.cloud_account if self.cloud_account_generation==self.credentials.generation else '',
+                'check_all_pending':self.check_all_pending,
+                'cloud_scan_id':self._cloud_scan.scan_id if self._cloud_scan else '',
                 'last_scans':list(self.scan_history),
                 'next_checks':[{'key':key[0],'day':key[-1],'in_seconds':max(0,round(due-time.monotonic(),1))}
                     for key,due in self.next_poll.items() if key[-1]==today]}
@@ -588,6 +627,11 @@ class DriveWatchWorker(QThread):
             self.watch_loop()
         except Exception as error:
             self.emit_log('[云盘监听停止] '+str(error)+'；本地发布不受影响，请检查存储后重新启动书声')
+        finally:
+            if self._cloud_scan:
+                try:self._cloud_scan.finish('STOPPED' if self.stopping.is_set() else 'FAILED')
+                except OSError:pass
+                self._cloud_scan=None
 
     def watch_loop(self):
         ingestor = DriveIngestor(self.root, self.client, log=self.emit_log,
@@ -598,6 +642,9 @@ class DriveWatchWorker(QThread):
                 poll_seconds = self.poll_seconds
                 immediate = self.immediate.copy()
                 self.immediate.clear()
+                manual_all=self.check_all_pending
+                self.check_all_pending=False
+                if manual_all:immediate.update(t.key for t in targets)
             if self.credentials.connected():
                 today=self.clock().astimezone(CHINA_TIME).date().isoformat()
                 for target in targets:
@@ -608,13 +655,18 @@ class DriveWatchWorker(QThread):
                         continue
                     if target.key not in immediate and time.monotonic() < self.next_poll.get(signature, 0):
                         continue
+                    if self._cloud_scan is None:
+                        from .cloud_diagnostics import CloudScanDiagnostics
+                        self._cloud_scan=CloudScanDiagnostics(self.root,[t.key for t in targets],
+                            'manual_all' if manual_all else 'manual_binding' if immediate else 'scheduled')
                     generation = self.credentials.generation
                     def cancelled():
                         with self.lock:
                             return (self.stopping.is_set() or revision != self.revision
                                 or generation != self.credentials.generation or not self.credentials.connected())
                     ingestor.stopped = cancelled
-                    scan={'target_key':target.key,'day':today,'started_at':self.clock().isoformat()}
+                    scan={'target_key':target.key,'day':today,'started_at':self.clock().isoformat(),
+                          'scan_id':self._cloud_scan.scan_id}
                     with self.lock:
                         self.active_scan=scan
                     try:
@@ -640,6 +692,10 @@ class DriveWatchWorker(QThread):
                         self.emit_log(f'[云盘检查失败] {target.key}：{error}；其他绑定继续，云端不修改')
                     finally:
                         scan['finished_at']=self.clock().isoformat()
+                        if ingestor.cloud_account:
+                            self.cloud_account=ingestor.cloud_account
+                            self.cloud_account_generation=generation
+                        self._cloud_scan.results.append(dict(scan))
                         with self.lock:
                             self.active_scan=None
                             other=[s for s in self.scan_history if s['target_key']!=target.key]
@@ -651,5 +707,8 @@ class DriveWatchWorker(QThread):
                         self.next_poll={key:due for key,due in self.next_poll.items() if key[-1]==today}
                         self.failures={key:value for key,value in self.failures.items() if key[-1]==today}
                         self.next_poll[signature] = time.monotonic() + delay
+            if self._cloud_scan:
+                self._cloud_scan.finish('STOPPED' if self.stopping.is_set() else 'FINISHED')
+                self._cloud_scan=None
             self.wake.wait(.5)
             self.wake.clear()

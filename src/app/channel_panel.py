@@ -7,6 +7,7 @@ import queue
 import threading
 import uuid
 from dataclasses import replace
+from datetime import datetime,timezone
 from pathlib import Path
 
 from PySide6.QtCore import QThread, Qt, Signal, QTimer, QRect, QUrl
@@ -27,7 +28,7 @@ from ..publisher.identity import extract_platform_identity, refresh_platform_ide
 from ..publisher.status import STATUS_TEXT, result_status_text, fresh_result
 from ..publisher.scan_cleanup import ScanCleanupWorker
 from ..publisher.upload_quota import DailyUploadQuota
-from ..publisher.preflight import DeploymentPreflightWorker, prerequisite_results, failure_message
+from ..publisher.preflight import DeploymentPreflightWorker, PreflightResult, prerequisite_results, failure_message
 from ..publisher.douyin.browser import DouyinBrowserManager
 from ..publisher.douyin.config import DouyinAccountManager
 from ..publisher.youtube_browser import (launch_youtube_context, start_manual_login,
@@ -41,9 +42,10 @@ QUEUE_DATE_COLUMN = len(QUEUE_HEADERS)-1
 class QueueSnapshotWorker(QThread):
     snapshot_ready = Signal(object)
 
-    def __init__(self, root, requests, parent):
+    def __init__(self, root, requests, parent, hold_targets=None):
         super().__init__(parent)
         self.root, self.requests = root, requests
+        self.hold_targets={target.key:target for target in (hold_targets or ())}
 
     def run(self):
         from ..publisher.media import MEDIA_TYPES
@@ -67,6 +69,35 @@ class QueueSnapshotWorker(QThread):
                 error = str(exc)
             from ..publisher.drive_ingest import queue_provenance
             provenance=queue_provenance(self.root,files)
+            if account_id and directory:
+                from ..publisher.manual_hold import list_manual_holds,find_manual_hold
+                from ..publisher.drive_ingest import canonical_local_path
+                present={canonical_local_path(path) for path,stamp in files}
+                target=self.hold_targets.get(platform+':'+account_id)
+                for hold in list_manual_holds(self.root,[target] if target is not None else None):
+                    original,held=Path(hold['original_path']),Path(hold['held_path'])
+                    if (target is None and platform+':'+account_id not in hold['target_keys']
+                            or canonical_local_path(directory)!=hold['local_directory']
+                            or original.suffix.lower() not in extensions):
+                        continue
+                    if original.is_file():
+                        match=find_manual_hold(self.root,original,hold['sha256'],target) if target is not None else None
+                        if not match or match['hold_id']!=hold['hold_id']:
+                            continue  # A different Drive owner may have downloaded new content here.
+                    missing=not held.is_file()
+                    if missing:
+                        from types import SimpleNamespace
+                        from datetime import datetime
+                        moment=datetime.fromisoformat(hold['created_at']).timestamp()
+                        stamp=SimpleNamespace(st_size=hold['size_bytes'],st_mtime=moment,st_mtime_ns=int(moment*10**9))
+                    else:stamp=held.stat()
+                    key=canonical_local_path(original)
+                    if key not in present:
+                        files.append((original,stamp))
+                        present.add(key)
+                    provenance[key]=dict(manual_hold=True,hold_id=hold['hold_id'],held_path=hold['held_path'],
+                        target_keys=sorted({*hold['target_keys'],platform+':'+account_id}),sha256=hold['sha256'],label=hold.get('source_day') or '日期未知',
+                        tooltip='人工暂停：'+('隔离文件当前缺失，恢复会先校验并拒绝缺失文件；' if missing else '文件已手工移入publiced；')+'未计为成功，恢复后仅处理尚未完成的平台')
             snapshots.append((platform, request, files, state, error, provenance))
         self.snapshot_ready.emit(snapshots)
 
@@ -102,6 +133,7 @@ def size_queue_columns(table):
 
 class ChannelProbeWorker(QThread):
     event_logged = Signal(dict)
+    account_state_changed = Signal(dict)
     ready = Signal()
     pages_changed = Signal(list)
     captured = Signal(str, str)
@@ -148,6 +180,35 @@ class ChannelProbeWorker(QThread):
     def request_identity(self, token):
         self.commands.put(('__identity__', token))
 
+    def request_verify(self,token):
+        self.commands.put(('__verify__',token))
+
+    def verify_login(self,page):
+        from ..publisher.preflight import AccountPreflight
+        from ..publisher.youtube import PlatformRejected
+        from ..publisher.auth_snapshots import record_auth_result
+        target=PublishTarget(self.account.platform,self.account,str(self.profile))
+        checker=AccountPreflight(target,self.closing.is_set,self.status.emit)
+        state,message='FAILED','本次登录入口核验未完成'
+        try:
+            page.goto(CHANNELS[self.account.platform].url,wait_until='domcontentloaded',timeout=10000)
+            checker.verify_page(page)
+            state,message='SUCCESS','当前登录和上传入口核验通过；尚未选择文件或发布'
+        except PlatformRejected as error:
+            state,message=error.status,str(error)
+        except Exception as error:
+            from ..publisher.page_access import login_page_message
+            login=login_page_message(page,self.account.platform)
+            state,message=('AUTH_REQUIRED',login) if login else ('FAILED','入口检查未完成（'+type(error).__name__+'），未据此认定登录过期')
+        record_auth_result(self.timing_log_root,target,state,self.record_page_timing,source='登录窗口核验',
+                           context=page.context,page=page,live=True)
+        self._last_verified_state=state
+        self.account_state_changed.emit(dict(platform=self.account.platform,account_id=self.account.account_id,
+            status=state,message=message,source='登录窗口核验',
+            checked_at=datetime.now(timezone.utc).isoformat()))
+        self.status.emit('[登录入口核验] '+message)
+        return state=='SUCCESS'
+
     def read_identity(self, page):
         detail = ''
         try:
@@ -167,6 +228,7 @@ class ChannelProbeWorker(QThread):
                     raise ValueError('尚未读到实际频道 ID，请在 YouTube Studio 选择正确频道后重试；未标记登录成功。')
                 if self.account.channel_id and uid != self.account.channel_id:
                     raise ValueError('实际频道与已绑定频道不同；未覆盖账号身份，请切换到正确频道。')
+                if not self.account.channel_id:self.account.channel_id=uid
             return identity
         try:
             message = identity_read_failure(page, self.account.platform)
@@ -240,6 +302,7 @@ class ChannelProbeWorker(QThread):
 
     def _run_automated(self):
         context = None
+        self._last_verified_state=None
         try:
             self.profile.mkdir(parents=True, exist_ok=True)
             with sync_playwright() as playwright:
@@ -294,11 +357,13 @@ class ChannelProbeWorker(QThread):
                                         if not re.fullmatch(r'UC[\w-]{22}',uid) or self.account.channel_id and uid != self.account.channel_id:
                                             identity = None
                                     if identity and identity != previous_identity:
+                                        if self.account.platform=='youtube' and not self.account.channel_id:
+                                            self.account.channel_id=identity.get('channel_id') or identity.get('platform_uid','')
                                         self.identity_found.emit(identity)
                                         previous_identity = identity
                                         if self.verify_after_manual:
                                             self.verify_after_manual = False
-                                            self.status.emit('已读到实际频道 ID 与昵称，已交由当前账号配置保存；请查看主界面登录状态。')
+                                            self.verify_login(candidate)
                                 except Exception:
                                     pass
                         if self.verify_after_manual and verify_deadline and time.monotonic() >= verify_deadline:
@@ -319,6 +384,9 @@ class ChannelProbeWorker(QThread):
                                     self.identity_found.emit(identity)
                                     previous_identity = identity
                                     continue
+                                if stage == '__verify__':
+                                    self.verify_login(active)
+                                    continue
                                 report, image = self.probe.capture(active, stage)
                                 self.captured.emit(report, image)
                             except Exception as error:
@@ -337,6 +405,11 @@ class ChannelProbeWorker(QThread):
                         try:
                             from ..publisher.media_browser import close_media_context
                             close_media_context(context)
+                            if self._last_verified_state=='SUCCESS':
+                                from ..publisher.auth_snapshots import record_auth_result
+                                target=PublishTarget(self.account.platform,self.account,str(self.profile))
+                                record_auth_result(self.timing_log_root,target,'SUCCESS',self.record_page_timing,
+                                                   source='登录窗口正常关闭后')
                         except TargetClosedError:
                             pass  # Closing the last browser window manually is a normal exit.
                         except Exception:
@@ -392,7 +465,7 @@ class ChannelProbeDialog(QDialog):
         self.logs.setReadOnly(True)
         layout.addWidget(self.logs)
         row = QHBoxLayout()
-        confirm = QPushButton('核验登录账号/频道' if self.is_youtube else '我已核对登录账号/频道')
+        confirm = QPushButton('核验登录与上传入口')
         self.confirm_button = confirm
         confirm.clicked.connect(self.confirm_login)
         row.addWidget(confirm)
@@ -468,12 +541,9 @@ class ChannelProbeDialog(QDialog):
             if self.in_manual_login:
                 self.worker.request_manual_finish()
                 self.logs.appendPlainText('正在完成手工登录交接；只请求关闭本账号的专用浏览器，随后验证频道。')
-            else:
-                self.read_identity_when_ready()
-                self.logs.appendPlainText('正在读取实际频道；只有核验并保存成功后才显示已登录。')
-            return
-        self.login_confirmed.emit()
-        self.logs.appendPlainText('已记录用户核对登录状态；这不是平台身份的自动验证。')
+                return
+        self.worker.request_verify(self.tabs.currentData())
+        self.logs.appendPlainText('正在检查当前账号的登录和上传入口；不选择视频、不创建草稿、不点击发布。')
 
     def on_error(self, error):
         self.logs.appendPlainText(error)
@@ -549,6 +619,8 @@ class MultiPlatformPublisherPanel(QWidget):
         self._pending_deployment = None
         self._deferred_preflight = set()
         self._preflight_file_paths = None
+        self._preflight_blocks = {}
+        self._preflight_results_seen = set()
         self.results = {}
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0,0,0,0)
@@ -814,6 +886,8 @@ class MultiPlatformPublisherPanel(QWidget):
                 panel.source_state.setText('Google云盘：'+text)
 
     def drive_file_ready(self, path):
+        if self._shutting_down:
+            return
         self.cleanup_cache.clear()
         self.refresh_queues()
         if self.worker and self.worker.isRunning():
@@ -825,6 +899,48 @@ class MultiPlatformPublisherPanel(QWidget):
         self.sync_drive_watch()
         if self.drive_watch_worker:
             self.drive_watch_worker.check_now(panel.platform+':'+panel.current().account_id)
+
+    def check_all_drive_now(self):
+        if self._shutting_down:return
+        if not self.store.cloud_ingest_enabled or not self.drive_credentials.connected():
+            self.show_status('立即轮询不可用：请先启用公共云盘接入并连接云盘')
+            return
+        self.sync_drive_watch()
+        worker=self.drive_watch_worker
+        if not worker or not worker.targets:
+            self.show_status('立即轮询不可用：尚无已保存并启用的有效监听绑定')
+            return
+        queued=worker.check_all_now()
+        self.log_message('[立即轮询] '+('已请求检查全部已保存有效绑定；当前扫描完成后串行执行' if queued else
+            '已有全量轮询请求，已合并，不重复启动下载'),platform='common',category='cloud',task_id='')
+
+    def restore_manual_holds(self,panel):
+        if self.busy():
+            QMessageBox.information(self,'人工暂停','请先停止部署，再恢复人工暂停文件；云盘轮询可继续')
+            return
+        account=panel.current()
+        if account is None:return
+        from ..publisher.manual_hold import list_manual_holds,restore_manual_hold
+        target=PublishTarget(panel.platform,self.repository.publish_account(account),self.repository.profile(account))
+        records=list_manual_holds(self.store.root,[target])
+        if not records:
+            QMessageBox.information(self,'人工暂停','当前账号没有已记录的人工暂停文件')
+            return
+        labels=[Path(record['original_path']).name+' · '+record['hold_id'][:8] for record in records]
+        selected,accepted=QInputDialog.getItem(self,'恢复人工暂停','选择要恢复的文件；原平台成功记录不变，仅继续未完成目标',labels,0,False)
+        if not accepted:return
+        record=records[labels.index(selected)]
+        snapshot=self.drive_watch_worker.snapshot() if self.drive_watch_worker else {}
+        cloud_account=snapshot.get('cloud_account')
+        if not cloud_account:
+            QMessageBox.information(self,'人工暂停','请先连接云盘并立即轮询一次，确认当前云盘账号后再恢复')
+            return
+        try:
+            restore_manual_hold(self.store.root,record['hold_id'],target,cloud_account,log=self.log_message)
+            self.cleanup_cache.clear()
+            self.refresh_queues()
+        except (OSError,ValueError) as error:
+            QMessageBox.warning(self,'未恢复人工暂停',str(error))
 
     def switch_platform(self, index):
         old = self.channel_controls.parentWidget()
@@ -878,7 +994,9 @@ class MultiPlatformPublisherPanel(QWidget):
 
     def prepare_shutdown(self):
         self._shutting_down = True
+        self._pending_deployment = None
         self.timer.stop()
+        self.render_timer.stop()
         if self.drive_auth_worker:
             self.drive_auth_worker.stop()
         if self.drive_watch_worker:
@@ -896,6 +1014,15 @@ class MultiPlatformPublisherPanel(QWidget):
         results = [panel.prepare_shutdown() for panel in self.panels]
         cloud_busy = any(w and w.isRunning() for w in (self.drive_auth_worker,self.drive_watch_worker)) or self.drive_folder_dialog is not None
         return all(results) and not cloud_busy and not self.busy() and not (self.snapshot_worker and self.snapshot_worker.isRunning())
+
+    def shutdown_inventory(self):
+        workers=[('云盘授权',self.drive_auth_worker),('云盘轮询',self.drive_watch_worker),
+                 ('目录清理',self.cleanup_worker),('目录快照',self.snapshot_worker),
+                 ('部署前检查',self.preflight_worker),('上传部署',self.worker)]
+        for panel in self.panels:
+            dialog=getattr(panel,'dialog',None)
+            if dialog:workers.append((CHANNELS[panel.platform].name+'登录窗口',getattr(dialog,'worker',None)))
+        return [{'name':name,'running':bool(worker and worker.isRunning())} for name,worker in workers]
 
     def upload_douyin_selected(self):
         self.douyin.upload_selected()
@@ -917,7 +1044,7 @@ class MultiPlatformPublisherPanel(QWidget):
         dialog.resize(720, 380)
         dialog.setStyleSheet('QDialog{background:#1A202C} QLabel{color:#F1F5F9} QListWidget{background:#111827;color:#F1F5F9} QPushButton{background:#2B6CB0;color:white;padding:8px}')
         layout = QVBoxLayout(dialog)
-        layout.addWidget(QLabel('选择本次上传账号；同一文件依次上传所选平台，所选账号全部完成后归档。'))
+        layout.addWidget(QLabel('选择本次上传账号；按平台、账号完成当前全部文件，所需账号全部完成后归档。'))
         listing = QListWidget()
         selected_accounts = {p.platform:p.current() for p in self.panels}
         for index, target in enumerate(choices):
@@ -955,6 +1082,8 @@ class MultiPlatformPublisherPanel(QWidget):
         return chosen if dialog.exec() == QDialog.Accepted else []
 
     def start_deployment(self, checked=False, file_paths=None):
+        if self._shutting_down:
+            return
         if self.cleanup_worker:
             self.cleanup_worker.stop()
             self.sync_drive_watch()
@@ -1084,11 +1213,15 @@ class MultiPlatformPublisherPanel(QWidget):
 
     def cleanup_finished(self):
         cleanup=self.cleanup_worker
+        if cleanup is None:
+            return
         self.cleanup_worker=None
         pending=self._pending_deployment
         self._pending_deployment=None
         error,cancelled=cleanup.error,cleanup.cancelled
         cleanup.deleteLater()
+        if self._shutting_down:
+            return
         self.refresh_queues()
         if error or cancelled:
             self.show_status('扫描清理已取消；未启动部署' if cancelled else '扫描清理失败；未启动部署')
@@ -1101,7 +1234,11 @@ class MultiPlatformPublisherPanel(QWidget):
         self.begin_preflight(*pending)
 
     def begin_preflight(self,targets,file_paths):
+        if self._shutting_down:
+            return
         self._deployment_task_id = uuid.uuid4().hex
+        self._preflight_blocks = {}
+        self._preflight_results_seen = set()
         self._queue_platforms = {t.platform for t in targets}
         self.render_results()
         quota=DailyUploadQuota(self.store.root)
@@ -1144,32 +1281,57 @@ class MultiPlatformPublisherPanel(QWidget):
         if not eligible:
             self.launch_deployment(targets,file_paths)
             return
-        failures = prerequisite_results(eligible, self.store.root/'dom_reports')
-        reason = failure_message(failures)
-        if reason:
-            self.log_message('[部署前检查] '+reason, task_id=self._deployment_task_id)
-            from ..publisher.failure_diagnostics import TaskFailureDiagnostics
-            diagnostics = TaskFailureDiagnostics(self.store.root, self._deployment_task_id,
-                self.publish_events.task_events(self._deployment_task_id))
-            try:
-                for failure in failures:
-                    target = next(t for t in eligible if t.key == failure.key)
-                    diagnostics.operation(target.platform, target.account.account_id).complete(failure.status, failure.message)
-            except OSError as error:
-                self.log_message('[失败诊断保存异常] '+str(error))
-            finally:
-                diagnostics.finish()
-            QMessageBox.warning(self,'部署前校验',reason)
-            return
         self.preflight_worker = DeploymentPreflightWorker(eligible, self.store.root, parent=self, task_id=self._deployment_task_id)
         self.connect_worker_logs(self.preflight_worker)
         self.preflight_worker.status.connect(self.show_status)
+        self.preflight_worker.result_ready.connect(self.receive_preflight_result)
         self.preflight_worker.finished.connect(self.preflight_finished)
         self.show_status('正在检查所选账号的当前登录、身份与页面访问；尚未开始上传')
         self.preflight_worker.start()
         self.sync_deployment_buttons()
         for check in self.channel_checks.values():
             check.setEnabled(False)
+
+    def receive_preflight_result(self,result,targets=None):
+        targets=targets if targets is not None else getattr(self.preflight_worker,'targets',())
+        target=next((target for target in targets if target.key==result.key),None)
+        if target is None or result.key in self._preflight_results_seen:
+            return
+        self._preflight_results_seen.add(result.key)
+        self.receive_account_state(dict(platform=target.platform,account_id=target.account.account_id,
+            status=result.status,message=result.message,source='部署前检查'))
+        if result.passed:
+            if result.identity:
+                self.receive_nickname(dict(result.identity,platform=target.platform,account_id=target.account.account_id))
+                for planned in getattr(self,'_all_deployment_targets',targets):
+                    if planned.key==target.key:
+                        planned.account.platform_nickname=result.identity['nickname']
+                        planned.account.account_name=planned.account.custom_nickname or result.identity['nickname']
+        else:
+            state='PREFLIGHT_FAILED' if result.status in ('FAILED','FAILED1','FAILED2') else result.status
+            self._preflight_blocks[result.key]={'status':state,'message':result.message,'source':'preflight'}
+            self.show_status('部署前检查继续；未通过的账号单独暂停')
+
+    def receive_account_state(self,update):
+        """Only live checks and uploads update authorization; old file reports do not."""
+        try:
+            from ..publisher.account_health import apply_account_health
+            account=apply_account_health(self.repository,update['platform'],update['account_id'],
+                update['status'],update.get('message',''),source=update.get('source','实际上传'),
+                checked_at=update.get('checked_at'))
+            if account is None:
+                return
+            panel=next((panel for panel in self.panels if panel.platform==account.platform),None)
+            if panel:
+                panel._accounts=[account if item.account_id==account.account_id else item for item in panel._accounts]
+                index=panel.accounts.findData(account.account_id)
+                if index>=0:
+                    panel.accounts.setItemText(index,panel.account_label(account))
+                    panel.accounts.setItemData(index,panel.account_label(account),Qt.ToolTipRole)
+                if panel.current() and panel.current().account_id==account.account_id:
+                    panel.refresh_account_health(account)
+        except (OSError,ValueError,KeyError) as error:
+            self.log_message('[账号状态保存失败] '+str(error)+'；不改变其他账号和文件结果')
 
     def preflight_finished(self):
         preflight = self.preflight_worker
@@ -1179,59 +1341,46 @@ class MultiPlatformPublisherPanel(QWidget):
         targets, file_paths = preflight.targets, self._preflight_file_paths
         self._preflight_file_paths = None
         results = preflight.results
+        unsafe_resources=getattr(preflight,'unsafe_resources_message','')
+        unsafe_resources=unsafe_resources if isinstance(unsafe_resources,str) else ''
         cancelled = preflight.stopping.is_set()
         preflight.deleteLater()
+        if self._shutting_down:
+            return
         if cancelled:
             self.show_status('部署前检查已取消；未启动部署、未上传文件')
             self.refresh_queues()
             return
+        returned={result.key for result in results}
+        results=list(results)+[PreflightResult(target.key,target.account.account_name,'FAILED',
+            '本账号部署前检查未完成，暂停该账号；其他账号继续') for target in targets if target.key not in returned]
         for result in results:
-            if not result.passed or not result.identity:
-                continue
-            target=next((t for t in targets if t.key==result.key),None)
-            if target is None:
-                continue
-            self.receive_nickname(dict(result.identity,platform=target.platform,account_id=target.account.account_id))
-            for planned in getattr(self,'_all_deployment_targets',targets):
-                if planned.key==target.key:
-                    planned.account.platform_nickname=result.identity['nickname']
-                    planned.account.account_name=planned.account.custom_nickname or result.identity['nickname']
-        reason = failure_message(results)
-        missing=[r for r in results if r.nickname_missing]
-        if missing:
-            self.log_message('[部署未启动] '+reason)
-            self.show_status('当前账号页面可访问；请设置自定义昵称后重新启动，未上传文件')
-            self.refresh_queues()
-            for result in missing:
-                target=next((t for t in targets if t.key==result.key),None)
-                panel=next((p for p in self.panels if target and p.platform==target.platform),None)
-                account=next((a for a in self.repository.accounts(target.platform)
-                    if a.account_id==target.account.account_id),None) if target else None
-                if panel and account:
-                    panel.set_custom_nickname(account=account)
-            return
-        if not reason and {r.key for r in results if r.passed} != {t.key for t in targets}:
-            reason = '部署前检查未全部完成，请检查网络与浏览器会话后重试；本次部署未启动。'
-        if reason:
-            self.log_message('[部署未启动] '+reason)
-            self.show_status('部署前检查未通过；按提示处理登录或页面异常后重新启动')
-            self.refresh_queues()
-            QMessageBox.warning(self, '部署前校验', reason)
-            return
-        self.log_message('[部署前检查] 所选账号当前登录和发布入口检查通过，开始部署；实际上传前会再次检查登录')
+            self.receive_preflight_result(result,targets)
+        if unsafe_resources:
+            for target in getattr(self,'_all_deployment_targets',targets):
+                self._preflight_blocks[target.key]={'status':'PREFLIGHT_FAILED',
+                    'message':'浏览器公共资源尚未安全释放，暂停打开新浏览器：'+unsafe_resources,'source':'preflight_resources'}
+            self.log_message('[等待资源回收] '+unsafe_resources+'；任务保留，不据此将账号标记为未登录')
+        if self._preflight_blocks:
+            self.log_message('[部分账号暂停] '+failure_message(results,partial=True),task_id=self._deployment_task_id)
+        self.log_message('[启动部署] 所有选定账号保留为任务目标；检查通过的账号开始上传，未通过的账号暂停并显示原因')
         self.launch_deployment(getattr(self,'_all_deployment_targets',targets),file_paths)
 
     def launch_deployment(self,targets,file_paths):
+        if self._shutting_down:
+            return
         self.set_active_file('')
         self.worker = MultiDeployWorker(targets, root=self.store.root, parent=self, file_paths=file_paths,
             archive_targets=targets, history_targets=self.all_targets(), deferred_preflight=self._deferred_preflight,
-            strict_recovery=getattr(self, 'strict_recovery', False), task_id=getattr(self,'_deployment_task_id',None))
+            strict_recovery=getattr(self, 'strict_recovery', False), task_id=getattr(self,'_deployment_task_id',None),
+            initial_blocks=self._preflight_blocks)
         self._queue_platforms = {t.platform for t in targets}
         self.render_results()
         self.connect_worker_logs(self.worker)
         self.worker.status.connect(self.show_status)
         self.worker.result_changed.connect(self.receive_result)
         self.worker.nickname_changed.connect(self.receive_nickname)
+        self.worker.account_state_changed.connect(self.receive_account_state)
         self.worker.active_file_changed.connect(self.set_active_file)
         self.worker.queue_changed.connect(self.refresh_queues)
         self.worker.finished.connect(self.deployment_finished)
@@ -1379,8 +1528,14 @@ class MultiPlatformPublisherPanel(QWidget):
 
     def show_status(self, message):
         for panel in self.panels:
-            panel.deploy_status.setText(message[:80]+('…' if len(message)>80 else ''))
-            panel.deploy_status.setToolTip(message)
+            account=panel.current()
+            key=panel.platform+':'+account.account_id if account else ''
+            blocks=getattr(self.worker,'blocked',{}) if self.worker else {}
+            active=self.preflight_worker is not None or bool(self.worker and self.worker.isRunning())
+            block=((blocks.get(key) if isinstance(blocks,dict) else None) or self._preflight_blocks.get(key)) if active else None
+            text=('本账号暂停：'+block['message']+'；其他可用账号继续' if block and not self._shutting_down else message)
+            panel.deploy_status.setText(text[:80]+('…' if len(text)>80 else ''))
+            panel.deploy_status.setToolTip(text)
 
     def deployment_finished(self):
         worker = self.worker
@@ -1391,6 +1546,8 @@ class MultiPlatformPublisherPanel(QWidget):
         if manual:self.on_manual_upload_finished()
         if worker:
             worker.deleteLater()
+        if self._shutting_down:
+            return
         self.sync_drive_watch()
         for panel in self.panels:
             panel.deploy_button.setText('启动部署')
@@ -1444,6 +1601,8 @@ class MultiPlatformPublisherPanel(QWidget):
                 self.log_message(f'最新发布账本读取或恢复失败，保留原记录：{error}')
 
     def refresh_queues(self):
+        if self._shutting_down:
+            return
         running = self.busy()
         for check in self.channel_checks.values():
             check.setEnabled(not running)
@@ -1453,7 +1612,7 @@ class MultiPlatformPublisherPanel(QWidget):
         if self.snapshot_worker is not None:
             return
         requests = [(panel.platform, panel.queue_request()) for panel in self.panels]
-        self.snapshot_worker = QueueSnapshotWorker(self.store.root, requests, self)
+        self.snapshot_worker = QueueSnapshotWorker(self.store.root, requests, self,hold_targets=self.all_targets())
         self.snapshot_worker.snapshot_ready.connect(self.apply_queue_snapshots)
         self.snapshot_worker.finished.connect(self.snapshot_finished)
         self.snapshot_worker.start()
@@ -1474,6 +1633,7 @@ class MultiPlatformPublisherPanel(QWidget):
                 panel.logs.appendPlainText('[目录/DOM扫描] '+error)
                 continue
             panel.apply_queue_snapshot(files,provenance)
+            panel._manual_hold_provenance={key:value for key,value in provenance.items() if value.get('manual_hold')}
             if state is not None:
                 panel.dom_state.setText(state.message)
                 panel.dom_state.setToolTip(str(state.reports[-1]) if state.reports else '')
@@ -1500,13 +1660,23 @@ class MultiPlatformPublisherPanel(QWidget):
                 if not name or not path:
                     continue
                 result=self.results.get(str(path),{})
+                from ..publisher.drive_ingest import canonical_local_path
+                hold=getattr(panel,'_manual_hold_provenance',{}).get(canonical_local_path(path))
                 signature=name.data(Qt.UserRole+1)
-                if result and signature and (result.get('size_bytes')!=signature[0] or result.get('mtime_ns') not in (None,signature[1])):
+                if result and signature and not (hold and result.get('sha256')==hold.get('sha256')) and (result.get('size_bytes')!=signature[0] or result.get('mtime_ns') not in (None,signature[1])):
                     result={}
                 for column,platform in enumerate(PUBLISH_ORDER,5):
                     selected=next((p.current() for p in self.panels if p.platform==platform),None)
                     key=platform+':'+selected.account_id if selected else ''
                     entry=result.get('results',{}).get(key,{})
+                    if hold and entry.get('status') not in ('SUCCESS','IGNORED'):
+                        try:
+                            from ..publisher.multi_deploy import MultiTargetLedger
+                            latest=MultiTargetLedger(self.store.root).result(hold['sha256'],key)
+                            if latest.get('status') in ('SUCCESS','IGNORED'):entry=latest
+                        except (OSError,ValueError):pass
+                    if hold and key in hold.get('target_keys',()) and entry.get('status') not in ('SUCCESS','IGNORED'):
+                        entry={'status':'MANUAL_HOLD','message':hold['tooltip']}
                     text=result_status_text(entry) if entry else '未选择'
                     cell=QTableWidgetItem(text)
                     cell.setTextAlignment(Qt.AlignCenter)

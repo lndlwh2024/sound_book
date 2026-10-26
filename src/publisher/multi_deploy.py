@@ -144,6 +144,8 @@ class DeferredDouyinUploader(DouyinUploader):
 
     def upload_single_video(self,*args,**kwargs):
         success,message,info=super().upload_single_video(*args,**kwargs)
+        if success:
+            message='已确认抖音发布成功，等待全部必需目标完成后统一归档'
         if not success and info is None:
             info={'platform':'douyin','account_id':self.account.account_id,
                   'confirmation':getattr(self,'_publish_result',None)}
@@ -174,8 +176,9 @@ class MultiDeployWorker(QThread):
     status = Signal(str)
     result_changed = Signal(dict)
     nickname_changed = Signal(dict)
+    account_state_changed = Signal(dict)
 
-    def __init__(self, targets, root=None, parent=None, uploader_factory=None, poll_seconds=LOCAL_UPLOAD_INTERVAL_SECONDS, interval_seconds=LOCAL_UPLOAD_INTERVAL_SECONDS, file_paths=None, archive_targets=None, deferred_preflight=None, history_targets=None, strict_recovery=False, task_id=None):
+    def __init__(self, targets, root=None, parent=None, uploader_factory=None, poll_seconds=LOCAL_UPLOAD_INTERVAL_SECONDS, interval_seconds=LOCAL_UPLOAD_INTERVAL_SECONDS, file_paths=None, archive_targets=None, deferred_preflight=None, history_targets=None, strict_recovery=False, task_id=None, initial_blocks=None):
         super().__init__(parent)
         self.targets = [PublishTarget(t.platform, replace(t.account), t.profile)
             for t in sorted(targets,key=lambda t:(PUBLISH_ORDER.index(t.platform),t.account.account_id))]
@@ -202,7 +205,9 @@ class MultiDeployWorker(QThread):
         self.stopping = threading.Event()
         self.pause_requested = threading.Event()
         self.wake_requested = threading.Event()
-        self.blocked = {}
+        self.initial_blocks = {key:dict(value) for key,value in (initial_blocks or {}).items()
+                               if key in {target.key for target in self.targets}}
+        self.blocked = {key:dict(value) for key,value in self.initial_blocks.items()}
         self.target_enabled = {t.key: t.account.enabled for t in self.targets}
         self.processed = set()
         self.file_paths = None if file_paths is None else {str(Path(p).resolve()) for p in file_paths}
@@ -225,6 +230,65 @@ class MultiDeployWorker(QThread):
         except OSError as error:
             self.log.emit('[失败诊断日志保存异常] '+str(error))
         self.event_logged.emit(event)
+
+    def emit_account_state(self,target,state,message,source='upload'):
+        from .account_batch_session import current_account_session
+        session=current_account_session()
+        if session:
+            session.mark_auth(state)
+        try:
+            from .auth_snapshots import record_auth_result
+            record_auth_result(self.root,target,state,self.emit_log,source=source,
+                context=session.context if session else None,page=session.page if session else None,
+                live=bool(session and session.context is not None) or source=='browser_resource',task_id=self.report['task_id'])
+        except Exception as error:
+            self.emit_log('[登录证据记录未完成] '+type(error).__name__+'；发布结果保留')
+        self.account_state_changed.emit(dict(platform=target.platform,account_id=target.account.account_id,
+            status=state,message=message,source=source,checked_at=now()))
+
+    def _batch_closed(self,session):
+        try:
+            from .auth_snapshots import record_auth_result
+            record_auth_result(self.root,session.target,'SUCCESS',self.emit_log,
+                source='upload',live=False,task_id=self.report['task_id'])
+        except Exception as error:
+            self.emit_log('[登录证据记录未完成] '+type(error).__name__+'；发布结果保留')
+
+    def apply_preflight_block(self,job,target,previous,attempts,used):
+        """An unavailable account must not open a browser to reconcile old work."""
+        block=self.initial_blocks[target.key]
+        item=job['item']['results'][target.key]
+        item['blocking_message']=block['message']
+        retained_info=previous.get('info') or item.get('info')
+        requires_review=bool(previous.get('requires_review') or item.get('requires_review')
+                             or isinstance(retained_info,dict) and retained_info.get('submitted'))
+        if requires_review:
+            item.update(previous)
+            item.update(status='RECOVERY_REQUIRED',blocking_message=block['message'],attempts=attempts,
+                        requires_review=True,info=retained_info)
+            if not previous.get('requires_review'):
+                item.update(self.ledger.set_result(job['digest'],target.key,'RECOVERY_REQUIRED',
+                    previous.get('message') or '先前已提交，结果未确认；保留记录等待核验',retained_info,
+                    requires_review=True,attempt_count=used,
+                    task_id=previous.get('task_id') or self.report['task_id']))
+                item['blocking_message']=block['message']
+            state='RECOVERY_REQUIRED'
+        elif previous.get('status')=='FAILED2' or used>=2:
+            item.update(previous)
+            item.update(status='FAILED2',attempt_count=max(2,used),attempts=attempts,
+                        blocking_message=block['message'])
+            state='FAILED2'
+        else:
+            item.update(self.ledger.set_result(job['digest'],target.key,block['status'],block['message'],
+                retained_info,attempt_count=used,requires_review=requires_review,task_id=self.report['task_id']))
+            state=block['status']
+        self.failure_operation.not_started_reason='该账号部署前检查未通过，本文件尚未上传：'+block['message']
+        notice=(job['digest'],target.key,'initial_block')
+        if notice not in self.limit_notices:
+            self.emit_log('[账号暂停] '+self.failure_operation.not_started_reason+'；其他账号继续',level='ERROR')
+            self.limit_notices.add(notice)
+        self.save_report()
+        return state
 
     def stop(self):
         self.stopping.set()
@@ -254,7 +318,7 @@ class MultiDeployWorker(QThread):
                 self.status.emit('全部平台已暂停；不会开始后续文件或重试，可继续当前任务')
                 self.emit_log('[全平台暂停] 已进入暂停；保留任务与已有结果')
                 announced = True
-            self.stopping.wait(.1)
+            self._idle_wait(.1)
         if announced and not self.stopping.is_set():
             self.report['status'] = 'RUNNING'
             self.save_report()
@@ -264,9 +328,10 @@ class MultiDeployWorker(QThread):
         remaining = seconds
         while remaining > 0 and self.checkpoint():
             started = time.monotonic()
-            if self.wake_requested.wait(min(.1, remaining)):
+            if self.wake_requested.is_set():
                 self.wake_requested.clear()
                 break
+            self._idle_wait(min(.1, remaining))
             remaining -= time.monotonic() - started
 
     def wait_for_next_upload(self):
@@ -275,8 +340,14 @@ class MultiDeployWorker(QThread):
             remaining = self._next_upload_at - time.monotonic()
             if remaining <= 0:
                 return True
-            self.stopping.wait(min(.1, remaining))
+            self._idle_wait(min(.1, remaining))
         return False
+
+    def _idle_wait(self,seconds):
+        from .account_batch_session import current_account_session
+        session=current_account_session()
+        if not session or not session.pump(max(1,int(seconds*1000))):
+            self.stopping.wait(seconds)
 
     def make_uploader(self, target, log):
         if target.platform == 'douyin':
@@ -337,6 +408,8 @@ class MultiDeployWorker(QThread):
         return digest.hexdigest()
 
     def plan_batch(self):
+        from .manual_hold import discover_manual_holds
+        discover_manual_holds(self.root,self.targets,stopped=self.stopping.is_set,log=self.emit_log)
         self.log_context={}
         files = {}
         for target in self.targets:
@@ -460,6 +533,7 @@ class MultiDeployWorker(QThread):
 
     def attempt(self, job, target):
         operation = self.diagnostics.operation(target.platform, target.account.account_id, job['path'].name)
+        operation.auth_target, operation.auth_log = target, self.emit_log
         self.failure_operation = operation
         previous_attempts = len(job['item']['results'][target.key]['attempts'])
         try:
@@ -514,6 +588,9 @@ class MultiDeployWorker(QThread):
             item.pop('blocking_message',None)
             self.save_report()
             return previous['status']
+        held=self.find_manual_hold(job,target)
+        if held:
+            return self.apply_manual_hold(job,target,previous,held)
         attempts = self.attempts_by_target.setdefault((job['digest'],target.key),[])
         item['attempts'] = attempts
         # These adapters can validate captured acknowledgements entirely
@@ -532,6 +609,18 @@ class MultiDeployWorker(QThread):
                 self.save_report()
                 return SUCCESS
         used = max(int(previous.get('attempt_count') or 0), max((a['number'] for a in attempts),default=0))
+        if target.key in self.initial_blocks:
+            if target.platform=='douyin' and legacy_import_needed(previous):
+                try:
+                    historical=self.seed_douyin_success(job,target)
+                except (OSError,RuntimeError) as error:
+                    self.emit_log('[历史成功暂未恢复] '+str(error)+'；账号仍暂停，不打开浏览器')
+                    historical=None
+                if historical:
+                    item.update(historical)
+                    self.save_report()
+                    return SUCCESS
+            return self.apply_preflight_block(job,target,previous,attempts,used)
         if previous.get('status')=='FAILED2' or used>=2:
             item.update(status='FAILED2',attempt_count=max(2,used),message='已达到两次尝试上限；自动扫描和重启均不再上传或打开核对浏览器，需手动重试')
             marker=(job['digest'],target.key)
@@ -641,7 +730,8 @@ class MultiDeployWorker(QThread):
             from playwright.sync_api import sync_playwright
             failures=prerequisite_results([target],self.root/'dom_reports')
             if not failures:
-                with sync_playwright() as playwright:
+                from .account_batch_session import account_playwright
+                with account_playwright(sync_playwright) as playwright:
                     check = AccountPreflight(target,self.stopping.is_set,self.emit_log)
                     check.failure_capture = self.failure_operation.capture
                     result=check.check(playwright)
@@ -651,10 +741,12 @@ class MultiDeployWorker(QThread):
             if failures:
                 failure=failures[0]
                 self.blocked[target.key]={'status':failure.status,'message':failure.message}
+                self.emit_account_state(target,failure.status,failure.message,'preflight')
                 item.update(status=failure.status,message=failure.message)
                 self.save_report()
                 return failure.status
             self.deferred_preflight.remove(target.key)
+            self.emit_account_state(target,'SUCCESS','已核对当前登录和发布入口','preflight')
         attempt={'number':used+1,'id':self.failure_operation.operation_id,'started_at':now(),'logs':[],'upload_started':False}
         attempts.append(attempt)
         self.ledger.set_result(job['digest'],target.key,'IN_PROGRESS',f'开始第{attempt["number"]}/2次尝试',
@@ -669,11 +761,15 @@ class MultiDeployWorker(QThread):
             self.emit_log(f'[{target.platform}/{target.account.account_name}] {message}')
             self.save_report()
         quota_error=None
+        manual_hold_error=None
         boundary_info=None
         def before_upload():
-            nonlocal quota_error
+            nonlocal quota_error,manual_hold_error
             if self.stopping.is_set():
                 raise RuntimeError('用户停止，尚未开始上传')
+            manual_hold_error=self.find_manual_hold(job,target)
+            if manual_hold_error:
+                raise RuntimeError('文件已被人工移入publiced，暂停此文件；其他文件继续')
             try:
                 attempt['upload_started_at']=self.quota.reserve(target.key,job['digest'],self.report['task_id'],attempt['id'],getattr(target.account,'daily_upload_limit',10))
             except DailyQuotaReached as error:
@@ -735,6 +831,9 @@ class MultiDeployWorker(QThread):
                 info=info.to_dict()
         except Exception as error:
             state,message,info='FAILED',str(error),boundary_info
+        if manual_hold_error:
+            attempts.pop()
+            return self.apply_manual_hold(job,target,previous,manual_hold_error)
         if quota_error:
             attempts.pop()
             self.ledger.set_result(job['digest'],target.key,previous.get('status','PENDING'),
@@ -743,6 +842,13 @@ class MultiDeployWorker(QThread):
             item.update(status='FAILED1' if attempts else 'PENDING',quota_message=str(quota_error))
             self.save_report()
             return 'DAILY_LIMIT'
+        # Account authentication and the uncertainty of an already-submitted
+        # file are separate results. Adapters may retain FAILED for the file
+        # while observing a definite login rejection before page cleanup.
+        observed_block=getattr(uploader,'account_block',None) if uploader is not None else None
+        if state!=SUCCESS and isinstance(observed_block,dict) and observed_block.get('status') in BLOCKING:
+            info=dict(info) if isinstance(info,dict) else {}
+            info['account_block']=dict(observed_block)
         message=redact(message)
         saved=self.ledger.result(job['digest'],target.key)
         if (state!=SUCCESS and saved.get('status')==SUCCESS and saved.get('task_id')==self.report['task_id']
@@ -753,6 +859,10 @@ class MultiDeployWorker(QThread):
         if state in ('UNCONFIRMED','FAILED') or state=='CANCELLED' and attempt['upload_started']:
             state='FAILED'+str(attempt['number'])
         blocking_state=state if state in BLOCKING else None
+        if blocking_state:
+            self.emit_account_state(target,blocking_state,message)
+        elif state==SUCCESS:
+            self.emit_account_state(target,'SUCCESS','已确认本次发布成功')
         if blocking_state and attempt['upload_started']:
             info=dict(info) if isinstance(info,dict) else {}
             info['account_block']={'status':blocking_state,'message':message}
@@ -794,9 +904,30 @@ class MultiDeployWorker(QThread):
             self.emit_log(f'[停止该账号] {target.key}：{message}；其他账号继续')
         elif account_block and account_block.get('status') in BLOCKING:
             self.blocked[target.key]=account_block
+            self.emit_account_state(target,account_block['status'],account_block['message'])
             self.emit_log(f'[停止该账号] {target.key}：{account_block["message"]}；其他账号继续')
         self.save_report()
         return blocking_state or state
+
+    def find_manual_hold(self,job,target):
+        from .manual_hold import find_manual_hold
+        return find_manual_hold(self.root,job['path'],job['digest'],target)
+
+    def apply_manual_hold(self,job,target,previous,hold):
+        message='文件已被人工移入publiced，等待人工确认；不会自动重传，也不记发布成功'
+        info=previous.get('info')
+        saved=self.ledger.set_result(job['digest'],target.key,'MANUAL_HOLD',message,info,
+            attempt_count=int(previous.get('attempt_count') or 0),
+            requires_review=bool(previous.get('requires_review')),manual_hold_id=hold.get('hold_id'),
+            task_id=self.report['task_id'])
+        job['item']['results'][target.key].update(saved)
+        self.failure_operation.not_started_reason=message
+        notice=(job['digest'],target.key,'manual_hold',hold.get('hold_id'))
+        if notice not in self.limit_notices:
+            self.limit_notices.add(notice)
+            self.emit_log('[文件人工归档待确认] '+job['path'].name+'；'+message,level='INFO')
+        self.save_report()
+        return 'MANUAL_HOLD'
 
     def archive(self, job):
         self.log_context={'file_name':job['path'].name,'sha256':job['digest']}
@@ -860,11 +991,14 @@ class MultiDeployWorker(QThread):
             self.emit_log(f'[部署后检查未完成] {error}；发布结果保留，未重新上传')
 
     def run_batch(self, jobs):
-        # Copies in different bound directories share a content job. Finish all
-        # selected accounts and their one retry before advancing to next content.
+        # Freeze this round: newly downloaded files join the next account pass.
+        from .account_batch_session import AccountBatchSession,AccountBatchResourceError
+        if getattr(self,'_browser_resource_error',None):
+            return
         groups={}
         for job in jobs:
             groups.setdefault(job['digest'],[]).append(job)
+        prepared=[]
         for copies in groups.values():
             if not self.checkpoint():
                 break
@@ -875,29 +1009,61 @@ class MultiDeployWorker(QThread):
             for copy in copies:
                 copy['plan'] = plan
                 copy['item']['task_targets'] = list(scope)
-            retries=[]
-            self.emit_log(f'[文件开始] {copies[0]["path"].name}；平台顺序：'+
-                ' → '.join(CHANNELS[t.platform].name+'/'+t.account.account_name for t in self.targets))
-            for target in self.targets:
+            prepared.append((copies,scope))
+        for target in self.targets:
+            if not self.checkpoint():
+                break
+            account_jobs=[]
+            for copies,scope in prepared:
                 if target.key not in scope:
-                    continue  # A different cloud series is an independent resource binding.
+                    continue
                 job=next((copy for copy in copies if target.key in {t.key for t in copy['targets']}),None)
-                if job is None:
-                    if self.ledger.result(copies[0]['digest'],target.key).get('status') not in (SUCCESS,'IGNORED'):
-                        self.emit_log(f'[目录未包含此文件] {target.key}：未在该账号绑定目录找到同内容媒体；保留文件等待该账号完成')
-                    continue  # Respect each account's bound directory/media filter.
-                state = self.attempt(job, target)
-                if state in RETRYABLE:
-                    retries.append((job, target))
-                if self.stopping.is_set():
+                if job is not None:
+                    account_jobs.append(job)
+                elif self.ledger.result(copies[0]['digest'],target.key).get('status') not in (SUCCESS,'IGNORED'):
+                    self.emit_log(f'[目录未包含此文件] {target.key}：未在该账号绑定目录找到同内容媒体；保留文件等待该账号完成')
+            if not account_jobs:
+                continue
+            def account_log(message,target=target):
+                self.emit_log(message,platform=target.platform,account_id=target.account.account_id,
+                    account_name=target.account.account_name,file_name='',sha256='')
+            self.emit_log(f'[账号批次开始] {CHANNELS[target.platform].name}/{target.account.account_name}；本批次{len(account_jobs)}个文件')
+            try:
+                with AccountBatchSession(target,account_log,self.stopping.is_set,self._batch_closed):
+                    retries=[]
+                    for job in account_jobs:
+                        if not self.checkpoint():
+                            break
+                        self.emit_log(f'[文件开始] {job["path"].name} → {target.key}')
+                        state=self.attempt(job,target)
+                        if state in RETRYABLE:
+                            retries.append(job)
+                        self.archive(job)
+                    for job in retries:
+                        if not self.checkpoint():
+                            break
+                        self.emit_log(f'[本账号文件重试一次] {job["path"].name} → {target.key}')
+                        self.attempt(job,target)
+                        self.archive(job)
+            except Exception as error:
+                message=f'本账号浏览器会话未能正常结束：{type(error).__name__}：{error}'
+                self.blocked[target.key]={'status':'FAILED','message':message}
+                resource_failure=isinstance(error,AccountBatchResourceError)
+                self.emit_account_state(target,'FAILED',message,'browser_resource' if resource_failure else 'upload')
+                self.emit_log('[账号批次结束异常] '+message+'；保留文件及已有结果，'+
+                              ('暂停后续浏览器操作' if resource_failure else '继续其他账号'))
+                if resource_failure:
+                    self._browser_resource_error=message
+                    for remaining in self.targets:
+                        self.blocked[remaining.key]={'status':'FAILED','message':'浏览器资源未释放，暂不打开新会话；'+message}
+                        if remaining.key!=target.key:
+                            self.emit_account_state(remaining,'FAILED',self.blocked[remaining.key]['message'],'browser_resource')
+                    self.emit_log('[浏览器资源暂停] 后续账号不会打开浏览器；请停止任务并关闭残留窗口后重新启动')
                     break
-            for job,target in retries:
-                if not self.checkpoint():
-                    break
-                self.emit_log(f'[当前文件重试一次] {job["path"].name} → {target.key}')
-                self.attempt(job,target)
-            for job in copies:
-                self.archive(job)
+            finally:
+                self.emit_log('[账号批次结束] '+target.key)
+        for copies,_ in prepared:
+            for job in copies:self.archive(job)
         if jobs and (summary:=self.blocked_summary(include_reason=True)):
             self.emit_log('[本轮账号限制] '+summary)
 
@@ -921,8 +1087,11 @@ class MultiDeployWorker(QThread):
                         '部署自动停止；成功项不重传，不转入目录轮询')
                     break
                 if all(t.key in self.blocked or self.ledger.quota_block(t.key) for t in self.targets):
-                    self.report['status'] = 'BLOCKED'
-                    break
+                    self.report['status'] = 'WAITING_ACCOUNTS'
+                    self.status.emit('当前所选账号均已暂停；'+self.blocked_summary(include_reason=True))
+                    self.save_report()
+                    self.controlled_wait(self.poll_seconds)
+                    continue
                 summary=self.blocked_summary()
                 interval=f'{self.poll_seconds:g}秒'
                 next_scan=(datetime.now(CHINA_TIME)+timedelta(seconds=self.poll_seconds)).strftime('%Y-%m-%d %H:%M:%S')
@@ -939,7 +1108,7 @@ class MultiDeployWorker(QThread):
             self.report.update(status='FAILED', error=str(error))
             self.emit_log(f'[任务异常] {error}')
         finally:
-            if self.report['status'] in ('RUNNING', 'PAUSED', 'WAITING_QUOTA'):
+            if self.report['status'] in ('RUNNING', 'PAUSED', 'WAITING_QUOTA', 'WAITING_ACCOUNTS'):
                 self.report['status'] = 'STOPPED'
             self.report['finished_at'] = now()
             for file in self.report['files']:

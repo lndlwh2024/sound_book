@@ -5,6 +5,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
+from .account_batch_session import account_playwright, bind_page_event
 from .browser_workflow import BrowserPublishWorkflow
 from .page_access import check_network_page
 from .channel_probe import ChannelDOMProbe, safe_url, CREATOR_NOTICES_JS
@@ -257,7 +258,7 @@ class CreatorStudioUploader(BrowserPublishWorkflow):
         def requested(request):
             if self.submitted and request.method=='POST' and self.publish_endpoint(request.url):
                 submitted_requests.add(request)
-        page.on('request',requested)
+        bind_page_event(page,'request',requested)
         def received(response):
             if response.request not in submitted_requests or not self.submitted:
                 return
@@ -310,7 +311,7 @@ class CreatorStudioUploader(BrowserPublishWorkflow):
                     self.platform_error=('FAILED',message)
             except Exception:
                 pass  # Unreadable responses never confirm publication.
-        page.on('response',received)
+        bind_page_event(page,'response',received)
 
     def publish_endpoint(self,url):
         address=urlsplit(url)
@@ -484,6 +485,7 @@ class CreatorStudioUploader(BrowserPublishWorkflow):
 
     def upload_single_video(self,video):
         video=Path(video)
+        self._publish_context_released=False
         self.last_outcome,self.submitted,self.confirmation,self.platform_error='FAILED',False,None,None
         self.file_name,self.title,self.busy_seen,self.business_rejected=video.name,'',False,False
         self.file_selected=False
@@ -499,7 +501,7 @@ class CreatorStudioUploader(BrowserPublishWorkflow):
             if not structure_ready(state):
                 raise PlatformRejected('CONFIG_REQUIRED',state.message+'；请先采集该账号的视频发布编辑页')
             self.profile.mkdir(parents=True,exist_ok=True)
-            with sync_playwright() as p:
+            with account_playwright(sync_playwright) as p:
                 try:
                     self.log('[启动浏览器] '+self.channel.name)
                     from .media_browser import launch_media_context
@@ -546,8 +548,11 @@ class CreatorStudioUploader(BrowserPublishWorkflow):
                     login_message=login_page_message(page,self.account.platform)
                     if login_message and not self.confirmation and not isinstance(failure,(UploadStopped,PlatformRejected)):
                         failure=PlatformRejected('AUTH_REQUIRED',login_message)
+                    if isinstance(failure,PlatformRejected) and failure.status=='AUTH_REQUIRED' and not self.confirmation:
+                        self.account_block={'status':'AUTH_REQUIRED','message':str(failure)}
                     if not self.confirmation:
-                        self._capture_failure_page(page, failure)
+                        self._capture_failure_page(page,
+                            '[AUTH_REQUIRED] '+str(failure) if self.account_block and self.account_block['status']=='AUTH_REQUIRED' else failure)
                     if not isinstance(failure,UploadStopped) and page and not page.is_closed():
                         try:
                             report,_=ChannelDOMProbe(self.account,self.report_root).capture(page,'异常提示')
@@ -571,6 +576,8 @@ class CreatorStudioUploader(BrowserPublishWorkflow):
             if self.confirmation:
                 self.last_outcome='SUCCESS'
                 return True,'平台已确认发布成功；保留有效发布回执',self.result_hint()
+            if error.status=='AUTH_REQUIRED':
+                self.account_block={'status':'AUTH_REQUIRED','message':str(error)}
             certain=error.status in ('ACCOUNT_LIMIT','DURATION_LIMIT','PERMANENT_REJECT','CONFIG_REQUIRED') or self.business_rejected or bool(re.search(r'发布失败|提交失败',str(error)))
             self.business_rejected = bool(certain)
             self.last_outcome='FAILED' if self.submitted and not certain else error.status
@@ -753,5 +760,5 @@ class KuaishouUploader(CreatorStudioUploader):
             except Exception:
                 pass  # Missing/unreadable acknowledgements remain unconfirmed.
 
-        page.on('request',started)
-        page.on('response',received)
+        bind_page_event(page,'request',started)
+        bind_page_event(page,'response',received)

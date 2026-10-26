@@ -143,7 +143,9 @@ def test_video_login_preflight_failure_keeps_requested_cloud_download_running(pa
     panel.start_deployment()
     check.start.assert_called_once()
     panel.preflight_finished()
-    launch.assert_not_called()
+    launch.assert_called_once_with([chosen],None)
+    assert panel._preflight_blocks[chosen.key]['status']=='AUTH_REQUIRED'
+    assert '需要登录' in view.state.text()
     pump_until(lambda:len(api.downloads)==2 and all((tmp_path/f['name']).is_file() for f in api.files))
     assert actual.isRunning() and not actual.paused and panel.worker is None
     assert all((tmp_path/f['name']).is_file() for f in api.files)

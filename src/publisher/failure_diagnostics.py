@@ -147,6 +147,13 @@ class FailureOperation:
                 'platform': self.platform, 'account_id': self.account_id, 'file_name': self.file_name,
                 'timestamp': moment.isoformat(), 'stage': stage, 'reason': reason,
                 'role': role, 'url': '', 'frames': [], 'screenshot': None}
+        target=getattr(self,'auth_target',None)
+        if target is not None:
+            from .auth_snapshots import record_auth_result
+            data['auth_difference']=record_auth_result(self.task.root,target,'FAILED',
+                getattr(self,'auth_log',lambda message:None),source='失败页面关闭前',
+                context=getattr(page,'context',None) if page is not None else None,
+                page=page,live=True,task_id=self.task.task_id)
         try:
             if page is None:
                 raise RuntimeError('本次未取得浏览器页面对象；请查看同次任务的浏览器启动或连接错误，不能据此判断账号未登录')
