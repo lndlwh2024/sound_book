@@ -159,7 +159,7 @@ def test_legacy_report_change_invalidates_cache_and_repairs_converted_migration(
     record={'account_id':group[0].account.account_id,'status':'SUCCESS','file_hash':hashlib.md5(path.read_bytes()).hexdigest()}
     MultiTargetLedger(root).set_result(digest,group[0].key,'FAILED',LEGACY_FAILED_MESSAGE,record)
     first=ScanCleanupWorker(group[1:2],group,root,cache=cache);first.run()
-    assert not first.error and first.items[0]['results'][group[0].key]['status']=='PENDING'
+    assert not first.error and first.items[0]['results'][group[0].key]['status']=='FAILED'
     # Embedded info alone is insufficient. A matching original success ledger is required.
     legacy_report(group[0],path.read_bytes())
     second=ScanCleanupWorker(group[1:2],group,root,cache=cache);second.run()
@@ -173,7 +173,7 @@ def test_explicit_review_failure_is_not_overridden_by_legacy_import(tmp_path):
     digest=hashlib.sha256(path.read_bytes()).hexdigest()
     MultiTargetLedger(root).set_result(digest,group[0].key,'FAILED','人工更正为失败')
     scanner=ScanCleanupWorker(group[1:2],group,root);scanner.run()
-    assert not scanner.error and scanner.items[0]['results'][group[0].key]['status']=='PENDING'
+    assert not scanner.error and scanner.items[0]['results'][group[0].key]['status']=='FAILED'
     assert MultiTargetLedger(root).result(digest,group[0].key)['status']=='FAILED'
 
 
@@ -236,7 +236,7 @@ def test_old_failure_ceiling_is_preserved_without_mutating_history_report(tmp_pa
     (folder/'history.json').write_text(historic)
     scanner=ScanCleanupWorker(group[:1],group,root);scanner.run()
     assert not scanner.error and path.exists()
-    assert [r['status'] for r in scanner.items[0]['results'].values()]==['SUCCESS','FAILED2']+['PENDING']*(len(group)-2)
+    assert [r['status'] for r in scanner.items[0]['results'].values()]==['SUCCESS','FAILED2','FAILED']+['PENDING']*(len(group)-3)
     assert MultiTargetLedger(root).result(digest,group[2].key)['status']=='FAILED'
     assert (folder/'history.json').read_text()==historic
 
@@ -368,6 +368,10 @@ def test_failed_then_successful_retry_uses_one_publication_slot_on_every_platfor
             info={'platform':'youtube','video_id':'abcdefghijk','draft':True} if platform=='youtube' else None
             return len(calls)==2,'confirmed' if len(calls)==2 else 'cover failed',info
     worker=task(tmp_path/'state',[target],lambda *args:Uploader())
+    # The current account batch freezes its file list; the later file joins
+    # the next scan, after the first file's failed attempt and successful retry.
+    first_batch=[job for job in worker.plan_batch() if job['path']==path]
+    worker.run_batch(first_batch)
     worker.run_batch(worker.plan_batch())
     assert calls==['a.mp4','a.mp4']
     assert worker.quota.snapshot(target.key)['used']==1

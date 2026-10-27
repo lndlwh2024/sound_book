@@ -122,6 +122,8 @@ def compare_snapshots(previous,current):
     old_browser,new_browser=previous.get('browser',{}),current.get('browser',{})
     old_cookies,new_cookies=old_browser.get('cookies',{}),new_browser.get('cookies',{})
     return {'baseline_available':True,'baseline_time':previous.get('captured_at'),
+        'baseline_source':previous.get('source'),'baseline_url':previous.get('page_url'),
+        'baseline_task_id':previous.get('task_id'),
         'added_files':sorted(new.keys()-old.keys()),'missing_files':sorted(old.keys()-new.keys()),
         'changed_files':sorted(changed),'unavailable_or_unstable_files':sorted(uncertain),
         'cookie_count_before':old_browser.get('cookie_count'),'cookie_count_now':new_browser.get('cookie_count'),
@@ -148,11 +150,21 @@ def record_auth_result(root,target,status,log=lambda message:None,source='',cont
             latest=folder/(phase+'-latest.json')
             previous=json.loads(latest.read_text(encoding='utf-8')) if latest.exists() else None
             files,limits=_inventory(profile,key)
+            wechat_evidence=None
+            if target.platform=='wechat_channels' and context is not None:
+                from .wechat_auth_trace import trace_for
+                trace=trace_for(context)
+                if trace:
+                    trace.source=redact(source)[:100]
+                    stage=('发布结果保存后' if source=='upload' else '核验通过') if status=='SUCCESS' else '失败页面认证材料'
+                    wechat_evidence=trace.checkpoint(stage,page,success=status=='SUCCESS' and source!='upload')
             snapshot={'schema':1,'platform':target.platform,'account_id':target.account.account_id,
                 'captured_at':datetime.now(CHINA_TIME).isoformat(),'phase':phase,
                 'profile_key':_fingerprint(key,str(profile.resolve()).casefold()),
                 'files':files,'limits':limits,'browser':_browser(context,key),
-                'source':redact(source),'atomic_profile_copy':False}
+                'source':redact(source),'task_id':task_id,'atomic_profile_copy':False}
+            if wechat_evidence:
+                snapshot.update(wechat_auth=wechat_evidence.get('materials'),page_url=wechat_evidence.get('url'))
             if status=='SUCCESS':
                 if previous:atomic_write(folder/(phase+'-previous.json'),previous)
                 atomic_write(latest,snapshot)
@@ -165,6 +177,9 @@ def record_auth_result(root,target,status,log=lambda message:None,source='',cont
                          'difference':compare_snapshots(previous,snapshot)}
                 # Do not overwrite a good baseline with a failed session.
                 log('[登录快照对比] '+json.dumps(summary,ensure_ascii=False))
+            if wechat_evidence:
+                summary['wechat_auth_checkpoint']={'captured_at':wechat_evidence['captured_at'],
+                    'stage':wechat_evidence['stage'],'difference':wechat_evidence['difference']}
             if task_id:
                 diagnostics=root/'.diagnostics'/_safe(task_id)
                 diagnostics.mkdir(parents=True,exist_ok=True)

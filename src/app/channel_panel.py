@@ -27,6 +27,7 @@ from ..publisher.multi_deploy import PublishTarget, MultiDeployWorker
 from ..publisher.identity import extract_platform_identity, refresh_platform_identity, identity_read_failure, read_homepage_identity
 from ..publisher.status import STATUS_TEXT, result_status_text, fresh_result
 from ..publisher.scan_cleanup import ScanCleanupWorker
+from ..publisher.diagnostic_export_worker import DiagnosticExportWorker
 from ..publisher.upload_quota import DailyUploadQuota
 from ..publisher.preflight import DeploymentPreflightWorker, PreflightResult, prerequisite_results, failure_message
 from ..publisher.douyin.browser import DouyinBrowserManager
@@ -319,9 +320,14 @@ class ChannelProbeWorker(QThread):
                         self.status.emit(youtube_runtime_summary(context, self.profile))
                     else:
                         from ..publisher.media_browser import launch_media_context
+                        trace_options={}
+                        if self.account.platform=='wechat_channels':
+                            trace_options['wechat_auth_trace']={'root':self.timing_log_root,
+                                'target':PublishTarget(self.account.platform,self.account,str(self.profile)),
+                                'log':self.record_page_timing,'source':'登录窗口'}
                         context = launch_media_context(playwright,
                             str(self.profile), headless=False, viewport={'width': 1440, 'height': 900}, timeout=30000,
-                            page_timing_log=self.record_page_timing)
+                            page_timing_log=self.record_page_timing,**trace_options)
                     if self.closing.is_set():
                         return
                     page = context.pages[0] if context.pages else context.new_page()
@@ -601,6 +607,7 @@ class MultiPlatformPublisherPanel(QWidget):
         self.drive_auth_dialog = None
         self.drive_folder_dialog = None
         self.drive_states = {}
+        self.diagnostic_export_worker = None
         self._shutting_down = False
         self.setObjectName('multiPlatformPublisher')
         self.setAttribute(Qt.WA_StyledBackground, True)
@@ -997,6 +1004,8 @@ class MultiPlatformPublisherPanel(QWidget):
         self._pending_deployment = None
         self.timer.stop()
         self.render_timer.stop()
+        if self.diagnostic_export_worker:
+            self.diagnostic_export_worker.stop()
         if self.drive_auth_worker:
             self.drive_auth_worker.stop()
         if self.drive_watch_worker:
@@ -1013,12 +1022,15 @@ class MultiPlatformPublisherPanel(QWidget):
             self.worker.stop()
         results = [panel.prepare_shutdown() for panel in self.panels]
         cloud_busy = any(w and w.isRunning() for w in (self.drive_auth_worker,self.drive_watch_worker)) or self.drive_folder_dialog is not None
-        return all(results) and not cloud_busy and not self.busy() and not (self.snapshot_worker and self.snapshot_worker.isRunning())
+        return (all(results) and not cloud_busy and not self.busy()
+                and not (self.snapshot_worker and self.snapshot_worker.isRunning())
+                and not (self.diagnostic_export_worker and self.diagnostic_export_worker.isRunning()))
 
     def shutdown_inventory(self):
         workers=[('云盘授权',self.drive_auth_worker),('云盘轮询',self.drive_watch_worker),
                  ('目录清理',self.cleanup_worker),('目录快照',self.snapshot_worker),
-                 ('部署前检查',self.preflight_worker),('上传部署',self.worker)]
+                 ('部署前检查',self.preflight_worker),('上传部署',self.worker),
+                 ('诊断包导出',self.diagnostic_export_worker)]
         for panel in self.panels:
             dialog=getattr(panel,'dialog',None)
             if dialog:workers.append((CHANNELS[panel.platform].name+'登录窗口',getattr(dialog,'worker',None)))
@@ -1492,25 +1504,66 @@ class MultiPlatformPublisherPanel(QWidget):
         self.receive_log_event(self.publish_events.write(message,**context))
 
     def export_publish_logs(self):
-        from ..publisher.diagnostic_export import export_diagnostics
+        if self._shutting_down or self.diagnostic_export_worker is not None:return
         filename,_=QFileDialog.getSaveFileName(self,'导出最新任务诊断包','书声最新任务诊断包.zip','ZIP (*.zip)')
-        if not filename:return
-        try:
-            task_id=None
-            if self.preflight_worker and self.preflight_worker.isRunning():
-                task_id=self.preflight_worker.task_id
-            elif self.worker and self.worker.isRunning():
-                task_id=self.worker.report['task_id']
-            result=export_diagnostics(self.store.root,self.publish_events.folder,filename,task_id=task_id,
-                                      runtime_context=self.diagnostic_context())
+        if not filename or self._shutting_down:return
+        from ..publisher.event_log import CHINA_TIME
+        from ..publisher.drive_config import DriveBinding
+        task_id=None
+        if self.preflight_worker and self.preflight_worker.isRunning():
+            task_id=self.preflight_worker.task_id
+        elif self.worker and self.worker.isRunning():
+            task_id=self.worker.report['task_id']
+        # Copy configuration only; credential reads and watcher locks run in
+        # the export thread rather than in this GUI button callback.
+        cloud={'enabled':self.store.cloud_ingest_enabled,'poll_seconds':self.store.cloud_poll_seconds,
+               'mode':'independent','bindings':[]}
+        for target in self.all_targets():
+            binding=DriveBinding.read(target.account.drive_binding)
+            cloud['bindings'].append({'key':target.key,'watch_enabled':binding.enabled,'folder_id':binding.folder_id,
+                'folder_path':binding.folder_path,'local_directory':target.account.target_dir,
+                'last_status':self.drive_states.get(target.key,'尚无检查记录')})
+        worker=DiagnosticExportWorker(self.store.root,self.publish_events.folder,filename,task_id=task_id,
+            cutoff=datetime.now(CHINA_TIME).isoformat(),cloud_seed=cloud,
+            credentials=self.drive_credentials,watcher=self.drive_watch_worker,parent=self)
+        self.diagnostic_export_worker=worker
+        worker.progress.connect(self.diagnostic_export_progress)
+        worker.finished.connect(self.diagnostic_export_finished)
+        self.diagnostic_export_progress('后台整理任务日志，发布及云盘任务继续运行')
+        worker.start()
+
+    def diagnostic_export_progress(self,message):
+        if self._shutting_down:return
+        for panel in self.panels:
+            button=panel.logs.export_button
+            button.setEnabled(False)
+            button.setText('正在导出…')
+            button.setToolTip(message)
+
+    def diagnostic_export_finished(self):
+        worker=self.diagnostic_export_worker
+        if worker is None:return
+        self.diagnostic_export_worker=None
+        result,error,cancelled=worker.result,worker.error,worker.cancelled
+        worker.deleteLater()
+        if self._shutting_down:return
+        for panel in self.panels:
+            button=panel.logs.export_button
+            button.setEnabled(True)
+            button.setText('导出诊断包')
+            button.setToolTip('导出最新任务的日志及最后页面证据')
+        if cancelled:
+            self.log_message('[诊断包导出] 已取消；原有诊断包保留')
+        elif error:
+            self.log_message('[诊断包导出失败] '+error,level='ERROR')
+            QMessageBox.warning(self,'日志导出失败',error)
+        elif result:
             counts=result['counts']
             message=(f'仅任务 {result["selected_task_id"]}；日志 {counts["normal_logs"]} 份，'
                 f'DOM {counts["dom"]} 份，截图 {counts["screenshots"]} 张；采集/文件异常 {len(result["warnings"])} 项，'
                 f'缺失归档 {len(result["missing_failure_archives"])} 项。')
             self.log_message('[诊断包导出] '+message+'详情见压缩包内 diagnostic-manifest.json；不包含凭据或Cookie')
             QMessageBox.information(self,'诊断包已导出',message)
-        except (OSError,ValueError) as error:
-            QMessageBox.warning(self,'日志导出失败',str(error))
 
     def diagnostic_context(self):
         """Latest shared-listener state, not another task's historical log."""

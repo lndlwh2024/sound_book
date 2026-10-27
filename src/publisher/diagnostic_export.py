@@ -30,13 +30,21 @@ def _read_json(path):
     return value
 
 
-def _events(path):
+class ExportCancelled(Exception):
+    """Cooperative cancellation must not replace an existing destination."""
+
+
+def _events(path,stop_requested=lambda:False):
     """Bound a live log read to the size at which this snapshot opened it."""
     with path.open('rb') as stream:
         remaining = path.stat().st_size
+        number = 0
         while remaining > 0:
+            if number % 256 == 0 and stop_requested():
+                raise ExportCancelled()
             line = stream.readline(remaining)
             remaining -= len(line)
+            number += 1
             if not line:
                 break
             try:
@@ -56,10 +64,15 @@ def _compact(value):
     return value
 
 
-def export_diagnostics(root, log_folder, destination, task_id=None, runtime_context=None):
+def export_diagnostics(root, log_folder, destination, task_id=None, runtime_context=None,
+                       *,cutoff=None,stop_requested=lambda:False,progress=lambda text:None):
     root, log_folder, destination = Path(root).resolve(), Path(log_folder).resolve(), Path(destination)
     log_folder.relative_to(root)
-    cutoff = datetime.now(CHINA_TIME).isoformat()
+    cutoff = cutoff or datetime.now(CHINA_TIME).isoformat()
+    def checkpoint(message=None):
+        if stop_requested():raise ExportCancelled()
+        if message:progress(message)
+    checkpoint('定位本次任务和最后页面证据')
     warnings, inventory = [], []
     cloud_scan=None
     try:
@@ -75,12 +88,27 @@ def export_diagnostics(root, log_folder, destination, task_id=None, runtime_cont
         task_id = metadata.get('task_id')
         if not task_id:
             raise ValueError('最新任务索引缺少任务编号，未改用历史任务')
+        if metadata.get('started_at','')>cutoff:
+            # A new deployment may start while the previous export request is
+            # queued. The background worker must retain the click-time task.
+            before=[]
+            for path in (root/'.diagnostics').glob('*/task.json'):
+                checkpoint()
+                if not _regular(path,root):continue
+                try:
+                    item=_read_json(path)
+                    if item.get('task_id') and item.get('started_at','')<=cutoff:
+                        before.append(item)
+                except (OSError,ValueError):continue
+            metadata=max(before,key=lambda item:item.get('started_at','')) if before else {}
+            task_id=metadata.get('task_id')
     if not task_id:
         # Legacy logs: first retained event determines task start, not last event.
         starts = {}
         for path in log_paths:
-            for event in _events(path):
+            for event in _events(path,stop_requested):
                 identity, timestamp = event['task_id'], event.get('timestamp', '')
+                if timestamp>cutoff:continue
                 starts[identity] = min(starts.get(identity, timestamp), timestamp)
         if starts:
             task_id = max(starts, key=starts.get)
@@ -106,13 +134,15 @@ def export_diagnostics(root, log_folder, destination, task_id=None, runtime_cont
 
     records, seen = [], set()
     def collect(path):
-        for event in _events(path):
+        for event in _events(path,stop_requested):
             if event['task_id'] != task_id or event.get('timestamp', '') > cutoff:
                 continue
             identity = event.get('id') or json.dumps(event, sort_keys=True, ensure_ascii=False)
             if identity not in seen:
                 records.append(event)
                 seen.add(identity)
+                if len(records)%5000==0:
+                    checkpoint('整理本次任务日志：'+str(len(records))+'条')
     canonical = task_folder/'events.jsonl'
     if _regular(canonical, root):
         collect(canonical)
@@ -137,12 +167,14 @@ def export_diagnostics(root, log_folder, destination, task_id=None, runtime_cont
     legacy_logs = [p for p in candidates if p.suffix == '.log']
     if legacy_logs:
         collect(max(legacy_logs, key=lambda p: p.name))
+    checkpoint('按时间整理任务日志')
     records.sort(key=lambda e: (e.get('timestamp', ''), e.get('id', '')))
     if not records and not cloud_scan:
         warnings.append({'error': '本任务没有可读的日志，未以历史任务日志补齐'})
 
     captures, results = defaultdict(list), []
     for path in candidates:
+        checkpoint()
         if not path.name.endswith(('.dom.json', '.result.json')):
             continue
         try:
@@ -169,9 +201,15 @@ def export_diagnostics(root, log_folder, destination, task_id=None, runtime_cont
         from .cloud_diagnostics import clean_cloud_diagnostic
         add(name, json.dumps(clean_cloud_diagnostic(data), ensure_ascii=False, indent=2).encode('utf-8'), category)
     if records:
-        add('task-events.jsonl', ''.join(json.dumps(_clean(e), ensure_ascii=False)+'\n' for e in records).encode('utf-8'), 'normal_logs')
+        checkpoint('脱敏并编码本次任务日志')
+        def task_lines():
+            for number,event in enumerate(records):
+                if number%256==0:checkpoint()
+                yield json.dumps(_clean(event),ensure_ascii=False)+'\n'
+        add('task-events.jsonl',''.join(task_lines()).encode('utf-8'),'normal_logs')
     # Only sanitized comparisons tied to this task; never walk auth/profile history.
     for path in sorted(task_folder.glob('auth-diff-*.json')):
+        checkpoint()
         if not _regular(path,root):continue
         try:
             data=_read_json(path)
@@ -189,6 +227,7 @@ def export_diagnostics(root, log_folder, destination, task_id=None, runtime_cont
             with path.open('rb') as stream:
                 remaining=path.stat().st_size
                 while remaining>0:
+                    checkpoint()
                     line=stream.readline(remaining);remaining-=len(line)
                     if not line:break
                     try:
@@ -205,6 +244,7 @@ def export_diagnostics(root, log_folder, destination, task_id=None, runtime_cont
                              'cloud_scan_id':cloud_meta['scan_id']})
     omitted = 0
     for group in captures.values():
+        checkpoint()
         # A capture can exist in both staging and its completed archive.
         unique = {p.name: (p, data) for p, data in group}
         selected = sorted(unique.values(), key=lambda pair: (pair[1].get('timestamp', ''), pair[0].name), reverse=True)
@@ -232,6 +272,7 @@ def export_diagnostics(root, log_folder, destination, task_id=None, runtime_cont
     archived = set()
     summary_results = []
     for path, data in results:
+        checkpoint()
         archived.add(tuple(data.get(k) for k in ('task_id', 'platform', 'file_name')))
         compact = _compact(data)
         missing_files = [f for f in data.get('files', []) if not isinstance(f, str) or Path(f).name != f
@@ -261,6 +302,7 @@ def export_diagnostics(root, log_folder, destination, task_id=None, runtime_cont
     if metadata.get('app_version') and metadata['app_version']!=__version__:
         warnings.append({'error':f'本任务来自 {metadata["app_version"]}，当前导出程序为 {__version__}；请勿混淆任务与导出器版本'})
     for path in sorted((root/'publish_reports').glob('publish_task_*_'+_safe(task_id)[:8]+'.json'), reverse=True):
+        checkpoint()
         if not _regular(path, root):
             continue
         try:
@@ -273,8 +315,10 @@ def export_diagnostics(root, log_folder, destination, task_id=None, runtime_cont
     add_json('task-summary.json', summary)
     temporary = destination.with_name(destination.name+'.'+uuid.uuid4().hex+'.tmp')
     try:
+        checkpoint('压缩诊断包，发布及云盘任务继续运行')
         with zipfile.ZipFile(temporary, 'w', zipfile.ZIP_DEFLATED) as archive:
             for name, content in payload.items():
+                checkpoint()
                 archive.writestr(name, content)
                 inventory.append({'path': name, 'bytes': len(content), 'sha256': hashlib.sha256(content).hexdigest()})
             manifest = {'schema': 2, 'created_at': cutoff, 'selected_task_id': task_id,
@@ -288,6 +332,7 @@ def export_diagnostics(root, log_folder, destination, task_id=None, runtime_cont
                 'cloud/仅含cloud-scan-summary.json所标识的最新一次独立云盘扫描原始日志，不混入其他扫描；auth/仅为本任务脱敏认证对比。\n'
                 '每个平台、账号、文件、失败阶段仅保留最后两次截图与DOM，运行中导出为当时快照。\n'
                 '缺失信息见 diagnostic-manifest.json；不会使用其他任务证据补齐。\n')
+        checkpoint('完成诊断包')
         temporary.replace(destination)
         return manifest
     except Exception:

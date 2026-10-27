@@ -399,6 +399,7 @@ def test_export_button_selects_actual_active_task_and_reports_id(panel,tmp_path,
     if active_kind=='publish':panel.worker=SimpleNamespace(isRunning=lambda:True,report={'task_id':'active'})
     try:
         panel.export_publish_logs()
+        pump_until(lambda:panel.diagnostic_export_worker is None)
     finally:
         panel.preflight_worker=None;panel.worker=None;active.finish()
     with zipfile.ZipFile(path) as archive:

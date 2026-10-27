@@ -125,7 +125,8 @@ def run_idle_login_check(directory,platform_and_id,hours=4,output=None):
         operation=evidence.operation(platform,account_id)
         operation.auth_target=target
         operation.auth_log=log
-        checker=AccountPreflight(target,lambda:(folder/'cancel.requested').exists(),log=log)
+        checker=AccountPreflight(target,lambda:(folder/'cancel.requested').exists(),log=log,
+            diagnostic_root=repository.store.root,task_id='idle-'+phase+'-'+folder.name)
         checker.failure_capture=operation.capture
         try:
             with sync_playwright() as playwright:result=checker.check(playwright,headless=False)

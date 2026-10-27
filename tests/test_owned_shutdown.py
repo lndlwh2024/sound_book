@@ -52,6 +52,7 @@ from PySide6.QtCore import QCoreApplication,QThread,QTimer
 from src.app.single_instance import SingleInstance
 from src.publisher.shutdown import ShutdownController
 from src.publisher.owned_processes import process_identity
+from src.publisher.portable import atomic_write
 app=QCoreApplication([])
 base=Path(sys.argv[2]);package=base/'old-package'
 guard=SingleInstance(Path(os.environ['LOCALAPPDATA'])/'ShuShengPublisher',lambda:None)
@@ -68,7 +69,7 @@ shutdown=ShutdownController(Path(os.environ['LOCALAPPDATA'])/'ShuShengPublisher'
 # This test proves the external helper itself; disable the in-process fallback.
 shutdown._backup_deadline=lambda:None
 shutdown.begin()
-(base/'ready.json').write_text(json.dumps({'owner':process_identity(os.getpid()),'child':process_identity(child.pid),'control':str(shutdown.control),'armed_monotonic':shutdown.started}))
+atomic_write(base/'ready.json',{'owner':process_identity(os.getpid()),'child':process_identity(child.pid),'control':str(shutdown.control),'armed_monotonic':shutdown.started})
 timer=QTimer();timer.timeout.connect(lambda:shutdown.poll([{'name':'fixture stuck worker','running':True}]));timer.start(100)
 app.exec()
 ''',encoding='utf-8')
@@ -86,7 +87,7 @@ app.exec()
         deadline=time.monotonic()+10
         while not ready.exists() and owner.poll() is None and time.monotonic()<deadline:time.sleep(.05)
         assert ready.exists(),owner.communicate(timeout=2)
-        status=json.loads(ready.read_text());owned_child=status['child'];owned_owner=status['owner']
+        status=json.loads(ready.read_text(encoding='utf-8'));owned_child=status['child'];owned_owner=status['owner']
         assert owner.wait(timeout=23)==70
         assert 14<=time.monotonic()-status['armed_monotonic']<21
         result=Path(status['control'])/'result.json'

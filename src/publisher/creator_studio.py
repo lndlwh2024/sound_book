@@ -505,8 +505,16 @@ class CreatorStudioUploader(BrowserPublishWorkflow):
                 try:
                     self.log('[启动浏览器] '+self.channel.name)
                     from .media_browser import launch_media_context
+                    trace_options={}
+                    if self.account.platform=='wechat_channels':
+                        from types import SimpleNamespace
+                        operation=getattr(getattr(self,'failure_capture',None),'__self__',None)
+                        trace_options['wechat_auth_trace']={'root':self.report_root.parent,
+                            'target':SimpleNamespace(platform=self.account.platform,account=self.account,profile=str(self.profile)),
+                            'log':self.log,'task_id':getattr(getattr(operation,'task',None),'task_id',''),
+                            'file_name':video.name,'source':'文件上传'}
                     context=launch_media_context(p,str(self.profile),headless=self.headless,
-                        viewport={'width':1440,'height':900},timeout=30000,page_timing_log=self.log)
+                        viewport={'width':1440,'height':900},timeout=30000,page_timing_log=self.log,**trace_options)
                     context.set_default_timeout(1000)
                     page=context.pages[0] if context.pages else context.new_page()
                     self.attach_responses(page)
@@ -540,6 +548,9 @@ class CreatorStudioUploader(BrowserPublishWorkflow):
                     submit.click(timeout=1500)
                     self.log('[已点击发布] 保持浏览器打开，等待本次发布成功证据')
                     self.confirmation=self.confirm_publish(page)
+                    if self.account.platform=='wechat_channels':
+                        from .wechat_auth_trace import checkpoint_wechat_auth
+                        checkpoint_wechat_auth(context,'发布成功回执后',page,success=True)
                     self.last_outcome='SUCCESS'
                     self.log('[发布确认] 平台已明确确认本次投稿成功')
                     return True,'平台已确认发布成功，等待统一归档',self.result_hint()
@@ -563,6 +574,9 @@ class CreatorStudioUploader(BrowserPublishWorkflow):
                 finally:
                     if context:
                         try:
+                            if self.account.platform=='wechat_channels' and self.confirmation and self.submitted:
+                                from .wechat_auth_trace import checkpoint_wechat_auth
+                                checkpoint_wechat_auth(context,'发布成功回执后',page,success=True)
                             self._close_publish_context(context,page,self.submitted)
                         except Exception:
                             pass

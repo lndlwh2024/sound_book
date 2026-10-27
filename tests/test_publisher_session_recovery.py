@@ -165,7 +165,8 @@ def test_manual_one_file_preflight_does_not_reset_other_files_auth_or_success(pa
     panel.start_deployment(file_paths=[files[2]]);drain(panel)
     check.start.assert_called_once()
     panel.preflight_finished()
-    launch.assert_not_called()
+    launch.assert_called_once_with([chosen],[files[2]])
+    assert panel._preflight_blocks[chosen.key]['status']=='AUTH_REQUIRED'
     for path in files:
         results=panel.results[str(path.resolve())]['results']
         assert results[chosen.key]['status']=='AUTH_REQUIRED'

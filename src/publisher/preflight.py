@@ -216,6 +216,9 @@ class AccountPreflight(BrowserPublishWorkflow):
                 self.log(youtube_runtime_summary(context, self.target.profile))
             else:
                 from .media_browser import launch_media_context
+                if self.target.platform=='wechat_channels' and self.diagnostic_root is not None:
+                    kwargs['wechat_auth_trace']={'root':self.diagnostic_root,'target':self.target,'log':self.log,
+                        'task_id':self.task_id,'source':'部署前检查'}
                 context = launch_media_context(playwright,self.target.profile, **kwargs)
             page = context.pages[0] if context.pages else context.new_page()
             step='检查浏览器视频解码'

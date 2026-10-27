@@ -41,10 +41,10 @@ class PublishLogView(QWidget):
         bottom=QHBoxLayout()
         bottom.addWidget(self.tabs)
         bottom.addStretch()
-        export=QPushButton('导出诊断包')
-        export.setStyleSheet('QPushButton {min-height:18px;padding:3px 8px;font-size:12px;}')
-        export.clicked.connect(controller.export_publish_logs)
-        bottom.addWidget(export)
+        self.export_button=QPushButton('导出诊断包')
+        self.export_button.setStyleSheet('QPushButton {min-height:18px;padding:3px 8px;font-size:12px;}')
+        self.export_button.clicked.connect(controller.export_publish_logs)
+        bottom.addWidget(self.export_button)
         layout.addLayout(bottom)
 
     def append_event(self,event):

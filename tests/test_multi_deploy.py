@@ -91,7 +91,7 @@ def test_continuous_task_logs_scan_wait_and_retains_unknown_without_reupload(tmp
     job.run()
     assert calls==['a.mp4','a.mp4']
     assert waits==[5,5]
-    assert sum('[等待本地视频]' in line for line in logs)==2
+    assert sum('[等待本地视频]' in line for line in logs)==1  # Unchanged polling no longer repeats logs.
     assert sum('[检查本地视频]' in line for line in logs)==1
     assert not any('[待核对保留]' in line for line in logs)
     assert any('每5秒' in line and '北京时间' in line for line in logs)

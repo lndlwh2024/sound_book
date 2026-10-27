@@ -67,10 +67,14 @@ def launch_media_context(playwright, user_data_dir, **kwargs):
 
 def open_persistent_context(chromium,user_data_dir,**options):
     from .account_batch_session import current_account_session
+    auth_config=options.pop('wechat_auth_trace',None)
     batch=current_account_session()
     if batch and not batch.closing:
         existing=batch.existing(user_data_dir)
         if existing is not None:
+            if auth_config:
+                from .wechat_auth_trace import attach_wechat_auth_trace
+                attach_wechat_auth_trace(existing,auth_config)
             return existing
         chromium=batch.runtime().chromium
         options['page_timing_log']=batch.emit
@@ -81,6 +85,9 @@ def open_persistent_context(chromium,user_data_dir,**options):
         if callable(page_timing_log):
             from .page_dwell import attach_page_dwell
             attach_page_dwell(context,page_timing_log)
+        if auth_config:
+            from .wechat_auth_trace import attach_wechat_auth_trace
+            attach_wechat_auth_trace(context,auth_config)
         result=prepare_persistent_context(context,user_data_dir)
         if batch and not batch.closing:
             batch.register(result,user_data_dir)
@@ -162,6 +169,8 @@ def close_media_context(context):
         current_account_session().release_listeners()
         return
     try:
+        from .wechat_auth_trace import checkpoint_wechat_auth
+        checkpoint_wechat_auth(context,'浏览器关闭前')
         from .page_dwell import finish_page_dwell
         finish_page_dwell(context,'浏览器结束（关闭前）')
         for page in list(context.pages) if getattr(context, '_shusheng_native_session', False) is True else []:
