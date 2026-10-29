@@ -1,0 +1,148 @@
+{
+  "passed": true,
+  "packages": {
+    "full": {
+      "path": "H:\\业务\\soundbook\\dist\\full-20261029-complete\\ShuShengFull-win-x64-2026.10.29.2.zip",
+      "bytes": 15196413933,
+      "sha256": "67d6abd1a021318bcb74e90a8a03bde7622c59e831ec3f7ffe7edebde690506e",
+      "files": 71954,
+      "source_commit": "dacb02f27bf8c813dac37af2ae37c5deb7772734",
+      "version": "2026.10.29.2",
+      "source_hashes_checked": 214,
+      "uncompressed_bytes": 22586757211,
+      "crc": true,
+      "all_file_hashes": true
+    },
+    "publisher": {
+      "path": "H:\\业务\\soundbook\\dist\\publisher-20261029-complete-final\\ShuShengPublisher-win-x64-complete-20261029.zip",
+      "bytes": 324231019,
+      "sha256": "5c7ff23fc07c3490aab844b874b2245a4d10172844decfc1ab52f0acc0f12c4b",
+      "files": 939,
+      "source_commit": "dacb02f27bf8c813dac37af2ae37c5deb7772734",
+      "version": "2026.10.29.2",
+      "source_hashes_checked": 138,
+      "uncompressed_bytes": 767084393,
+      "crc": true,
+      "all_file_hashes": true
+    }
+  },
+  "validation": {
+    "tests_passed": 77,
+    "test_groups": {
+      "production_and_edition": 46,
+      "google_proxy_and_pac": 28,
+      "portable_cache": 3
+    },
+    "real_account_uploads_performed": false,
+    "win10_x230_clean_install_verified": false,
+    "full_runtime": {
+      "passed": true,
+      "checks": {
+        "relocated_python": true,
+        "all_core_models_present": true,
+        "main_runtime_imports": true,
+        "f5_runtime_imports": true,
+        "kokoro_runtime_imports": true,
+        "production_and_publishing_gui": true,
+        "gui_clean_exit": true,
+        "bundled_ffmpeg_h264_ffprobe": true,
+        "bundled_browser_offline": true
+      },
+      "version": "2026.10.29.2",
+      "executable": "H:\\业务\\soundbook\\dist\\full-20261029-complete\\ShuShengFull\\envs\\main\\Scripts\\python.exe",
+      "base_prefix": "H:\\业务\\soundbook\\dist\\full-20261029-complete\\ShuShengFull\\runtime\\python"
+    },
+    "full_relocation": {
+      "passed": true,
+      "checks": {
+        "relocated_python": true,
+        "all_core_models_present": true,
+        "main_runtime_imports": true,
+        "f5_runtime_imports": true,
+        "kokoro_runtime_imports": true,
+        "production_and_publishing_gui": true,
+        "gui_clean_exit": true,
+        "bundled_ffmpeg_h264_ffprobe": true,
+        "bundled_browser_offline": true,
+        "renamed_bundle": true,
+        "bundled_vc_runtime_aliases": true,
+        "directory_released_after_exit": true
+      },
+      "version": "2026.10.29.2",
+      "executable": "H:\\业务\\soundbook\\dist\\full-20261029-complete\\ShuShengFull-relocation-check\\envs\\main\\Scripts\\python.exe",
+      "base_prefix": "H:\\业务\\soundbook\\dist\\full-20261029-complete\\ShuShengFull-relocation-check\\runtime\\python",
+      "initial_immediate_restore_blocked": true
+    },
+    "full_media": {
+      "passed": true,
+      "browser": "153.0.8010.12",
+      "factory": "launch_media_context",
+      "capabilities": {
+        "h264": true,
+        "aac": true
+      },
+      "decode": {
+        "ready": 4,
+        "duration": 1,
+        "error": null
+      }
+    },
+    "publisher_runtime": {
+      "schema": 1,
+      "passed": true,
+      "checks": {
+        "data_writable": true,
+        "free_space_10gb": true,
+        "google_proxy_required": true,
+        "pac_mixed_proxy_compatibility": true,
+        "ffprobe": true,
+        "private_browser": true,
+        "h264_aac_codecs": true,
+        "h264_aac_decode": true,
+        "qt_render": true,
+        "lean_import": true,
+        "page_structures": true
+      },
+      "versions": {
+        "PySide6": "6.8.3",
+        "playwright": "1.56.0",
+        "application": "2026.10.29.2",
+        "ffprobe": "ffprobe version 7.1.1-full_build-www.gyan.dev Copyright (c) 2007-2025 the FFmpeg developers",
+        "chromium": "141.0.7390.37",
+        "media_probe": {
+          "ready": 4,
+          "duration": 1,
+          "error": null
+        },
+        "page_structures": {
+          "douyin": "2026.10.18.7",
+          "xiaohongshu": "2026.10.18.7",
+          "kuaishou": "2026.10.18.7",
+          "youtube": "2026.10.18.7",
+          "wechat_channels": "2026.10.19.4"
+        }
+      },
+      "system": "Windows-11-10.0.22631-SP0",
+      "python": "3.12.11",
+      "screens": [
+        {
+          "width": 800,
+          "height": 800,
+          "dpi": 96
+        }
+      ],
+      "target_x230_verified": false,
+      "network_checked": false,
+      "package_checks": {
+        "clean_path": true,
+        "empty_user_data": true,
+        "standalone_window": true,
+        "single_instance": true,
+        "dead_lock_recovery": true,
+        "real_exit": true,
+        "old_package_rename_delete": true,
+        "replacement_instance": true
+      }
+    }
+  }
+}
