@@ -109,6 +109,15 @@ def main():
                         rel = path.relative_to(dest / 'snapshots' / revision)
                         links.append({'source': path.relative_to(bundle).as_posix(),
                                       'target': (Path('models') / backend / backend / rel).as_posix()})
+        # Reuse the redistributable DLLs already shipped by PySide6 so worker
+        # interpreters do not depend on the build machine's System32 copies.
+        qt = bundle/'envs/main/Lib/site-packages/PySide6'
+        for pattern in ('msvcp140*.dll', 'vcruntime140*.dll', 'concrt140.dll'):
+            for path in qt.glob(pattern):
+                target = bundle/'runtime/python'/path.name
+                if not target.exists():
+                    links.append({'source': path.relative_to(bundle).as_posix(),
+                                  'target': target.relative_to(bundle).as_posix()})
         (bundle / 'runtime/model-links.json').write_text(json.dumps(links, indent=2), encoding='utf-8')
         (bundle / '启动书声完整版.bat').write_text(
             '@echo off\r\ncd /d "%~dp0"\r\n"runtime\\python\\python.exe" "tools\\full_launcher.py" %*\r\n',
