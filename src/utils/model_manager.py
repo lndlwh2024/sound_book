@@ -72,6 +72,15 @@ class ModelManager:
         }
     }
 
+    @staticmethod
+    def get_hub_cache_root() -> Path:
+        """Use the same cache as huggingface_hub, including portable overrides."""
+        if os.environ.get("HF_HUB_CACHE"):
+            return Path(os.environ["HF_HUB_CACHE"])
+        if os.environ.get("HF_HOME"):
+            return Path(os.environ["HF_HOME"]) / "hub"
+        return Path.home() / ".cache" / "huggingface" / "hub"
+
     @classmethod
     def get_cache_root(cls, config: Optional[dict] = None) -> Path:
         """获取模型根缓存目录，绝对物理锚定项目工程根目录，杜绝随工作目录漂移"""
@@ -152,7 +161,7 @@ class ModelManager:
         避免因为历史进程被强杀或超时残留数 GB 的临时无用垃圾文件，
         返回 (清理文件数量, 释放的总字节数)。
         """
-        hub_dir = Path.home() / ".cache" / "huggingface" / "hub"
+        hub_dir = cls.get_hub_cache_root()
         if not hub_dir.exists():
             return 0, 0
 
@@ -195,7 +204,7 @@ class ModelManager:
 
         # 2. 检查 HuggingFace hub 与项目本地 models 目录
         scan_roots = []
-        hf_sd_dir = Path.home() / ".cache" / "huggingface" / "hub" / "models--runwayml--stable-diffusion-v1-5"
+        hf_sd_dir = cls.get_hub_cache_root() / "models--runwayml--stable-diffusion-v1-5"
         if hf_sd_dir.exists():
             scan_roots.append(hf_sd_dir)
 
@@ -271,7 +280,7 @@ class ModelManager:
         info = cls.OFFICIAL_MODELS.get(backend, {})
         repo_id = info.get("default_repo", "")
         if repo_id:
-            hf_cache_dir = Path.home() / ".cache" / "huggingface" / "hub" / f"models--{repo_id.replace('/', '--')}"
+            hf_cache_dir = cls.get_hub_cache_root() / f"models--{repo_id.replace('/', '--')}"
             if hf_cache_dir.exists():
                 # 检查是否存在未完成的大文件下载碎片（只要存在 >100KB 的未完成碎片，代表下载正在进行或曾中断）
                 blobs_dir = hf_cache_dir / "blobs"

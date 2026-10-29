@@ -9,6 +9,7 @@ import subprocess
 import sys
 import time
 import zipfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -134,6 +135,26 @@ def main():
     paths = sorted(p for p in bundle.rglob('*') if p.is_file()
                    and p.relative_to(bundle).as_posix() not in generated
                    and '__pycache__' not in p.parts and p.suffix != '.pyc')
+    manifest_path = bundle/'release-manifest.json'
+    manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
+    for rel in ('requirements-f5.txt', 'requirements-kokoro.txt'):
+        shutil.copy2(ROOT/rel, bundle/rel)
+        manifest['source_hashes'][rel] = sha(bundle/rel)
+    for rel in manifest['source_hashes']:
+        assert sha(bundle/rel) == sha(ROOT/rel), f'Stale source: {rel}'
+        manifest['source_hashes'][rel] = sha(bundle/rel)
+    manifest['source_commit'] = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT).decode().strip()
+    print('Hashing complete bundle inventory', flush=True)
+    manifest['files'] = {}
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        pending = {pool.submit(sha, path): path for path in paths if path != manifest_path}
+        last_progress = time.monotonic()
+        for future in as_completed(pending):
+            manifest['files'][pending[future].relative_to(bundle).as_posix()] = future.result()
+            if time.monotonic()-last_progress > 25:
+                print(f'Hashed {len(manifest["files"])}/{len(pending)} files', flush=True)
+                last_progress = time.monotonic()
+    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding='utf-8')
     started = last = time.monotonic()
     total = sum(p.stat().st_size for p in paths)
     done = 0

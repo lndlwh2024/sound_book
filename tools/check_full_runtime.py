@@ -53,6 +53,8 @@ def main():
                 douyin_manager=DouyinAccountManager(temp/'douyin.json', temp/'profiles'), **k)
             from src.utils.config import config
             config.config['app']['output_dir'] = str(temp/'output')
+            # A smoke check must never run model maintenance, even inside the bundle.
+            ModelManager.prune_redundant_assets = classmethod(lambda cls, config=None: (0, 0))
             app = QApplication.instance() or QApplication([])
             window = main_window.MainWindow()
             window.show()
