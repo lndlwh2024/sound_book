@@ -52,16 +52,34 @@ def main():
                 response=subprocess.run([str(executable),'--request-exit'],env=environment,cwd=root,
                     creationflags=flags,timeout=15)
                 assert response.returncode==0,'Owned exit request was not accepted'
+            def wait_for_sweep(expected):
+                # GUI exit precedes the external watchdog's final resource sweep.
+                control=root/'user/ShuShengPublisher/shutdown'
+                deadline=time.monotonic()+30
+                while time.monotonic()<deadline:
+                    requests=list(control.glob('*/request.json'))
+                    if len(requests)==expected and all((p.parent/'result.json').exists() for p in requests):
+                        time.sleep(.3)
+                        return
+                    time.sleep(.1)
+                raise AssertionError('Exit helper did not finish its resource sweep')
             request_exit()
             assert first.wait(timeout=25)==0,'Real GUI exit did not complete normally'
+            wait_for_sweep(1)
             renamed=root/'renamed-package'
-            copied.rename(renamed)
+            deadline=time.monotonic()+5
+            while True:
+                try:copied.rename(renamed);break
+                except PermissionError:
+                    if time.monotonic()>=deadline:raise
+                    time.sleep(.1)
             executable=renamed/'ShuShengPublisher.exe'
             third = launch()
             time.sleep(4)
             assert third.poll() is None, 'Dead-process lock did not recover'
             request_exit()
             assert third.wait(timeout=25)==0,'Replacement instance did not exit normally'
+            wait_for_sweep(2)
             assert renamed.resolve().relative_to(root.resolve()).parts
             shutil.rmtree(renamed)
             # The helper lives outside the old package, but its control-folder
