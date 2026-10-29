@@ -32,6 +32,15 @@ def sha(path):
 
 
 def copytree(source, target):
+    if os.name == 'nt':
+        target.mkdir(parents=True, exist_ok=True)
+        result = subprocess.run(['robocopy', str(source), str(target), '/E', '/MT:8',
+                                 '/R:1', '/W:1', '/NFL', '/NDL', '/NJH', '/NJS', '/NP',
+                                 '/XD', '__pycache__', '.cache', '.git',
+                                 '/XF', '*.pyc', '*.incomplete', '*.lock'], capture_output=True)
+        if result.returncode >= 8:
+            raise RuntimeError(f'robocopy failed ({result.returncode}): {source}')
+        return
     shutil.copytree(source, target, ignore=shutil.ignore_patterns(
         '__pycache__', '*.pyc', '.cache', '*.incomplete', '*.lock', '.git'), dirs_exist_ok=True)
 
@@ -44,17 +53,19 @@ def main():
     p.add_argument('--browsers', type=Path, required=True)
     p.add_argument('--ffmpeg', type=Path, required=True)
     p.add_argument('--archive-only', action='store_true')
+    p.add_argument('--resume', action='store_true', help='Resume an incomplete staging directory')
     args = p.parse_args()
     output = args.output_dir.resolve()
     output.relative_to(ROOT / 'dist')
     bundle = output / 'ShuShengFull'
     if not args.archive_only:
-        if bundle.exists():
+        if bundle.exists() and (not args.resume or (bundle/'release-manifest.json').exists()):
             raise SystemExit('Use a new output folder; existing bundle will not be overwritten')
-        bundle.mkdir(parents=True)
+        bundle.mkdir(parents=True, exist_ok=True)
         tracked = subprocess.check_output(['git', 'ls-files', '-z'], cwd=ROOT).decode().split('\0')
         allowed_dirs = ('src/', 'workers/', 'resources/', 'package/', 'requirements/', 'docs/')
         allowed_files = {'app.py', 'config.yaml', '.env.example', 'requirements.txt',
+                         'requirements-f5.txt', 'requirements-kokoro.txt',
                          'tools/full_launcher.py', 'tools/check_full_runtime.py'}
         source_hashes = {}
         for rel in tracked:
@@ -101,6 +112,11 @@ def main():
         (bundle / '启动书声完整版.bat').write_text(
             '@echo off\r\ncd /d "%~dp0"\r\n"runtime\\python\\python.exe" "tools\\full_launcher.py" %*\r\n',
             encoding='utf-8')
+        subprocess.run([sys.executable, '-m', 'PyInstaller', '--noconfirm', '--onefile',
+                        '--console', '--name', 'ShuShengFull', '--icon', str(ROOT/'package/logo.ico'),
+                        '--distpath', str(bundle), '--workpath', str(ROOT/'build/full-launcher'),
+                        '--specpath', str(ROOT/'build'), str(ROOT/'tools/full_launcher.py')],
+                       cwd=ROOT, check=True)
         manifest = {'edition': 'full', 'version': __version__,
                     'source_commit': subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT).decode().strip(),
                     'source_hashes': source_hashes, 'python': '3.12.11',
