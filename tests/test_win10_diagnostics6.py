@@ -98,7 +98,9 @@ def test_pac_proxy_is_used_for_oauth_api_and_download_without_redirects(monkeypa
     factory = MagicMock(return_value=opener)
     monkeypatch.setattr(drive, 'build_opener', factory)
     assert drive.request(drive.TOKEN_URL, data={'grant_type': 'refresh_token'})['access_token'] == 'local'
-    assert factory.call_args.args == (drive.NoRedirect, handler)
+    assert factory.call_args.args[0] is drive.NoRedirect
+    assert isinstance(factory.call_args.args[1], drive.RequiredGoogleProxy)
+    assert factory.call_args.args[1].proxies == handler.proxies
     assert drive.request(drive.API_URL+'files/test?alt=media', token='fixture', stream=True) is response
     assert opener.open.call_args.args[0].headers['Authorization'] == 'Bearer fixture'
 

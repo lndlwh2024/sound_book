@@ -46,6 +46,8 @@ def self_check(directory):
     versions = {name: importlib.metadata.version(name) for name in ('PySide6', 'playwright')}
     from ..version import __version__
     versions['application'] = __version__
+    from .google_drive import required_proxy_self_check
+    checks['google_proxy_required'] = required_proxy_self_check()
     try:
         from .pac_compat import offline_self_check
         checks['pac_mixed_proxy_compatibility'] = offline_self_check()

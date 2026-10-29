@@ -310,5 +310,5 @@ def test_error_separates_google_request_stage_and_redacts_proxy_credentials(monk
                             (google_drive.API_URL+'files/SECRET?alt=media',True,'云盘文件下载')]:
         with pytest.raises(google_drive.DriveError) as error:
             google_drive.request(url,stream=stream,token='SECRET')
-        assert kind in str(error.value) and 'PAC选取HTTP代理 127.0.0.1:58591' in str(error.value)
+        assert kind in str(error.value) and '强制HTTP代理 127.0.0.1:58591' in str(error.value)
         assert 'SECRET' not in str(error.value) and 'user' not in str(error.value)

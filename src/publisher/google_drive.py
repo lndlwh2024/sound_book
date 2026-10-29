@@ -12,8 +12,8 @@ import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode, urlsplit, parse_qs, quote
-from urllib.request import Request, build_opener, HTTPRedirectHandler, getproxies, proxy_bypass
+from urllib.parse import urlencode, urlsplit, parse_qs, quote, unquote
+from urllib.request import Request, build_opener, HTTPRedirectHandler, getproxies, proxy_bypass, ProxyHandler, _parse_proxy
 from .windows_proxy import proxy_handlers, ProxyConfigurationError
 
 SCOPE = 'https://www.googleapis.com/auth/drive.readonly'
@@ -37,13 +37,62 @@ class NoRedirect(HTTPRedirectHandler):
         return None
 
 
+class RequiredGoogleProxy(ProxyHandler):
+    """Use the selected proxy even if global NO_PROXY/registry bypass disagrees."""
+    honors_system_bypass = False
+
+    def proxy_open(self, req, proxy, kind):
+        original_type = req.type
+        proxy_type, user, password, hostport = _parse_proxy(proxy)
+        proxy_type = proxy_type or original_type
+        if user is not None and password is not None:
+            credentials = f'{unquote(user)}:{unquote(password)}'.encode()
+            req.add_header('Proxy-authorization', 'Basic ' + base64.b64encode(credentials).decode('ascii'))
+        req.set_proxy(unquote(hostport), proxy_type)
+        if original_type == proxy_type or original_type == 'https':
+            return None
+        return self.parent.open(req, timeout=req.timeout)
+
+
+def required_google_proxy(url, handlers):
+    # Scope is the two fixed Google API hosts used by this read-only client.
+    # Domestic upload browser routing and unrelated HTTP clients stay separate.
+    parsed_url = urlsplit(url)
+    if parsed_url.hostname not in ('oauth2.googleapis.com', 'www.googleapis.com'):
+        return handlers
+    selected = (handlers[0].proxies if handlers else getproxies()).get(parsed_url.scheme, '')
+    if not selected:
+        raise ProxyConfigurationError('Google云盘要求强制代理，但当前路由选择为直连或没有代理；请求已停止，不会直连')
+    try:
+        address = selected if '://' in selected else 'http://' + selected
+        parsed = urlsplit(address)
+        if (parsed.scheme not in ('http', 'https') or not parsed.hostname or parsed.path not in ('', '/')
+                or parsed.query or parsed.fragment or parsed.port is not None and not 1 <= parsed.port <= 65535):
+            raise ValueError()
+    except (ValueError, TypeError):
+        raise ProxyConfigurationError('Google云盘要求可用的HTTP/HTTPS代理；当前代理配置不可用，请检查配置，不会直连') from None
+    return [RequiredGoogleProxy({parsed_url.scheme: address})]
+
+
+def required_proxy_self_check():
+    """Pure offline policy check; never consult user settings or open a socket."""
+    blocked = False
+    try:
+        required_google_proxy(TOKEN_URL, [ProxyHandler({})])
+    except ProxyConfigurationError:
+        blocked = True
+    handler = required_google_proxy(TOKEN_URL, [ProxyHandler({'https': 'http://127.0.0.1:58591'})])[0]
+    return blocked and isinstance(handler, RequiredGoogleProxy) and not handler.honors_system_bypass
+
+
 def _request_path(url, handlers, stream):
     kind = 'Google令牌请求' if url == TOKEN_URL else '云盘文件下载' if stream else '云盘目录/API请求'
     try:
         explicit = bool(handlers)
         proxies = handlers[0].proxies if explicit else getproxies()
         selected = proxies.get(urlsplit(url).scheme, '')
-        if selected and proxy_bypass(urlsplit(url).hostname):
+        honors_bypass = not handlers or getattr(handlers[0], 'honors_system_bypass', True)
+        if selected and honors_bypass and proxy_bypass(urlsplit(url).hostname):
             return kind + '；路径=系统绕过规则指定直连'
         if not selected:
             return kind + ('；路径=PAC明确直连' if explicit else '；路径=系统直连')
@@ -53,7 +102,8 @@ def _request_path(url, handlers, stream):
         if not host or any(c not in 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.:-' for c in host):
             return kind + '；路径=代理（地址已隐藏）'
         port = address.port or (443 if address.scheme == 'https' else 80)
-        return kind + ('；路径=PAC选取HTTP代理 ' if explicit else '；路径=系统/环境代理 ') + host + ':' + str(port)
+        prefix = '；路径=强制HTTP代理 ' if handlers and isinstance(handlers[0], RequiredGoogleProxy) else '；路径=PAC选取HTTP代理 ' if explicit else '；路径=系统/环境代理 '
+        return kind + prefix + host + ':' + str(port)
     except Exception:
         return kind + '；路径信息不可读取'
 
@@ -66,6 +116,7 @@ def request(url, *, data=None, token=None, stream=False):
     path = 'Google请求；代理选择尚未完成'
     try:
         handlers = proxy_handlers(url)
+        handlers = required_google_proxy(url, handlers)
         path = _request_path(url, handlers, stream)
         response = build_opener(NoRedirect, *handlers).open(Request(url, data=body, headers=headers), timeout=20)
         if stream:
