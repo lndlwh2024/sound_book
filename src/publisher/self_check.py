@@ -46,6 +46,12 @@ def self_check(directory):
     versions = {name: importlib.metadata.version(name) for name in ('PySide6', 'playwright')}
     from ..version import __version__
     versions['application'] = __version__
+    try:
+        from .pac_compat import offline_self_check
+        checks['pac_mixed_proxy_compatibility'] = offline_self_check()
+    except Exception as error:
+        checks['pac_mixed_proxy_compatibility'] = False
+        versions['pac_check_error_type'] = type(error).__name__
     ffprobe = shutil.which('ffprobe')
     try:
         result = subprocess.run([ffprobe or 'ffprobe', '-version'], capture_output=True,

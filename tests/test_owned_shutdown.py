@@ -8,6 +8,31 @@ import time
 from pathlib import Path
 
 import pytest
+
+
+def test_replacement_metadata_retries_transient_windows_sharing_violation(tmp_path,monkeypatch):
+    from PySide6.QtCore import QCoreApplication
+    from src.app.single_instance import SingleInstance
+    from src.publisher import portable
+    app=QCoreApplication.instance() or QCoreApplication([])
+    original=portable.atomic_write
+    attempts=[]
+    def sharing_violation(path,value):
+        if Path(path).name=='active-instance.json':
+            attempts.append(value['owner_nonce'])
+            if len(attempts)<3:
+                raise PermissionError('fixture sharing violation')
+        return original(path,value)
+    monkeypatch.setattr(portable,'atomic_write',sharing_violation)
+    (tmp_path/'active-instance.json').write_text('{"owner_nonce":"old-owner"}',encoding='utf-8')
+    guard=SingleInstance(tmp_path,lambda:None)
+    try:
+        assert guard.acquire()
+        actual=json.loads((tmp_path/'active-instance.json').read_text(encoding='utf-8'))
+        assert len(attempts)==3 and actual['owner_nonce']==guard.identity['owner_nonce']
+        assert actual['owner_nonce']!='old-owner'
+    finally:
+        guard.close()
 from src.publisher import owned_processes
 
 

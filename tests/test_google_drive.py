@@ -294,3 +294,21 @@ def test_transport_errors_explain_category_without_leaking_proxy_text(monkeypatc
     with pytest.raises(google_drive.DriveError) as error:
         google_drive.request('https://example.invalid/?access_token=secret')
     assert expected in str(error.value) and 'secret' not in str(error.value)
+
+
+def test_error_separates_google_request_stage_and_redacts_proxy_credentials(monkeypatch):
+    from unittest.mock import MagicMock
+    from urllib.request import ProxyHandler
+    from src.publisher import google_drive
+    opener=MagicMock()
+    opener.open.side_effect=TimeoutError('SECRET')
+    monkeypatch.setattr(google_drive,'build_opener',lambda *args:opener)
+    monkeypatch.setattr(google_drive,'proxy_bypass',lambda host:False)
+    monkeypatch.setattr(google_drive,'proxy_handlers',lambda url:[ProxyHandler({'https':'http://user:SECRET@127.0.0.1:58591'})])
+    for url,stream,kind in [(google_drive.TOKEN_URL,False,'Google令牌请求'),
+                            (google_drive.API_URL+'files?q=SECRET',False,'云盘目录/API请求'),
+                            (google_drive.API_URL+'files/SECRET?alt=media',True,'云盘文件下载')]:
+        with pytest.raises(google_drive.DriveError) as error:
+            google_drive.request(url,stream=stream,token='SECRET')
+        assert kind in str(error.value) and 'PAC选取HTTP代理 127.0.0.1:58591' in str(error.value)
+        assert 'SECRET' not in str(error.value) and 'user' not in str(error.value)

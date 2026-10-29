@@ -38,7 +38,7 @@ def _pac_url():
                 kernel.GlobalFree(pointer)
 
 
-def _resolve_pac(url, pac_url):
+def _resolve_pac_winhttp(url, pac_url):
     class Options(ctypes.Structure):
         _fields_ = [('flags', wintypes.DWORD), ('detect', wintypes.DWORD),
                     ('url', wintypes.LPCWSTR), ('reserved', ctypes.c_void_p),
@@ -84,6 +84,15 @@ def _resolve_pac(url, pac_url):
             if pointer:
                 kernel.GlobalFree(pointer)
         api.WinHttpCloseHandle(session)
+
+
+def _resolve_pac(url, pac_url):
+    from .pac_compat import compatible_pac, UNSUPPORTED
+    with compatible_pac(pac_url) as local_url:
+        selected = _resolve_pac_winhttp(url, local_url)
+    if UNSUPPORTED in selected:
+        raise ProxyConfigurationError('PAC未返回可用的HTTP代理或明确DIRECT；不把仅SOCKS代理误判为直连')
+    return selected
 
 
 def _proxy_address(value, scheme):

@@ -2,6 +2,7 @@
 import hashlib
 import json
 import secrets
+import time
 from pathlib import Path
 from PySide6.QtCore import QLockFile, QObject, QElapsedTimer
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
@@ -72,7 +73,17 @@ class SingleInstance(QObject):
             raise OSError('无法建立单实例通知通道')
         try:
             from ..publisher.portable import atomic_write
-            atomic_write(self.instance_path,self.identity)
+            # Windows readers/antivirus can briefly deny atomic replacement.
+            # Retaining the previous owner's nonce would break authenticated
+            # exit of a successfully started replacement instance.
+            for attempt in range(4):
+                try:
+                    atomic_write(self.instance_path,self.identity)
+                    break
+                except PermissionError:
+                    if attempt == 3:
+                        raise
+                    time.sleep(.05)
         except OSError:
             pass
         return True

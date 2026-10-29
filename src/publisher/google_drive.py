@@ -13,7 +13,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlsplit, parse_qs, quote
-from urllib.request import Request, build_opener, HTTPRedirectHandler
+from urllib.request import Request, build_opener, HTTPRedirectHandler, getproxies, proxy_bypass
 from .windows_proxy import proxy_handlers, ProxyConfigurationError
 
 SCOPE = 'https://www.googleapis.com/auth/drive.readonly'
@@ -37,13 +37,37 @@ class NoRedirect(HTTPRedirectHandler):
         return None
 
 
+def _request_path(url, handlers, stream):
+    kind = 'Google令牌请求' if url == TOKEN_URL else '云盘文件下载' if stream else '云盘目录/API请求'
+    try:
+        explicit = bool(handlers)
+        proxies = handlers[0].proxies if explicit else getproxies()
+        selected = proxies.get(urlsplit(url).scheme, '')
+        if selected and proxy_bypass(urlsplit(url).hostname):
+            return kind + '；路径=系统绕过规则指定直连'
+        if not selected:
+            return kind + ('；路径=PAC明确直连' if explicit else '；路径=系统直连')
+        address = urlsplit(selected if '://' in selected else 'http://' + selected)
+        host = address.hostname or ''
+        # Log host/port only; credentials, PAC URLs and query strings stay out.
+        if not host or any(c not in 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.:-' for c in host):
+            return kind + '；路径=代理（地址已隐藏）'
+        port = address.port or (443 if address.scheme == 'https' else 80)
+        return kind + ('；路径=PAC选取HTTP代理 ' if explicit else '；路径=系统/环境代理 ') + host + ':' + str(port)
+    except Exception:
+        return kind + '；路径信息不可读取'
+
+
 def request(url, *, data=None, token=None, stream=False):
     headers = {'Accept': 'application/json'}
     if token:
         headers['Authorization'] = 'Bearer ' + token
     body = urlencode(data).encode() if data is not None else None
+    path = 'Google请求；代理选择尚未完成'
     try:
-        response = build_opener(NoRedirect, *proxy_handlers(url)).open(Request(url, data=body, headers=headers), timeout=20)
+        handlers = proxy_handlers(url)
+        path = _request_path(url, handlers, stream)
+        response = build_opener(NoRedirect, *handlers).open(Request(url, data=body, headers=headers), timeout=20)
         if stream:
             return response
         with response:
@@ -53,7 +77,7 @@ def request(url, *, data=None, token=None, stream=False):
             raise DriveAuthRequired('Google授权已失效，请重新连接') from None
         if error.code == 400 and url == TOKEN_URL:
             raise DriveAuthRequired('Google授权不可用或已撤销，请重新连接') from None
-        raise DriveError(f'Google请求失败（HTTP {error.code}），请检查权限、网络与Drive API设置') from None
+        raise DriveError(f'Google请求失败（HTTP {error.code}），请检查权限、网络与Drive API设置；'+path) from None
     except ProxyConfigurationError as error:
         raise DriveError(str(error)+'；未据此判定授权失效') from None
     except (URLError, TimeoutError, OSError) as error:
@@ -74,7 +98,7 @@ def request(url, *, data=None, token=None, stream=False):
         if isinstance(code,int):
             detail += f'，错误码{code}'
         # Do not include arbitrary transport text containing proxy credentials or URLs.
-        raise DriveError('无法连接Google（'+detail+'），请检查网络后重试；未据此判定授权失效') from None
+        raise DriveError('无法连接Google（'+detail+'），请检查网络后重试；'+path+'；未据此判定授权失效') from None
 
 
 def _protect(data, decrypt=False):
